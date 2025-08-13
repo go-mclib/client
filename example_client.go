@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-mclib/protocol/auth"
+	mc_crypto "github.com/go-mclib/protocol/crypto"
 	jp "github.com/go-mclib/protocol/java_protocol"
 	"github.com/go-mclib/protocol/java_protocol/packets"
 	ns "github.com/go-mclib/protocol/net_structures"
@@ -42,6 +43,36 @@ func main() {
 func runOfflineMode(serverAddr, username string, verbose bool) {
 	log.Printf("Connecting to %s in offline mode as %s...\n", serverAddr, username)
 
+	loginData := auth.LoginData{
+		Username: username,
+		UUID:     mc_crypto.MinecraftSHA1(username),
+	}
+
+	runClient(serverAddr, verbose, loginData, nil)
+}
+
+func runOnlineMode(serverAddr string, verbose bool) {
+	log.Println("Setting up authentication...")
+
+	authClient := auth.NewClient(auth.AuthClientConfig{
+		ClientID: os.Getenv("AZURE_CLIENT_ID"),
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	loginData, err := authClient.Login(ctx)
+	if err != nil {
+		log.Fatalf("Authentication failed: %v", err)
+	}
+
+	log.Printf("Authenticated as %s (UUID: %s)\n", loginData.Username, loginData.UUID)
+
+	sessionClient := session_server.NewSessionServerClient()
+	runClient(serverAddr, verbose, loginData, sessionClient)
+}
+
+func runClient(serverAddr string, verbose bool, loginData auth.LoginData, sessionClient *session_server.SessionServerClient) {
 	client := jp.NewTCPClient()
 	client.EnableDebug(verbose)
 
@@ -75,100 +106,10 @@ func runOfflineMode(serverAddr, username string, verbose bool) {
 	client.SetState(currentState)
 	log.Println("Handshake sent! Starting login...")
 
-	loginStartPacket, err := packets.C2SHelloPacket.WithData(packets.C2SHelloPacketData{
-		Name:       ns.String(username),
-		PlayerUUID: ns.UUID{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-	})
-	if err != nil {
-		log.Fatalf("Failed to build login start: %v", err)
-	}
-
-	if err := client.WritePacket(loginStartPacket); err != nil {
-		log.Fatalf("Failed to send login start: %v", err)
-	}
-
-	log.Println("Login start sent! Waiting for server response...")
-
-	for {
-		packet, err := client.ReadPacket()
-		if err != nil {
-			log.Printf("Error reading packet: %v", err)
-			break
-		}
-
-		log.Printf("Received packet: ID=0x%02X, Current State=%v", packet.PacketID, currentState)
-
-		switch currentState {
-		case jp.StateLogin:
-			handleLoginPacket(client, packet)
-			if packet.PacketID == 0x02 {
-				currentState = jp.StateConfiguration
-			}
-		case jp.StateConfiguration:
-			handleConfigurationPacket(client, packet)
-			if packet.PacketID == 0x03 {
-				currentState = jp.StatePlay
-			}
-		case jp.StatePlay:
-			handlePlayPacket(client, packet)
-		}
-	}
-}
-
-func runOnlineMode(serverAddr string, verbose bool) {
-	log.Println("Setting up authentication...")
-
-	authClient := auth.NewClient(auth.AuthClientConfig{
-		ClientID: os.Getenv("AZURE_CLIENT_ID"),
-	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-
-	loginData, err := authClient.Login(ctx)
-	if err != nil {
-		log.Fatalf("Authentication failed: %v", err)
-	}
-
-	log.Printf("Authenticated as %s (UUID: %s)\n", loginData.Username, loginData.UUID)
-
-	client := jp.NewTCPClient()
-	client.EnableDebug(verbose)
-
-	host, port := splitHostPort(serverAddr)
-
-	err = client.Connect(fmt.Sprintf("%s:%d", host, port))
-	if err != nil {
-		log.Fatalf("Failed to connect: %v", err)
-	}
-	defer client.Close()
-
-	log.Println("Connected! Sending handshake...")
-
-	currentState := jp.StateHandshake
-
-	handshakePacket, err := packets.C2SIntentionPacket.WithData(packets.C2SIntentionPacketData{
-		ProtocolVersion: protocolVersion,
-		ServerAddress:   ns.String(host),
-		ServerPort:      ns.UnsignedShort(port),
-		Intent:          packets.IntentLogin,
-	})
-	if err != nil {
-		log.Fatalf("Failed to build handshake: %v", err)
-	}
-
-	if err := client.WritePacket(handshakePacket); err != nil {
-		log.Fatalf("Failed to send handshake: %v", err)
-	}
-
-	currentState = jp.StateLogin
-	client.SetState(currentState)
-	log.Println("Handshake sent! Starting login...")
-
-	uuidBytes, _ := parseUUID(loginData.UUID)
+	uuid, _ := ns.NewUUID(loginData.UUID)
 	loginStartPacket, err := packets.C2SHelloPacket.WithData(packets.C2SHelloPacketData{
 		Name:       ns.String(loginData.Username),
-		PlayerUUID: uuidBytes,
+		PlayerUUID: uuid,
 	})
 	if err != nil {
 		log.Fatalf("Failed to build login start: %v", err)
@@ -179,8 +120,6 @@ func runOnlineMode(serverAddr string, verbose bool) {
 	}
 
 	log.Println("Login start sent! Waiting for server response...")
-
-	sessionClient := session_server.NewSessionServerClient()
 
 	for {
 		packet, err := client.ReadPacket()
@@ -193,7 +132,7 @@ func runOnlineMode(serverAddr string, verbose bool) {
 
 		switch currentState {
 		case jp.StateLogin:
-			if packet.PacketID == 0x01 {
+			if packet.PacketID == 0x01 && sessionClient != nil {
 				handleEncryptionRequest(client, packet, &loginData, sessionClient)
 			} else {
 				handleLoginPacket(client, packet)
@@ -215,16 +154,36 @@ func runOnlineMode(serverAddr string, verbose bool) {
 func handleEncryptionRequest(client *jp.TCPClient, packet *jp.Packet, loginData *auth.LoginData, sessionClient *session_server.SessionServerClient) {
 	log.Println("Received encryption request")
 
-	data := []byte(packet.Data)
-	reader := bytes.NewReader(data)
+	data := ns.ByteArray(packet.Data)
+	offset := 0
 
-	serverID, _ := readString(reader)
-	publicKeyLength, _ := readVarInt(reader)
+	var serverID ns.String
+	n, err := serverID.FromBytes(data[offset:])
+	if err != nil {
+		log.Fatalf("Failed to read server ID: %v", err)
+	}
+	offset += n
+
+	var publicKeyLength ns.VarInt
+	n, err = publicKeyLength.FromBytes(data[offset:])
+	if err != nil {
+		log.Fatalf("Failed to read public key length: %v", err)
+	}
+	offset += n
+
 	publicKey := make([]byte, publicKeyLength)
-	reader.Read(publicKey)
-	verifyTokenLength, _ := readVarInt(reader)
+	copy(publicKey, data[offset:offset+int(publicKeyLength)])
+	offset += int(publicKeyLength)
+
+	var verifyTokenLength ns.VarInt
+	n, err = verifyTokenLength.FromBytes(data[offset:])
+	if err != nil {
+		log.Fatalf("Failed to read verify token length: %v", err)
+	}
+	offset += n
+
 	verifyToken := make([]byte, verifyTokenLength)
-	reader.Read(verifyToken)
+	copy(verifyToken, data[offset:offset+int(verifyTokenLength)])
 
 	encryption := client.GetEncryption()
 	sharedSecret, err := encryption.GenerateSharedSecret()
@@ -270,19 +229,13 @@ func handleEncryptionRequest(client *jp.TCPClient, packet *jp.Packet, loginData 
 func handleLoginPacket(client *jp.TCPClient, packet *jp.Packet) {
 	switch packet.PacketID {
 	case 0x00:
-		data := []byte(packet.Data)
-		reason, err := func() (string, error) {
-			reader := bytes.NewReader(data)
-			s, err := readString(reader)
-			if err != nil {
-				return "", err
-			}
-			return string(s), nil
-		}()
+		data := ns.ByteArray(packet.Data)
+		var reason ns.String
+		_, err := reason.FromBytes(data)
 		if err != nil {
 			log.Printf("Disconnected during login (failed to parse reason): %v", err)
 		} else {
-			log.Printf("Disconnected during login. Reason: %s", reason)
+			log.Printf("Disconnected during login. Reason: %s", string(reason))
 		}
 		os.Exit(0)
 	case 0x02:
@@ -298,11 +251,15 @@ func handleLoginPacket(client *jp.TCPClient, packet *jp.Packet) {
 		sendBrandPluginMessage(client, "vanilla")
 		sendClientInformation(client)
 	case 0x03:
-		data := []byte(packet.Data)
-		reader := bytes.NewReader(data)
-		threshold, _ := readVarInt(reader)
-		log.Printf("Compression enabled with threshold: %d", threshold)
-		client.SetCompressionThreshold(int(threshold))
+		data := ns.ByteArray(packet.Data)
+		var threshold ns.VarInt
+		_, err := threshold.FromBytes(data)
+		if err != nil {
+			log.Printf("Failed to read compression threshold: %v", err)
+		} else {
+			log.Printf("Compression enabled with threshold: %d", threshold)
+			client.SetCompressionThreshold(int(threshold))
+		}
 	case 0x04:
 		log.Println("Received login plugin request")
 	}
@@ -330,25 +287,20 @@ func handleConfigurationPacket(client *jp.TCPClient, packet *jp.Packet) {
 		client.SetState(jp.StatePlay)
 		log.Println("Entered play state!")
 	case 0x04:
-		data := []byte(packet.Data)
-		if len(data) >= 8 {
-			var id ns.Long
-			_, err := id.FromBytes(ns.ByteArray(data))
-			if err != nil {
-				log.Printf("Failed to parse KeepAlive ID: %v", err)
-				return
-			}
-			keepAlive, err := packets.C2SKeepAliveConfigurationPacket.WithData(packets.C2SKeepAliveConfigurationPacketData{KeepAliveID: id})
-			if err != nil {
-				log.Printf("Failed to build KeepAlive response: %v", err)
-				return
-			}
-			if err := client.WritePacket(keepAlive); err != nil {
-				log.Printf("Failed to send KeepAlive response: %v", err)
-			}
+		var keepAliveData packets.S2CKeepAliveConfigurationPacketData
+		if err := jp.BytesToPacketData(packet.Data, &keepAliveData); err != nil {
+			log.Printf("Failed to parse KeepAlive ID: %v", err)
+			return
+		}
+		keepAlive, err := packets.C2SKeepAliveConfigurationPacket.WithData(packets.C2SKeepAliveConfigurationPacketData{KeepAliveID: keepAliveData.ID})
+		if err != nil {
+			log.Printf("Failed to build KeepAlive response: %v", err)
+			return
+		}
+		if err := client.WritePacket(keepAlive); err != nil {
+			log.Printf("Failed to send KeepAlive response: %v", err)
 		}
 	case 0x0E:
-		_ = parseKnownPacks
 		reply, err := packets.C2SSelectKnownPacksPacket.WithData(packets.C2SSelectKnownPacksPacketData{})
 		if err != nil {
 			log.Printf("Failed to build Known Packs: %v", err)
@@ -396,72 +348,6 @@ func handlePlayPacket(client *jp.TCPClient, packet *jp.Packet) {
 	}
 }
 
-func readVarInt(reader *bytes.Reader) (ns.VarInt, error) {
-	var value int32
-	var position int
-	var currentByte byte
-
-	for {
-		b, err := reader.ReadByte()
-		if err != nil {
-			return 0, err
-		}
-
-		currentByte = b
-		value |= (int32(currentByte) & 0x7F) << position
-
-		if (currentByte & 0x80) == 0 {
-			break
-		}
-
-		position += 7
-
-		if position >= 32 {
-			return 0, fmt.Errorf("VarInt is too big")
-		}
-	}
-
-	return ns.VarInt(value), nil
-}
-
-func readString(reader *bytes.Reader) (ns.String, error) {
-	length, err := readVarInt(reader)
-	if err != nil {
-		return "", err
-	}
-
-	data := make([]byte, length)
-	_, err = reader.Read(data)
-	if err != nil {
-		return "", err
-	}
-
-	return ns.String(data), nil
-}
-
-func parseUUID(uuid string) (ns.UUID, error) {
-	var result ns.UUID
-
-	cleaned := ""
-	for _, c := range uuid {
-		if c != '-' {
-			cleaned += string(c)
-		}
-	}
-
-	if len(cleaned) != 32 {
-		return result, fmt.Errorf("invalid UUID length")
-	}
-
-	for i := 0; i < 16; i++ {
-		var b byte
-		fmt.Sscanf(cleaned[i*2:i*2+2], "%02x", &b)
-		result[i] = b
-	}
-
-	return result, nil
-}
-
 func sendClientInformation(client *jp.TCPClient) {
 	info := packets.C2SClientInformationPacketData{
 		Locale:              ns.String("en_us"),
@@ -502,35 +388,6 @@ func sendBrandPluginMessage(client *jp.TCPClient, brand string) {
 	}
 }
 
-func parseKnownPacks(data []byte) []packets.KnownPack {
-	r := bytes.NewReader(data)
-	count, err := readVarInt(r)
-	if err != nil || int(count) < 0 {
-		return nil
-	}
-	packs := make([]packets.KnownPack, 0, int(count))
-	for i := 0; i < int(count); i++ {
-		nsStr, err := readString(r)
-		if err != nil {
-			break
-		}
-		idStr, err := readString(r)
-		if err != nil {
-			break
-		}
-		verStr, err := readString(r)
-		if err != nil {
-			break
-		}
-		packs = append(packs, packets.KnownPack{
-			Namespace: nsStr,
-			ID:        idStr,
-			Version:   verStr,
-		})
-	}
-	return packs
-}
-
 // parseDisconnectReason attempts to extract a human-readable text from either
 // a JSON Text Component (String) or an NBT-based text component payload.
 func parseDisconnectReason(data []byte) string {
@@ -538,15 +395,9 @@ func parseDisconnectReason(data []byte) string {
 		return v
 	}
 
-	if s, err := func() (string, error) {
-		r := bytes.NewReader(data)
-		str, err := readString(r)
-		if err != nil {
-			return "", err
-		}
-		return string(str), nil
-	}(); err == nil {
-		txt := s
+	var str ns.String
+	if _, err := str.FromBytes(ns.ByteArray(data)); err == nil {
+		txt := string(str)
 		if len(txt) > 0 && (txt[0] == '{' || txt[0] == '[' || txt[0] == '"') {
 			var m map[string]any
 			if json.Unmarshal([]byte(txt), &m) == nil {
