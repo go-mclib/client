@@ -1,0 +1,9 @@
+.env*
+.DS_Store
+
+mclib-credentials.txt
+
+# tests
+integration_tests/*.jar
+integration_tests/*/
+!integration_tests/*/server.properties
