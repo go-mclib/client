@@ -11,10 +11,10 @@ import (
 	"os"
 	"time"
 
+	packets "github.com/go-mclib/data/go/772/java_packets"
 	"github.com/go-mclib/protocol/auth"
 	mc_crypto "github.com/go-mclib/protocol/crypto"
 	jp "github.com/go-mclib/protocol/java_protocol"
-	"github.com/go-mclib/protocol/java_protocol/packets"
 	ns "github.com/go-mclib/protocol/net_structures"
 	"github.com/go-mclib/protocol/session_server"
 )
@@ -88,7 +88,7 @@ func runClient(serverAddr string, verbose bool, loginData auth.LoginData, sessio
 
 	currentState := jp.StateHandshake
 
-	handshakePacket, err := packets.C2SIntentionPacket.WithData(packets.C2SIntentionPacketData{
+	handshakePacket, err := packets.C2SIntention.WithData(packets.C2SIntentionData{
 		ProtocolVersion: protocolVersion,
 		ServerAddress:   ns.String(host),
 		ServerPort:      ns.UnsignedShort(port),
@@ -107,9 +107,9 @@ func runClient(serverAddr string, verbose bool, loginData auth.LoginData, sessio
 	log.Println("Handshake sent! Starting login...")
 
 	uuid, _ := ns.NewUUID(loginData.UUID)
-	loginStartPacket, err := packets.C2SHelloPacket.WithData(packets.C2SHelloPacketData{
+	loginStartPacket, err := packets.C2SHello.WithData(packets.C2SHelloData{
 		Name:       ns.String(loginData.Username),
-		PlayerUUID: uuid,
+		PlayerUuid: uuid,
 	})
 	if err != nil {
 		log.Fatalf("Failed to build login start: %v", err)
@@ -206,7 +206,7 @@ func handleEncryptionRequest(client *jp.TCPClient, packet *jp.Packet, loginData 
 		log.Printf("Warning: Session server authentication failed: %v", err)
 	}
 
-	encryptionResponse, err := packets.C2SKeyPacket.WithData(packets.C2SKeyPacketData{
+	encryptionResponse, err := packets.C2SKey.WithData(packets.C2SKeyData{
 		SharedSecret: ns.PrefixedByteArray(encryptedSharedSecret),
 		VerifyToken:  ns.PrefixedByteArray(encryptedVerifyToken),
 	})
@@ -241,7 +241,7 @@ func handleLoginPacket(client *jp.TCPClient, packet *jp.Packet) {
 	case 0x02:
 		log.Println("Login successful!")
 
-		if err := client.WritePacket(packets.C2SLoginAcknowledgedPacket); err != nil {
+		if err := client.WritePacket(packets.C2SLoginAcknowledged); err != nil {
 			log.Printf("Failed to send login acknowledged: %v", err)
 		}
 
@@ -275,24 +275,21 @@ func handleConfigurationPacket(client *jp.TCPClient, packet *jp.Packet) {
 	case 0x03:
 		log.Println("Configuration finished, acknowledging...")
 
-		ackPacket, err := packets.C2SFinishConfigurationPacket.WithData(struct{}{})
-		if err != nil {
-			log.Printf("Failed to build configuration acknowledgment: %v", err)
-		}
-
-		if err := client.WritePacket(ackPacket); err != nil {
+		if err := client.WritePacket(packets.C2SFinishConfiguration); err != nil {
 			log.Printf("Failed to send configuration acknowledgment: %v", err)
 		}
 
 		client.SetState(jp.StatePlay)
 		log.Println("Entered play state!")
 	case 0x04:
-		var keepAliveData packets.S2CKeepAliveConfigurationPacketData
+		var keepAliveData packets.S2CKeepAliveConfigurationData
 		if err := jp.BytesToPacketData(packet.Data, &keepAliveData); err != nil {
 			log.Printf("Failed to parse KeepAlive ID: %v", err)
 			return
 		}
-		keepAlive, err := packets.C2SKeepAliveConfigurationPacket.WithData(packets.C2SKeepAliveConfigurationPacketData{KeepAliveID: keepAliveData.ID})
+		keepAlive, err := packets.C2SKeepAliveConfiguration.WithData(packets.C2SKeepAliveConfigurationData{
+			KeepAliveId: keepAliveData.KeepAliveId,
+		})
 		if err != nil {
 			log.Printf("Failed to build KeepAlive response: %v", err)
 			return
@@ -301,7 +298,9 @@ func handleConfigurationPacket(client *jp.TCPClient, packet *jp.Packet) {
 			log.Printf("Failed to send KeepAlive response: %v", err)
 		}
 	case 0x0E:
-		reply, err := packets.C2SSelectKnownPacksPacket.WithData(packets.C2SSelectKnownPacksPacketData{})
+		// TODO: fix PrefixedArray[ns.String]
+		// this works, but I am not sure how
+		reply, err := packets.C2SSelectKnownPacks.WithData(packets.C2SSelectKnownPacksData{})
 		if err != nil {
 			log.Printf("Failed to build Known Packs: %v", err)
 		}
@@ -318,7 +317,7 @@ func handlePlayPacket(client *jp.TCPClient, packet *jp.Packet) {
 	case 0x40:
 		log.Println("Received player position packet")
 
-		teleportConfirm, err := packets.C2STeleportConfirmPacket.WithData(packets.C2STeleportConfirmPacketData{TeleportID: 0})
+		teleportConfirm, err := packets.C2SAcceptTeleportation.WithData(packets.C2SAcceptTeleportationData{TeleportId: 0})
 		if err != nil {
 			log.Printf("Failed to build teleport confirmation: %v", err)
 			return
@@ -330,13 +329,15 @@ func handlePlayPacket(client *jp.TCPClient, packet *jp.Packet) {
 	case 0x26:
 		log.Println("Received keep alive packet")
 
-		var keepAliveData packets.S2CKeepAlivePlayPacketData
+		var keepAliveData packets.S2CKeepAlivePlayData
 		if err := jp.BytesToPacketData(packet.Data, &keepAliveData); err != nil {
 			log.Printf("Failed to read keep alive data: %v", err)
 			return
 		}
 
-		keepAlive, err := packets.C2SKeepAlivePlayPacket.WithData(packets.C2SKeepAlivePlayPacketData{KeepAliveID: keepAliveData.KeepAliveID})
+		keepAlive, err := packets.C2SKeepAlivePlay.WithData(packets.C2SKeepAlivePlayData{
+			KeepAliveId: keepAliveData.KeepAliveId,
+		})
 		if err != nil {
 			log.Printf("Failed to build keep alive: %v", err)
 		}
@@ -349,7 +350,7 @@ func handlePlayPacket(client *jp.TCPClient, packet *jp.Packet) {
 }
 
 func sendClientInformation(client *jp.TCPClient) {
-	info := packets.C2SClientInformationPacketData{
+	info := packets.C2SClientInformationConfigurationData{
 		Locale:              ns.String("en_us"),
 		ViewDistance:        ns.Byte(12),
 		ChatMode:            ns.VarInt(0),
@@ -358,8 +359,9 @@ func sendClientInformation(client *jp.TCPClient) {
 		MainHand:            ns.VarInt(1),
 		EnableTextFiltering: ns.Boolean(true),
 		AllowServerListings: ns.Boolean(true),
+		ParticleStatus:      ns.VarInt(2),
 	}
-	pkt, err := packets.C2SClientInformationPacket.WithData(info)
+	pkt, err := packets.C2SClientInformationConfiguration.WithData(info)
 	if err != nil {
 		log.Printf("Failed to build Client Information: %v", err)
 		return
@@ -375,7 +377,7 @@ func sendBrandPluginMessage(client *jp.TCPClient, brand string) {
 		log.Printf("Failed to build brand payload: %v", err)
 		return
 	}
-	pkt, err := packets.C2SCustomPayloadPacket.WithData(packets.C2SCustomPayloadPacketData{
+	pkt, err := packets.C2SCustomPayloadConfiguration.WithData(packets.C2SCustomPayloadConfigurationData{
 		Channel: ns.Identifier("minecraft:brand"),
 		Data:    ns.ByteArray(dataBytes),
 	})
