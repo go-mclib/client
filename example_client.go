@@ -3,14 +3,23 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
+	"encoding/pem"
 	"flag"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"time"
 
+	"github.com/go-mclib/client/chat"
+	"github.com/go-mclib/client/memory"
 	packets "github.com/go-mclib/data/go/772/java_packets"
 	"github.com/go-mclib/protocol/auth"
 	mc_crypto "github.com/go-mclib/protocol/crypto"
@@ -20,6 +29,24 @@ import (
 )
 
 const protocolVersion = 772 // 1.21.8
+
+var (
+	chatSigner *chat.ChatSigner
+	chatStore  *memory.ChatChainStore
+)
+
+type MojangKeyPair struct {
+	PrivateKey string `json:"privateKey"`
+	PublicKey  string `json:"publicKey"`
+}
+
+type MojangCertificate struct {
+	ExpiresAt            string        `json:"expiresAt"`
+	KeyPair              MojangKeyPair `json:"keyPair"`
+	PublicKeySignature   string        `json:"publicKeySignature"`
+	PublicKeySignatureV2 string        `json:"publicKeySignatureV2"`
+	RefreshedAfter       string        `json:"refreshedAfter"`
+}
 
 func main() {
 	var serverAddr string
@@ -33,7 +60,7 @@ func main() {
 
 	offlineMode := username != ""
 	if !offlineMode {
-		log.Println("Online mode requires authentication setup. Use -offline flag for testing.")
+		log.Println("Online mode - authenticating...")
 		runOnlineMode(serverAddr, verbose)
 	} else {
 		runOfflineMode(serverAddr, username, verbose)
@@ -49,6 +76,34 @@ func runOfflineMode(serverAddr, username string, verbose bool) {
 	}
 
 	runClient(serverAddr, verbose, loginData, nil)
+}
+
+func fetchMojangCertificate(accessToken string) (*MojangCertificate, error) {
+	req, err := http.NewRequest("POST", "https://api.minecraftservices.com/player/certificates", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch certificate: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("certificate request failed with status %d", resp.StatusCode)
+	}
+
+	var cert MojangCertificate
+	if err := json.NewDecoder(resp.Body).Decode(&cert); err != nil {
+		return nil, fmt.Errorf("failed to parse certificate response: %w", err)
+	}
+
+	return &cert, nil
 }
 
 func runOnlineMode(serverAddr string, verbose bool) {
@@ -68,8 +123,104 @@ func runOnlineMode(serverAddr string, verbose bool) {
 
 	log.Printf("Authenticated as %s (UUID: %s)\n", loginData.Username, loginData.UUID)
 
+	// Fetch Mojang signing certificate
+	log.Println("Fetching Mojang signing certificate...")
+	cert, err := fetchMojangCertificate(loginData.AccessToken)
+	if err != nil {
+		log.Fatalf("Failed to fetch Mojang certificate: %v", err)
+	}
+
+	// Parse the RSA keys from PEM format
+	privateKey, err := parseRSAPrivateKey(cert.KeyPair.PrivateKey)
+	if err != nil {
+		log.Fatalf("Failed to parse private key: %v", err)
+	}
+
+	publicKey, err := parseRSAPublicKey(cert.KeyPair.PublicKey)
+	if err != nil {
+		log.Fatalf("Failed to parse public key: %v", err)
+	}
+
+	// Parse certificate expiry time
+	expiryTime, err := time.Parse(time.RFC3339Nano, cert.ExpiresAt)
+	if err != nil {
+		log.Fatalf("Failed to parse certificate expiry time: %v", err)
+	}
+
+	// Initialize chat signing system
+	chatStore = memory.NewChatChainStore()
+	chatSigner = chat.NewChatSigner(chatStore)
+	chatSigner.SetKeys(privateKey, publicKey)
+
+	// Set player UUID
+	playerUUID, err := ns.NewUUID(loginData.UUID)
+	if err != nil {
+		log.Fatalf("Failed to parse player UUID: %v", err)
+	}
+	chatStore.SetPlayerUUID(playerUUID)
+	chatStore.AddPlayerKey(playerUUID, publicKey)
+
+	// Store public key in SPKI DER format as required by protocol
+	block, _ := pem.Decode([]byte(cert.KeyPair.PublicKey))
+	if block != nil {
+		// Convert to proper SPKI DER format
+		if rsaPubKey, err := x509.ParsePKIXPublicKey(block.Bytes); err == nil {
+			if rsaKey, ok := rsaPubKey.(*rsa.PublicKey); ok {
+				properSpkiBytes, err := x509.MarshalPKIXPublicKey(rsaKey)
+				if err == nil {
+					chatStore.SetX509PublicKey(properSpkiBytes)
+				}
+			}
+		}
+	}
+
+	// Store Mojang signature V2 (512 bytes)
+	mojangSigBytes, err := base64.StdEncoding.DecodeString(cert.PublicKeySignatureV2)
+	if err != nil {
+		log.Fatalf("Failed to decode Mojang signature: %v", err)
+	}
+	chatStore.SetSessionKey(mojangSigBytes)
+	chatStore.SetKeyExpiry(expiryTime)
+
 	sessionClient := session_server.NewSessionServerClient()
 	runClient(serverAddr, verbose, loginData, sessionClient)
+}
+
+func parseRSAPrivateKey(privateKeyPEM string) (*rsa.PrivateKey, error) {
+	block, _ := pem.Decode([]byte(privateKeyPEM))
+	if block == nil {
+		return nil, fmt.Errorf("failed to decode PEM block containing private key")
+	}
+
+	// Try PKCS8 format first (modern format used by Mojang)
+	privateKey, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err == nil {
+		rsaPrivateKey, ok := privateKey.(*rsa.PrivateKey)
+		if !ok {
+			return nil, fmt.Errorf("private key is not RSA")
+		}
+		return rsaPrivateKey, nil
+	}
+
+	// Fallback to PKCS1 format
+	return x509.ParsePKCS1PrivateKey(block.Bytes)
+}
+
+func parseRSAPublicKey(publicKeyPEM string) (*rsa.PublicKey, error) {
+	block, _ := pem.Decode([]byte(publicKeyPEM))
+	if block == nil {
+		return nil, fmt.Errorf("failed to decode PEM block containing public key")
+	}
+
+	// Try parsing as PKIX first (X.509)
+	if publicKey, err := x509.ParsePKIXPublicKey(block.Bytes); err == nil {
+		if rsaPublicKey, ok := publicKey.(*rsa.PublicKey); ok {
+			return rsaPublicKey, nil
+		}
+	}
+
+	// Try parsing as PKCS#1
+	return x509.ParsePKCS1PublicKey(block.Bytes)
 }
 
 func runClient(serverAddr string, verbose bool, loginData auth.LoginData, sessionClient *session_server.SessionServerClient) {
@@ -88,6 +239,7 @@ func runClient(serverAddr string, verbose bool, loginData auth.LoginData, sessio
 
 	currentState := jp.StateHandshake
 
+	// Send handshake packet
 	handshakePacket, err := packets.C2SIntention.WithData(packets.C2SIntentionData{
 		ProtocolVersion: protocolVersion,
 		ServerAddress:   ns.String(host),
@@ -102,10 +254,12 @@ func runClient(serverAddr string, verbose bool, loginData auth.LoginData, sessio
 		log.Fatalf("Failed to send handshake: %v", err)
 	}
 
+	// Transition to login state
 	currentState = jp.StateLogin
 	client.SetState(currentState)
-	log.Println("Handshake sent! Starting login...")
+	log.Println("Starting login...")
 
+	// Send login start packet
 	uuid, _ := ns.NewUUID(loginData.UUID)
 	loginStartPacket, err := packets.C2SHello.WithData(packets.C2SHelloData{
 		Name:       ns.String(loginData.Username),
@@ -119,8 +273,9 @@ func runClient(serverAddr string, verbose bool, loginData auth.LoginData, sessio
 		log.Fatalf("Failed to send login start: %v", err)
 	}
 
-	log.Println("Login start sent! Waiting for server response...")
+	log.Println("Login start sent! Processing packets...")
 
+	// Main packet loop
 	for {
 		packet, err := client.ReadPacket()
 		if err != nil {
@@ -128,21 +283,19 @@ func runClient(serverAddr string, verbose bool, loginData auth.LoginData, sessio
 			break
 		}
 
-		// log.Printf("Received packet: ID=0x%02X, Current State=%v", packet.PacketID, currentState)
-
 		switch currentState {
 		case jp.StateLogin:
-			if packet.PacketID == 0x01 && sessionClient != nil {
+			if packet.PacketID == packets.S2CHello.PacketID && sessionClient != nil {
 				handleEncryptionRequest(client, packet, &loginData, sessionClient)
 			} else {
 				handleLoginPacket(client, packet)
-				if packet.PacketID == 0x02 {
+				if packet.PacketID == packets.S2CLoginFinished.PacketID {
 					currentState = jp.StateConfiguration
 				}
 			}
 		case jp.StateConfiguration:
 			handleConfigurationPacket(client, packet)
-			if packet.PacketID == 0x03 {
+			if packet.PacketID == packets.S2CLoginCompression.PacketID {
 				currentState = jp.StatePlay
 			}
 		case jp.StatePlay:
@@ -157,6 +310,7 @@ func handleEncryptionRequest(client *jp.TCPClient, packet *jp.Packet, loginData 
 	data := ns.ByteArray(packet.Data)
 	offset := 0
 
+	// Parse server ID
 	var serverID ns.String
 	n, err := serverID.FromBytes(data[offset:])
 	if err != nil {
@@ -164,6 +318,7 @@ func handleEncryptionRequest(client *jp.TCPClient, packet *jp.Packet, loginData 
 	}
 	offset += n
 
+	// Parse public key
 	var publicKeyLength ns.VarInt
 	n, err = publicKeyLength.FromBytes(data[offset:])
 	if err != nil {
@@ -175,6 +330,7 @@ func handleEncryptionRequest(client *jp.TCPClient, packet *jp.Packet, loginData 
 	copy(publicKey, data[offset:offset+int(publicKeyLength)])
 	offset += int(publicKeyLength)
 
+	// Parse verify token
 	var verifyTokenLength ns.VarInt
 	n, err = verifyTokenLength.FromBytes(data[offset:])
 	if err != nil {
@@ -185,6 +341,7 @@ func handleEncryptionRequest(client *jp.TCPClient, packet *jp.Packet, loginData 
 	verifyToken := make([]byte, verifyTokenLength)
 	copy(verifyToken, data[offset:offset+int(verifyTokenLength)])
 
+	// Generate and encrypt shared secret
 	encryption := client.GetEncryption()
 	sharedSecret, err := encryption.GenerateSharedSecret()
 	if err != nil {
@@ -201,11 +358,13 @@ func handleEncryptionRequest(client *jp.TCPClient, packet *jp.Packet, loginData 
 		log.Fatalf("Failed to encrypt verify token: %v", err)
 	}
 
+	// Authenticate with Mojang session server
 	err = sessionClient.Join(loginData.AccessToken, loginData.UUID, string(serverID), sharedSecret, publicKey)
 	if err != nil {
 		log.Printf("Warning: Session server authentication failed: %v", err)
 	}
 
+	// Send encryption response
 	encryptionResponse, err := packets.C2SKey.WithData(packets.C2SKeyData{
 		SharedSecret: ns.PrefixedByteArray(encryptedSharedSecret),
 		VerifyToken:  ns.PrefixedByteArray(encryptedVerifyToken),
@@ -218,6 +377,7 @@ func handleEncryptionRequest(client *jp.TCPClient, packet *jp.Packet, loginData 
 		log.Fatalf("Failed to send encryption response: %v", err)
 	}
 
+	// Enable encryption
 	err = encryption.EnableEncryption()
 	if err != nil {
 		log.Fatalf("Failed to enable encryption: %v", err)
@@ -228,7 +388,7 @@ func handleEncryptionRequest(client *jp.TCPClient, packet *jp.Packet, loginData 
 
 func handleLoginPacket(client *jp.TCPClient, packet *jp.Packet) {
 	switch packet.PacketID {
-	case 0x00:
+	case packets.S2CLoginDisconnectLogin.PacketID:
 		data := ns.ByteArray(packet.Data)
 		var reason ns.String
 		_, err := reason.FromBytes(data)
@@ -238,7 +398,7 @@ func handleLoginPacket(client *jp.TCPClient, packet *jp.Packet) {
 			log.Printf("Disconnected during login. Reason: %s", string(reason))
 		}
 		os.Exit(0)
-	case 0x02:
+	case packets.S2CLoginFinished.PacketID:
 		log.Println("Login successful!")
 
 		if err := client.WritePacket(packets.C2SLoginAcknowledged); err != nil {
@@ -250,7 +410,7 @@ func handleLoginPacket(client *jp.TCPClient, packet *jp.Packet) {
 
 		sendBrandPluginMessage(client, "vanilla")
 		sendClientInformation(client)
-	case 0x03:
+	case packets.S2CLoginCompression.PacketID:
 		data := ns.ByteArray(packet.Data)
 		var threshold ns.VarInt
 		_, err := threshold.FromBytes(data)
@@ -260,19 +420,17 @@ func handleLoginPacket(client *jp.TCPClient, packet *jp.Packet) {
 			log.Printf("Compression enabled with threshold: %d", threshold)
 			client.SetCompressionThreshold(int(threshold))
 		}
-	case 0x04:
-		log.Println("Received login plugin request")
 	}
 }
 
 func handleConfigurationPacket(client *jp.TCPClient, packet *jp.Packet) {
 	switch packet.PacketID {
-	case 0x02:
+	case packets.S2CDisconnectConfiguration.PacketID:
 		data := []byte(packet.Data)
 		msg := parseDisconnectReason(data)
 		log.Printf("Disconnected during configuration. Reason: %s", msg)
 		os.Exit(0)
-	case 0x03:
+	case packets.S2CFinishConfiguration.PacketID:
 		log.Println("Configuration finished, acknowledging...")
 
 		if err := client.WritePacket(packets.C2SFinishConfiguration); err != nil {
@@ -281,7 +439,13 @@ func handleConfigurationPacket(client *jp.TCPClient, packet *jp.Packet) {
 
 		client.SetState(jp.StatePlay)
 		log.Println("Entered play state!")
-	case 0x04:
+
+		// Send chat session data for signed messages
+		time.Sleep(100 * time.Millisecond)
+		if chatSigner != nil {
+			sendChatSessionData(client)
+		}
+	case packets.S2CKeepAliveConfiguration.PacketID:
 		var keepAliveData packets.S2CKeepAliveConfigurationData
 		if err := jp.BytesToPacketData(packet.Data, &keepAliveData); err != nil {
 			log.Printf("Failed to parse KeepAlive ID: %v", err)
@@ -297,9 +461,7 @@ func handleConfigurationPacket(client *jp.TCPClient, packet *jp.Packet) {
 		if err := client.WritePacket(keepAlive); err != nil {
 			log.Printf("Failed to send KeepAlive response: %v", err)
 		}
-	case 0x0E:
-		// TODO: fix PrefixedArray[ns.String]
-		// this works, but I am not sure how
+	case packets.S2CSelectKnownPacks.PacketID:
 		reply, err := packets.C2SSelectKnownPacks.WithData(packets.C2SSelectKnownPacksData{})
 		if err != nil {
 			log.Printf("Failed to build Known Packs: %v", err)
@@ -312,9 +474,17 @@ func handleConfigurationPacket(client *jp.TCPClient, packet *jp.Packet) {
 
 func handlePlayPacket(client *jp.TCPClient, packet *jp.Packet) {
 	switch packet.PacketID {
-	case 0x2B:
+	case packets.S2CLoginPlay.PacketID:
 		log.Println("Received login play packet - player spawned in world!")
-	case 0x40:
+
+		// Send a test chat message
+		sendChatMessage(client, "hello, world!")
+
+		// Send a second message after a delay
+		time.Sleep(2 * time.Second)
+		sendChatMessage(client, "this is my second message!")
+
+	case packets.S2CPlayerPosition.PacketID:
 		log.Println("Received player position packet")
 
 		teleportConfirm, err := packets.C2SAcceptTeleportation.WithData(packets.C2SAcceptTeleportationData{TeleportId: 0})
@@ -326,9 +496,8 @@ func handlePlayPacket(client *jp.TCPClient, packet *jp.Packet) {
 		if err := client.WritePacket(teleportConfirm); err != nil {
 			log.Printf("Failed to send teleport confirmation: %v", err)
 		}
-	case 0x26:
-		log.Println("Received keep alive packet")
 
+	case packets.S2CKeepAlivePlay.PacketID:
 		var keepAliveData packets.S2CKeepAlivePlayData
 		if err := jp.BytesToPacketData(packet.Data, &keepAliveData); err != nil {
 			log.Printf("Failed to read keep alive data: %v", err)
@@ -345,8 +514,149 @@ func handlePlayPacket(client *jp.TCPClient, packet *jp.Packet) {
 			log.Printf("Failed to send keep alive: %v", err)
 		}
 
-		fmt.Println("Replied to keep alive")
+		log.Println("Replied to keep alive")
+
+	case packets.S2CSystemChat.PacketID:
+		log.Printf("[SYSTEM] Chat received")
+
+	case packets.S2CPlayerChat.PacketID:
+		log.Printf("[PLAYER] Chat received")
+
+	case packets.S2CDisguisedChat.PacketID:
+		log.Printf("[DISGUISED] Chat received")
 	}
+}
+
+func sendChatMessage(client *jp.TCPClient, message string) {
+	if chatSigner != nil {
+		log.Printf("Sending signed chat message: %s", message)
+
+		// Generate salt for this message
+		saltBytes := make([]byte, 8)
+		rand.Read(saltBytes)
+		salt := int64(binary.BigEndian.Uint64(saltBytes))
+
+		timestamp := time.Now()
+
+		// Get last seen messages for the chain
+		lastSeenMessages := chatStore.GetLastSeenMessages(20)
+
+		// Sign the message
+		signedMsg, err := chatSigner.SignMessage(message, timestamp, salt, lastSeenMessages)
+		if err != nil {
+			log.Printf("Failed to sign chat message: %v", err)
+			return
+		}
+
+		// Build acknowledged bitset (empty for now)
+		acknowledged := ns.FixedBitSet{Length: 20, Data: make([]byte, 3)}
+
+		chatPacket, err := packets.C2SChat.WithData(packets.C2SChatData{
+			Message:      ns.String(message),
+			Timestamp:    ns.Long(timestamp.UnixMilli()),
+			Salt:         ns.Long(salt),
+			Signature:    ns.PrefixedOptional[ns.ByteArray]{Present: true, Value: ns.ByteArray(signedMsg.Signature)},
+			MessageCount: ns.VarInt(len(lastSeenMessages)),
+			Acknowledged: acknowledged,
+			Checksum:     ns.Byte(0),
+		})
+		if err != nil {
+			log.Printf("Failed to build signed chat message: %v", err)
+			return
+		}
+
+		if err := client.WritePacket(chatPacket); err != nil {
+			log.Printf("Failed to send signed chat message: %v", err)
+		}
+	} else {
+		// Send unsigned chat message
+		log.Printf("Sending unsigned chat message: %s", message)
+		chatPacket, err := packets.C2SChat.WithData(packets.C2SChatData{
+			Message:      ns.String(message),
+			Timestamp:    ns.Long(time.Now().UnixMilli()),
+			Salt:         ns.Long(0),
+			Signature:    ns.PrefixedOptional[ns.ByteArray]{},
+			MessageCount: ns.VarInt(0),
+			Acknowledged: ns.FixedBitSet{Length: 20, Data: make([]byte, 3)},
+			Checksum:     ns.Byte(0),
+		})
+		if err != nil {
+			log.Printf("Failed to build unsigned chat message: %v", err)
+			return
+		}
+
+		if err := client.WritePacket(chatPacket); err != nil {
+			log.Printf("Failed to send unsigned chat message: %v", err)
+		}
+	}
+}
+
+func sendChatSessionData(client *jp.TCPClient) {
+	log.Println("Sending chat session data...")
+
+	// Generate a random session UUID (NOT the player UUID)
+	var sessionID ns.UUID
+	rand.Read(sessionID[:])
+	chatStore.SetSessionUUID(sessionID)
+
+	// Get public key in SPKI DER format
+	publicKeyBytes := chatStore.GetX509PublicKey()
+	if len(publicKeyBytes) == 0 {
+		log.Printf("No public key available for chat session")
+		return
+	}
+
+	// Get expiry time in milliseconds
+	expiryTime := chatStore.GetKeyExpiry()
+	expiresAt := ns.Long(expiryTime.UnixMilli())
+
+	// Get Mojang's signature (V2 - 512 bytes)
+	mojangSignature := chatStore.GetSessionKey()
+
+	// Manual serialization for Player Session packet
+	var buf bytes.Buffer
+
+	// Session UUID (16 bytes)
+	buf.Write(sessionID[:])
+
+	// Expires At (8 bytes, big endian)
+	expiresAtBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(expiresAtBytes, uint64(expiresAt))
+	buf.Write(expiresAtBytes)
+
+	// Public Key (VarInt length + data)
+	writeVarInt(&buf, len(publicKeyBytes))
+	buf.Write(publicKeyBytes)
+
+	// Key Signature (VarInt length + data)
+	writeVarInt(&buf, len(mojangSignature))
+	buf.Write(mojangSignature)
+
+	// Create packet with manual data
+	type manualPacketStruct struct {
+		Data ns.ByteArray
+	}
+
+	manualData := manualPacketStruct{Data: ns.ByteArray(buf.Bytes())}
+	sessionPacket, err := jp.NewPacket(jp.StatePlay, jp.C2S, 0x09).WithData(manualData)
+	if err != nil {
+		log.Printf("Failed to build session packet: %v", err)
+		return
+	}
+
+	if err := client.WritePacket(sessionPacket); err != nil {
+		log.Printf("Failed to send chat session data: %v", err)
+	} else {
+		log.Println("Chat session data sent successfully")
+	}
+}
+
+func writeVarInt(buf *bytes.Buffer, value int) {
+	for value >= 0x80 {
+		buf.WriteByte(byte(value&0x7F | 0x80))
+		value >>= 7
+	}
+	buf.WriteByte(byte(value))
 }
 
 func sendClientInformation(client *jp.TCPClient) {
@@ -390,8 +700,6 @@ func sendBrandPluginMessage(client *jp.TCPClient, brand string) {
 	}
 }
 
-// parseDisconnectReason attempts to extract a human-readable text from either
-// a JSON Text Component (String) or an NBT-based text component payload.
 func parseDisconnectReason(data []byte) string {
 	if v, ok := extractNBTTextValue(data, "text"); ok && v != "" {
 		return v
@@ -416,11 +724,7 @@ func parseDisconnectReason(data []byte) string {
 	return "<unknown reason>"
 }
 
-// extractNBTTextValue performs a minimal scan for an NBT String tag with the given key name
-// and returns its value. This is not a full NBT parser; it only handles the common case
-// of a compound containing a String tag named "text".
 func extractNBTTextValue(data []byte, key string) (string, bool) {
-	// HACK: add support for generic NBT parsing in gomc-lib/protocol
 	keyBytes := []byte(key)
 	for i := 0; i+7 < len(data); i++ {
 		if data[i] == 0x08 { // TAG_String
@@ -449,7 +753,6 @@ func extractNBTTextValue(data []byte, key string) (string, bool) {
 	return "", false
 }
 
-// splitHostPort parses host and port from the address string. If port is missing, defaults to 25565.
 func splitHostPort(addr string) (string, uint16) {
 	host := addr
 	port := uint16(25565)

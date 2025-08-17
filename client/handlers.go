@@ -5,4 +5,3 @@ import (
 )
 
 type Handler func(c *Client, pkt *jp.Packet)
-

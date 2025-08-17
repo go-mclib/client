@@ -1,7 +1,9 @@
-github.com/go-mclib/data v0.0.0-20250815051745-32689e3e3ec5 h1:rAjGuGJXgnAvoalch3PYF8O4IpJZXPFf4wjbfCgeuJU=
-github.com/go-mclib/data v0.0.0-20250815051745-32689e3e3ec5/go.mod h1:Gi6IDx+oirL3fqIDs9ZhC8Pn+jqflHq8y0P0E2VU0zg=
-github.com/go-mclib/protocol v0.0.0-20250815073748-abb6611d55d3 h1:VVPwFAKT2U9g6Z2ViH7EWr1YTJaKOMfj68G+FVU8usk=
-github.com/go-mclib/protocol v0.0.0-20250815073748-abb6611d55d3/go.mod h1:Vj//bTp3fO0TysT5mAaQm0juiYzm30vTXtNysXLTrd8=
+github.com/Tnze/go-mc v1.20.2 h1:arHCE/WxLCxY73C/4ZNLdOymRYtdwoXE05ohB7HVN6Q=
+github.com/Tnze/go-mc v1.20.2/go.mod h1:geoRj2HsXSkB3FJBuhr7wCzXegRlzWsVXd7h7jiJ6aQ=
+github.com/go-mclib/data v0.0.0-20250815125110-0270434ba5fe h1:yCe4R/hH4UZPYfhhlQiuQjEuu9VcjMfJWYhmWzZrGr4=
+github.com/go-mclib/data v0.0.0-20250815125110-0270434ba5fe/go.mod h1:Gi6IDx+oirL3fqIDs9ZhC8Pn+jqflHq8y0P0E2VU0zg=
+github.com/go-mclib/protocol v0.0.0-20250815113312-e925981a4c61 h1:nW0XREXp7thwKeADit8yMsVgVXnmg+9MglGnpefVYCM=
+github.com/go-mclib/protocol v0.0.0-20250815113312-e925981a4c61/go.mod h1:axP6rQfsfB1H7uvE8+mIorcGO3UUSuPXZ2MT3KDhL1I=
 github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c h1:+mdjkGKdHQG3305AYmdv1U2eRNDiU2ErMBj1gwrq8eQ=
 github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c/go.mod h1:7rwL4CYBLnjLxUqIJNnCWiEdr3bn6IUYi15bNlnbCCU=
 golang.org/x/sys v0.1.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
