@@ -1,4 +1,4 @@
-package memory
+package chat
 
 import (
 	"bytes"
@@ -41,20 +41,20 @@ type PlayerChatState struct {
 }
 
 type ChatChainStore struct {
-	mu                   sync.RWMutex
-	playerStates         map[ns.UUID]*PlayerChatState
-	inboundHistory       []SignedMessage
-	outboundHistory      []SignedMessage
-	privateKey           crypto.PrivateKey
-	publicKey            crypto.PublicKey
-	sessionKey           []byte
-	keyExpiry            time.Time
-	playerUUID           ns.UUID
-	sessionUUID          ns.UUID
-	messageIndex         int32
-	originalPublicKeyPEM string
-	x509PublicKey        []byte
-	pkcs1PublicKey       []byte
+	PrivateKey     crypto.PrivateKey
+	PublicKey      crypto.PublicKey
+	SessionKey     []byte // Mojang signature
+	KeyExpiry      time.Time
+	PlayerUUID     ns.UUID
+	SessionUUID    ns.UUID
+	X509PublicKey  []byte
+	PKCS1PublicKey []byte
+
+	mu              sync.RWMutex
+	playerStates    map[ns.UUID]*PlayerChatState
+	inboundHistory  []SignedMessage
+	outboundHistory []SignedMessage
+	messageIndex    int32
 }
 
 func NewChatChainStore() *ChatChainStore {
@@ -65,118 +65,7 @@ func NewChatChainStore() *ChatChainStore {
 	}
 }
 
-func (c *ChatChainStore) SetKeys(privateKey crypto.PrivateKey, publicKey crypto.PublicKey) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.privateKey = privateKey
-	c.publicKey = publicKey
-}
-
-func (c *ChatChainStore) SetSessionKey(key []byte) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.sessionKey = key
-}
-
-func (c *ChatChainStore) GetSessionKey() []byte {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.sessionKey
-}
-
-func (c *ChatChainStore) SetKeyExpiry(expiry time.Time) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.keyExpiry = expiry
-}
-
-func (c *ChatChainStore) GetKeyExpiry() time.Time {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.keyExpiry
-}
-
-func (c *ChatChainStore) SetPlayerUUID(uuid ns.UUID) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.playerUUID = uuid
-}
-
-func (c *ChatChainStore) GetPlayerUUID() ns.UUID {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.playerUUID
-}
-
-func (c *ChatChainStore) SetSessionUUID(uuid ns.UUID) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.sessionUUID = uuid
-}
-
-func (c *ChatChainStore) GetSessionUUID() ns.UUID {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.sessionUUID
-}
-
-func (c *ChatChainStore) GetNextMessageIndex() int32 {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	index := c.messageIndex
-	c.messageIndex++
-	return index
-}
-
-func (c *ChatChainStore) SetOriginalPublicKeyPEM(pem string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.originalPublicKeyPEM = pem
-}
-
-func (c *ChatChainStore) GetOriginalPublicKeyPEM() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.originalPublicKeyPEM
-}
-
-func (c *ChatChainStore) SetX509PublicKey(key []byte) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.x509PublicKey = key
-}
-
-func (c *ChatChainStore) GetX509PublicKey() []byte {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.x509PublicKey
-}
-
-func (c *ChatChainStore) SetPKCS1PublicKey(key []byte) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.pkcs1PublicKey = key
-}
-
-func (c *ChatChainStore) GetPKCS1PublicKey() []byte {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.pkcs1PublicKey
-}
-
-func (c *ChatChainStore) GetPublicKey() crypto.PublicKey {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.publicKey
-}
-
-func (c *ChatChainStore) GetPrivateKey() crypto.PrivateKey {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.privateKey
-}
-
-func (c *ChatChainStore) AddPlayerKey(playerUUID ns.UUID, publicKey *rsa.PublicKey) {
+func (c *ChatChainStore) AddPlayerPublicKey(playerUUID ns.UUID, publicKey *rsa.PublicKey) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -190,6 +79,16 @@ func (c *ChatChainStore) AddPlayerKey(playerUUID ns.UUID, publicKey *rsa.PublicK
 	} else {
 		c.playerStates[playerUUID].PublicKey = publicKey
 	}
+}
+
+func (c *ChatChainStore) GetPlayerPublicKey(playerUUID ns.UUID) *rsa.PublicKey {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if state, exists := c.playerStates[playerUUID]; exists {
+		return state.PublicKey
+	}
+	return nil
 }
 
 func (c *ChatChainStore) AddInboundMessage(msg SignedMessage) {
@@ -223,22 +122,20 @@ func (c *ChatChainStore) AddOutboundMessage(msg SignedMessage) []byte {
 	return msg.Signature
 }
 
+func (c *ChatChainStore) GetNextMessageIndex() int32 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	index := c.messageIndex
+	c.messageIndex++
+	return index
+}
+
 func (c *ChatChainStore) GetLastSignature(playerUUID ns.UUID) []byte {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	if state, exists := c.playerStates[playerUUID]; exists {
 		return state.LastSignature
-	}
-	return nil
-}
-
-func (c *ChatChainStore) GetPlayerPublicKey(playerUUID ns.UUID) *rsa.PublicKey {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	if state, exists := c.playerStates[playerUUID]; exists {
-		return state.PublicKey
 	}
 	return nil
 }

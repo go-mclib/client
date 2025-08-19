@@ -1,5 +1,3 @@
 # TO-DO
 
-- [ ] Add integration test for localhost server JAR
-- [ ] Implement chat sending via helper package (`chat`)
-- [ ] Helper package for basic handshake, login, configuration listener(?) setup
+- [ ] `net_structures` needs a complete recode to actually properly parse the packet data

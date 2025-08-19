@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/go-mclib/client/memory"
 	ns "github.com/go-mclib/protocol/net_structures"
 )
 
@@ -20,24 +19,25 @@ const (
 )
 
 type ChatSigner struct {
-	store      *memory.ChatChainStore
+	ChatChainStore
 	privateKey *rsa.PrivateKey
 	publicKey  *rsa.PublicKey
 }
 
-func NewChatSigner(store *memory.ChatChainStore) *ChatSigner {
+func NewChatSigner() *ChatSigner {
 	return &ChatSigner{
-		store: store,
+		ChatChainStore: *NewChatChainStore(),
 	}
 }
 
 func (cs *ChatSigner) SetKeys(privateKey *rsa.PrivateKey, publicKey *rsa.PublicKey) {
 	cs.privateKey = privateKey
 	cs.publicKey = publicKey
-	cs.store.SetKeys(privateKey, publicKey)
+	cs.PrivateKey = privateKey
+	cs.PublicKey = publicKey
 }
 
-func (cs *ChatSigner) SignMessage(message string, timestamp time.Time, salt int64, lastSeenMessages []memory.MessageRef) (*memory.SignedMessage, error) {
+func (cs *ChatSigner) SignMessage(message string, timestamp time.Time, salt int64, lastSeenMessages []MessageRef) (*SignedMessage, error) {
 	if cs.privateKey == nil {
 		return nil, fmt.Errorf("private key not set")
 	}
@@ -49,7 +49,7 @@ func (cs *ChatSigner) SignMessage(message string, timestamp time.Time, salt int6
 		return nil, fmt.Errorf("failed to sign message: %w", err)
 	}
 
-	signedMsg := &memory.SignedMessage{
+	signedMsg := &SignedMessage{
 		Timestamp:        timestamp,
 		Salt:             salt,
 		MessageHash:      messageHash,
@@ -58,28 +58,57 @@ func (cs *ChatSigner) SignMessage(message string, timestamp time.Time, salt int6
 		PlainMessage:     message,
 	}
 
-	cs.store.AddOutboundMessage(*signedMsg)
+	cs.AddOutboundMessage(*signedMsg)
 
 	return signedMsg, nil
 }
 
-func (cs *ChatSigner) computeMessageHash(message string, timestamp time.Time, salt int64, lastSeenMessages []memory.MessageRef) []byte {
+func (cs *ChatSigner) VerifyMessage(msg SignedMessage, publicKey *rsa.PublicKey) error {
+	if publicKey == nil {
+		storedKey := cs.GetPlayerPublicKey(msg.PlayerUUID)
+		if storedKey == nil {
+			return fmt.Errorf("no public key found for player %s", msg.PlayerUUID)
+		}
+		publicKey = storedKey
+	}
+
+	messageHash := cs.computeMessageHash(msg.PlainMessage, msg.Timestamp, msg.Salt, msg.LastSeenMessages)
+
+	err := rsa.VerifyPKCS1v15(publicKey, crypto.SHA256, messageHash, msg.Signature)
+	if err != nil {
+		return fmt.Errorf("signature verification failed: %w", err)
+	}
+
+	return nil
+}
+
+func (cs *ChatSigner) VerifyChain(playerUUID ns.UUID, currentSig []byte, previousSig []byte) bool {
+	lastSig := cs.GetLastSignature(playerUUID)
+	if lastSig == nil && previousSig != nil {
+		return false
+	}
+	if lastSig != nil && !bytes.Equal(lastSig, previousSig) {
+		return false
+	}
+	return true
+}
+
+func (cs *ChatSigner) computeMessageHash(message string, timestamp time.Time, salt int64, lastSeenMessages []MessageRef) []byte {
 	h := sha256.New()
 
-	// According to the wiki, the signature is computed over:
+	// According to the wiki (https://minecraft.wiki/w/Java_Edition_protocol/Chat),
+	// the signature is computed over:
 	// 1. The number 1 as a 4-byte int (Always 00 00 00 01)
 	binary.Write(h, binary.BigEndian, int32(1))
 
 	// 2. The player's 16 byte UUID
-	playerUUID := cs.store.GetPlayerUUID()
-	h.Write(playerUUID[:])
+	h.Write(cs.PlayerUUID[:])
 
 	// 3. The chat session (16 byte UUID generated randomly by the client)
-	sessionUUID := cs.store.GetSessionUUID()
-	h.Write(sessionUUID[:])
+	h.Write(cs.SessionUUID[:])
 
 	// 4. The index of the message within this chat session as a 4-byte int
-	messageIndex := cs.store.GetNextMessageIndex()
+	messageIndex := cs.GetNextMessageIndex()
 	binary.Write(h, binary.BigEndian, messageIndex)
 
 	// 5. The salt (from above) as a 8-byte long
@@ -104,36 +133,6 @@ func (cs *ChatSigner) computeMessageHash(message string, timestamp time.Time, sa
 	}
 
 	return h.Sum(nil)
-}
-
-func (cs *ChatSigner) VerifyMessage(msg memory.SignedMessage, publicKey *rsa.PublicKey) error {
-	if publicKey == nil {
-		storedKey := cs.store.GetPlayerPublicKey(msg.PlayerUUID)
-		if storedKey == nil {
-			return fmt.Errorf("no public key found for player %s", msg.PlayerUUID)
-		}
-		publicKey = storedKey
-	}
-
-	messageHash := cs.computeMessageHash(msg.PlainMessage, msg.Timestamp, msg.Salt, msg.LastSeenMessages)
-
-	err := rsa.VerifyPKCS1v15(publicKey, crypto.SHA256, messageHash, msg.Signature)
-	if err != nil {
-		return fmt.Errorf("signature verification failed: %w", err)
-	}
-
-	return nil
-}
-
-func (cs *ChatSigner) VerifyChain(playerUUID ns.UUID, currentSig []byte, previousSig []byte) bool {
-	lastSig := cs.store.GetLastSignature(playerUUID)
-	if lastSig == nil && previousSig != nil {
-		return false
-	}
-	if lastSig != nil && !bytes.Equal(lastSig, previousSig) {
-		return false
-	}
-	return true
 }
 
 type ChatSessionData struct {
@@ -176,7 +175,7 @@ func (cs *ChatSigner) GenerateSessionData() (*ChatSessionData, error) {
 	}, nil
 }
 
-func (cs *ChatSigner) CreateChatHeader(msg memory.SignedMessage) []byte {
+func (cs *ChatSigner) CreateChatHeader(msg SignedMessage) []byte {
 	h := sha256.New()
 
 	h.Write(msg.PreviousSignature)
@@ -187,15 +186,15 @@ func (cs *ChatSigner) CreateChatHeader(msg memory.SignedMessage) []byte {
 	return h.Sum(nil)
 }
 
-func (cs *ChatSigner) LogSentMessageFromPeer(playerUUID ns.UUID, msg memory.SignedMessage) error {
-	cs.store.AddInboundMessage(msg)
-	return cs.store.AddPendingAck(playerUUID, msg)
+func (cs *ChatSigner) LogSentMessageFromPeer(playerUUID ns.UUID, msg SignedMessage) error {
+	cs.AddInboundMessage(msg)
+	return cs.AddPendingAck(playerUUID, msg)
 }
 
 func (cs *ChatSigner) ProcessAcknowledgement(playerUUID ns.UUID, signatures [][]byte) {
-	cs.store.AcknowledgeMessages(playerUUID, signatures)
+	cs.AcknowledgeMessages(playerUUID, signatures)
 }
 
 func (cs *ChatSigner) ShouldKickForPendingAcks(playerUUID ns.UUID) bool {
-	return cs.store.GetPendingAckCount(playerUUID) > memory.MaxPendingAckPerPlayer
+	return cs.GetPendingAckCount(playerUUID) > MaxPendingAckPerPlayer
 }

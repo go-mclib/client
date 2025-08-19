@@ -16,10 +16,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/go-mclib/client/chat"
-	"github.com/go-mclib/client/memory"
 	packets "github.com/go-mclib/data/go/772/java_packets"
 	"github.com/go-mclib/protocol/auth"
 	mc_crypto "github.com/go-mclib/protocol/crypto"
@@ -30,10 +30,7 @@ import (
 
 const protocolVersion = 772 // 1.21.8
 
-var (
-	chatSigner *chat.ChatSigner
-	chatStore  *memory.ChatChainStore
-)
+var chatSigner *chat.ChatSigner
 
 type MojangKeyPair struct {
 	PrivateKey string `json:"privateKey"`
@@ -148,8 +145,7 @@ func runOnlineMode(serverAddr string, verbose bool) {
 	}
 
 	// Initialize chat signing system
-	chatStore = memory.NewChatChainStore()
-	chatSigner = chat.NewChatSigner(chatStore)
+	chatSigner = chat.NewChatSigner()
 	chatSigner.SetKeys(privateKey, publicKey)
 
 	// Set player UUID
@@ -157,8 +153,8 @@ func runOnlineMode(serverAddr string, verbose bool) {
 	if err != nil {
 		log.Fatalf("Failed to parse player UUID: %v", err)
 	}
-	chatStore.SetPlayerUUID(playerUUID)
-	chatStore.AddPlayerKey(playerUUID, publicKey)
+	chatSigner.PlayerUUID = playerUUID
+	chatSigner.AddPlayerPublicKey(playerUUID, publicKey)
 
 	// Store public key in SPKI DER format as required by protocol
 	block, _ := pem.Decode([]byte(cert.KeyPair.PublicKey))
@@ -168,7 +164,7 @@ func runOnlineMode(serverAddr string, verbose bool) {
 			if rsaKey, ok := rsaPubKey.(*rsa.PublicKey); ok {
 				properSpkiBytes, err := x509.MarshalPKIXPublicKey(rsaKey)
 				if err == nil {
-					chatStore.SetX509PublicKey(properSpkiBytes)
+					chatSigner.X509PublicKey = properSpkiBytes
 				}
 			}
 		}
@@ -179,8 +175,8 @@ func runOnlineMode(serverAddr string, verbose bool) {
 	if err != nil {
 		log.Fatalf("Failed to decode Mojang signature: %v", err)
 	}
-	chatStore.SetSessionKey(mojangSigBytes)
-	chatStore.SetKeyExpiry(expiryTime)
+	chatSigner.SessionKey = mojangSigBytes
+	chatSigner.KeyExpiry = expiryTime
 
 	sessionClient := session_server.NewSessionServerClient()
 	runClient(serverAddr, verbose, loginData, sessionClient)
@@ -244,7 +240,7 @@ func runClient(serverAddr string, verbose bool, loginData auth.LoginData, sessio
 		ProtocolVersion: protocolVersion,
 		ServerAddress:   ns.String(host),
 		ServerPort:      ns.UnsignedShort(port),
-		Intent:          packets.IntentLogin,
+		Intent:          2, // login intent
 	})
 	if err != nil {
 		log.Fatalf("Failed to build handshake: %v", err)
@@ -364,10 +360,17 @@ func handleEncryptionRequest(client *jp.TCPClient, packet *jp.Packet, loginData 
 		log.Printf("Warning: Session server authentication failed: %v", err)
 	}
 
-	// Send encryption response
+	sharedSecretArray := make([]ns.Byte, len(encryptedSharedSecret))
+	for i, b := range encryptedSharedSecret {
+		sharedSecretArray[i] = ns.Byte(b)
+	}
+	verifyTokenArray := make([]ns.Byte, len(encryptedVerifyToken))
+	for i, b := range encryptedVerifyToken {
+		verifyTokenArray[i] = ns.Byte(b)
+	}
 	encryptionResponse, err := packets.C2SKey.WithData(packets.C2SKeyData{
-		SharedSecret: ns.PrefixedByteArray(encryptedSharedSecret),
-		VerifyToken:  ns.PrefixedByteArray(encryptedVerifyToken),
+		SharedSecret: sharedSecretArray,
+		VerifyToken:  verifyTokenArray,
 	})
 	if err != nil {
 		log.Fatalf("Failed to build encryption response: %v", err)
@@ -474,15 +477,45 @@ func handleConfigurationPacket(client *jp.TCPClient, packet *jp.Packet) {
 
 func handlePlayPacket(client *jp.TCPClient, packet *jp.Packet) {
 	switch packet.PacketID {
+	case packets.S2CDisconnectPlay.PacketID:
+		var data packets.S2CDisconnectPlayData
+		if err := jp.BytesToPacketData(packet.Data, &data); err != nil {
+			log.Printf("Failed to parse disconnect play data: %v", err)
+			return
+		}
+		log.Printf("Disconnected from play. Reason: %s", data.Reason)
+		os.Exit(0)
 	case packets.S2CLoginPlay.PacketID:
-		log.Println("Received login play packet - player spawned in world!")
+		log.Println("Received login play packet - player spawned in world! Ready!")
+		sendChatMessage(client, "Hello, world!")
 
-		// Send a test chat message
-		sendChatMessage(client, "hello, world!")
+	case packets.S2CPlayerChat.PacketID:
+		log.Println("Received player chat packet")
+		var chatData packets.S2CPlayerChatData
+		if err := jp.BytesToPacketData(packet.Data, &chatData); err != nil {
+			// Fallback: parse around signature field and parse the tail
+			sender, target, msg, ok := parsePlayerChatFast(ns.ByteArray(packet.Data))
+			if ok {
+				if target != "" {
+					log.Printf("[PLAYER] %s -> %s: %s", sender, target, msg)
+				} else {
+					log.Printf("[PLAYER] %s: %s", sender, msg)
+				}
+				return
+			}
+			log.Printf("Failed to parse player chat data: %v", err)
+			return
+		}
 
-		// Send a second message after a delay
-		time.Sleep(2 * time.Second)
-		sendChatMessage(client, "this is my second message!")
+		senderName := tcText(chatData.SenderName)
+		messageText := string(chatData.Message)
+
+		if chatData.TargetName.Present {
+			targetName := tcText(chatData.TargetName.Value)
+			log.Printf("[PLAYER] %s -> %s: %s", senderName, targetName, messageText)
+		} else {
+			log.Printf("[PLAYER] %s: %s", senderName, messageText)
+		}
 
 	case packets.S2CPlayerPosition.PacketID:
 		log.Println("Received player position packet")
@@ -514,17 +547,53 @@ func handlePlayPacket(client *jp.TCPClient, packet *jp.Packet) {
 			log.Printf("Failed to send keep alive: %v", err)
 		}
 
-		log.Println("Replied to keep alive")
-
 	case packets.S2CSystemChat.PacketID:
-		log.Printf("[SYSTEM] Chat received")
+		log.Println("Received system chat packet")
+		var systemChatData packets.S2CSystemChatData
+		if err := jp.BytesToPacketData(packet.Data, &systemChatData); err != nil {
+			// Fallback: try parse as VarInt-prefixed JSON string + boolean
+			msg, overlay, ok := parseSystemChatFast(ns.ByteArray(packet.Data))
+			if ok {
+				if overlay {
+					log.Printf("[SYSTEM-ACTION] %s", msg)
+				} else {
+					log.Printf("[SYSTEM] %s", msg)
+				}
+				return
+			}
+			log.Printf("Failed to parse system chat data: %v", err)
+			return
+		}
 
-	case packets.S2CPlayerChat.PacketID:
-		log.Printf("[PLAYER] Chat received")
+		messageText := systemChatData.Content.GetText()
+		if systemChatData.Overlay {
+			log.Printf("[SYSTEM-ACTION] %s", messageText)
+		} else {
+			log.Printf("[SYSTEM] %s", messageText)
+		}
 
 	case packets.S2CDisguisedChat.PacketID:
-		log.Printf("[DISGUISED] Chat received")
+		log.Println("Received disguised chat packet")
+		var disguisedChatData packets.S2CDisguisedChatData
+		if err := jp.BytesToPacketData(packet.Data, &disguisedChatData); err != nil {
+			log.Printf("Failed to parse disguised chat data: %v", err)
+			return
+		}
+
+		messageText := disguisedChatData.Message.GetText()
+		senderName := disguisedChatData.SenderName.GetText()
+
+		if disguisedChatData.TargetName.Present {
+			targetName := disguisedChatData.TargetName.Value.GetText()
+			log.Printf("[DISGUISED] %s -> %s: %s", senderName, targetName, messageText)
+		} else {
+			log.Printf("[DISGUISED] %s: %s", senderName, messageText)
+		}
 	}
+}
+
+func handleMessage(sender string, message string) {
+	log.Printf("[%s] %s", sender, message)
 }
 
 func sendChatMessage(client *jp.TCPClient, message string) {
@@ -539,7 +608,7 @@ func sendChatMessage(client *jp.TCPClient, message string) {
 		timestamp := time.Now()
 
 		// Get last seen messages for the chain
-		lastSeenMessages := chatStore.GetLastSeenMessages(20)
+		lastSeenMessages := chatSigner.GetLastSeenMessages(20)
 
 		// Sign the message
 		signedMsg, err := chatSigner.SignMessage(message, timestamp, salt, lastSeenMessages)
@@ -597,21 +666,21 @@ func sendChatSessionData(client *jp.TCPClient) {
 	// Generate a random session UUID (NOT the player UUID)
 	var sessionID ns.UUID
 	rand.Read(sessionID[:])
-	chatStore.SetSessionUUID(sessionID)
+	chatSigner.SessionUUID = sessionID
 
 	// Get public key in SPKI DER format
-	publicKeyBytes := chatStore.GetX509PublicKey()
+	publicKeyBytes := chatSigner.X509PublicKey
 	if len(publicKeyBytes) == 0 {
 		log.Printf("No public key available for chat session")
 		return
 	}
 
 	// Get expiry time in milliseconds
-	expiryTime := chatStore.GetKeyExpiry()
+	expiryTime := chatSigner.KeyExpiry
 	expiresAt := ns.Long(expiryTime.UnixMilli())
 
 	// Get Mojang's signature (V2 - 512 bytes)
-	mojangSignature := chatStore.GetSessionKey()
+	mojangSignature := chatSigner.SessionKey
 
 	// Manual serialization for Player Session packet
 	var buf bytes.Buffer
@@ -765,4 +834,98 @@ func splitHostPort(addr string) (string, uint16) {
 		}
 	}
 	return host, port
+}
+
+// HACK: move all of below to go-mclib/data and go-mclib/protocol
+
+// tcText extracts readable text from a TextComponent with multiple fallbacks
+func tcText(tc ns.TextComponent) string {
+	if t := tc.GetText(); strings.TrimSpace(t) != "" {
+		return t
+	}
+	if raw := getTextComponentData(tc); len(raw) > 0 {
+		var s ns.String
+		if n, err := s.FromBytes(raw); err == nil && n > 0 {
+			str := string(s)
+			if strings.TrimSpace(str) != "" {
+				return str
+			}
+		}
+	}
+	// Fallback: attempt to use NBT if available
+	if nbt := tc.GetNBT(); nbt != nil {
+		if t := nbt.ExtractTextFromNBT(); strings.TrimSpace(t) != "" {
+			return t
+		}
+	}
+	return ""
+}
+
+// getTextComponentData safely accesses the underlying bytes if available
+func getTextComponentData(tc ns.TextComponent) ns.ByteArray {
+	type dataCarrier interface{}
+	_ = dataCarrier(tc)
+
+	return tc.Data
+}
+
+// parseSystemChatFast parses as VarInt-prefixed JSON string + boolean.
+func parseSystemChatFast(data ns.ByteArray) (string, bool, bool) {
+	var l ns.VarInt
+	n, err := l.FromBytes(data)
+	if err != nil {
+		return "", false, false
+	}
+	if len(data) < n+int(l)+1 {
+		return "", false, false
+	}
+	payload := string(data[n : n+int(l)])
+	overlay := data[n+int(l)] != 0
+	if comp, err := ns.ParseTextComponentFromString(payload); err == nil {
+		return comp.String(), overlay, true
+	}
+	return payload, overlay, true
+}
+
+func parsePlayerChatFast(data ns.ByteArray) (string, string, string, bool) {
+	offset := 0
+
+	var vi ns.VarInt
+	n, err := vi.FromBytes(data[offset:])
+	if err != nil {
+		return "", "", "", false
+	}
+	offset += n
+
+	var uuid ns.UUID
+	n, err = uuid.FromBytes(data[offset:])
+	if err != nil {
+		return "", "", "", false
+	}
+	offset += n
+	var idx ns.VarInt
+	n, err = idx.FromBytes(data[offset:])
+	if err != nil {
+		return "", "", "", false
+	}
+	offset += n
+	var present ns.Boolean
+	n, err = present.FromBytes(data[offset:])
+	if err != nil {
+		return "", "", "", false
+	}
+	offset += n
+	if bool(present) {
+		if len(data) < offset+256 {
+			return "", "", "", false
+		}
+		offset += 256
+	}
+	var msgStr ns.String
+	n, err = msgStr.FromBytes(data[offset:])
+	if err != nil {
+		return "", "", "", false
+	}
+	msg := string(msgStr)
+	return "", "", msg, true
 }
