@@ -9,7 +9,9 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/go-mclib/client/client"
 	packets "github.com/go-mclib/data/go/772/java_packets"
@@ -20,6 +22,10 @@ const (
 	// greetStorePath is the path to the file that stores the greeted users
 	// (if a player was already greeted on first known join, greet with welcome back message instead)
 	greetStorePath = ".greeted_users.json"
+	// chatCooldownDuration is the minimum delay enforced between chat messages
+	chatCooldownDuration = 2 * time.Second
+	// chatQueueCapacity bounds the number of queued messages waiting for cooldown
+	chatQueueCapacity = 3
 )
 
 var joinRegex = regexp.MustCompile(`multiplayer\.player\.joined\s+\[(\w{1,16})\]`)
@@ -58,9 +64,9 @@ func main() {
 					}
 
 					if gstore.Has(name) {
-						c.SendChatMessage("Welcome back, " + name + "!")
+						sendChatWithCooldown(c, fmt.Sprintf("Welcome back, %s!", name))
 					} else {
-						c.SendChatMessage("Welcome, " + name + " o/ (note: i am a bot)")
+						sendChatWithCooldown(c, fmt.Sprintf("Welcome, %s o/", name))
 						gstore.Mark(name)
 						gstore.Save()
 					}
@@ -77,6 +83,19 @@ func main() {
 				_ = sender
 				if cmd.handle(c, sender, msg) {
 					return
+				}
+			}
+		}
+
+		// gamemode change
+		if pkt.PacketID == packets.S2CGameEvent.PacketID {
+			var d packets.S2CGameEventData
+			if err := jp.BytesToPacketData(pkt.Data, &d); err != nil {
+				log.Println("error parsing gamemode change event")
+			}
+			if d.Event == 3 { // change gamemode
+				if d.Value == 3 { // spectator
+					sendChatWithCooldown(c, "ouch! you got me :(")
 				}
 			}
 		}
@@ -99,6 +118,49 @@ func main() {
 			log.Fatal(err)
 		}
 	}
+}
+
+var (
+	chatSendMu     sync.Mutex
+	chatLastSent   time.Time
+	chatQueue      chan string
+	chatSenderOnce sync.Once
+)
+
+func startChatSender(c *client.Client) {
+	chatSenderOnce.Do(func() {
+		chatQueue = make(chan string, chatQueueCapacity)
+		go func() {
+			for msg := range chatQueue {
+				chatSendMu.Lock()
+				if !chatLastSent.IsZero() {
+					wait := time.Until(chatLastSent.Add(chatCooldownDuration))
+					if wait > 0 {
+						time.Sleep(wait)
+					}
+				}
+				c.SendChatMessage(msg)
+				chatLastSent = time.Now()
+				chatSendMu.Unlock()
+			}
+		}()
+	})
+}
+
+func enqueueChat(msg string) bool {
+	select {
+	case chatQueue <- msg:
+		return true
+	default:
+		// queue full: drop message to keep at most chatQueueCapacity queued
+		log.Println("chat queue full; dropping message:", msg)
+		return false
+	}
+}
+
+func sendChatWithCooldown(c *client.Client, msg string) {
+	startChatSender(c)
+	_ = enqueueChat(msg)
 }
 
 func extractJoinUsername(text string) (string, bool) {
