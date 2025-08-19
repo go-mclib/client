@@ -155,6 +155,8 @@ func (c *Client) initializeAuth(ctx context.Context) error {
 		return fmt.Errorf("authentication failed: %w", err)
 	}
 	c.LoginData = ld
+	// overwrite canonical (authenticated) username
+	c.Username = ld.Username
 
 	cert, err := fetchMojangCertificate(ld.AccessToken)
 	if err != nil {
