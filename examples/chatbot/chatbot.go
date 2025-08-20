@@ -100,9 +100,9 @@ func main() {
 			}
 			if d.Event == 3 { // change gamemode
 				if d.Value == 3 { // spectator
+					spectatorCounter.Add(1)
 					// chance of 10 %
 					if rand.Intn(10) == 0 {
-						spectatorCounter.Add(1)
 						c.SendChatMessage(fmt.Sprintf("wowee, you shot me %d times!", spectatorCounter.Load()))
 					}
 				}
