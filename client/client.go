@@ -38,10 +38,7 @@ type Client struct {
 	ChatSigner    *chat.ChatSigner
 
 	// Stores
-	Self    *SelfStore
-
-	// Controllers
-	Physics *PhysicsController
+	Self *SelfStore
 }
 
 // NewClient creates a high-level client suitable for bots.
@@ -62,7 +59,6 @@ func NewClient(host string, port uint16, username string, verbose bool, onlineMo
 	}
 
 	c.TCPClient.EnableDebug(verbose)
-	c.Physics = NewPhysicsController(c)
 	return c
 }
 
@@ -75,7 +71,6 @@ func (c *Client) RegisterHandler(handler Handler) {
 func (c *Client) RegisterDefaultHandlers() {
 	c.RegisterHandler(defaultStateHandler)
 	c.RegisterHandler(c.Self.HandlePacket)
-	c.RegisterHandler(c.Physics.HandlePacket)
 }
 
 // ConnectAndStart connects, performs handshake/login, and enters the packet loop.
@@ -123,10 +118,6 @@ func (c *Client) ConnectAndStart(ctx context.Context) error {
 		}
 	}()
 
-	if c.HasGravity {
-		c.Physics.Start()
-	}
-
 	// in
 	for {
 		pkt, err := c.ReadPacket()
@@ -140,24 +131,7 @@ func (c *Client) ConnectAndStart(ctx context.Context) error {
 	}
 }
 
-
-// SetVelocity sets the bot's velocity (blocks per tick)
-func (c *Client) SetVelocity(x, y, z float64) {
-	c.Physics.SetVelocity(x, y, z)
-}
-
-// GetVelocity returns the bot's current velocity (blocks per tick)
-func (c *Client) GetVelocity() (x, y, z float64) {
-	return c.Physics.GetVelocity()
-}
-
-// AddVelocity adds to the bot's current velocity
-func (c *Client) AddVelocity(dx, dy, dz float64) {
-	c.Physics.AddVelocity(dx, dy, dz)
-}
-
 // Disconnect closes the connection to the server
 func (c *Client) Disconnect() {
-	c.Physics.Stop()
 	c.TCPClient.Close()
 }

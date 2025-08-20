@@ -192,7 +192,7 @@ func handlePlayPacket(c *Client, pkt *jp.Packet) {
 			c.Logger.Println("failed to send player loaded:", err)
 		}
 
-		c.Respawn()
+		c.Respawn() // health not available yet, just send the packet
 	case packets.S2CPlayerChat.PacketID:
 		var chatData packets.S2CPlayerChatData
 		if err := jp.BytesToPacketData(pkt.Data, &chatData); err == nil {
