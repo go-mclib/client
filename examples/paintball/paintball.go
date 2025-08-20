@@ -24,6 +24,8 @@ const (
 	// greetStorePath is the path to the file that stores the greeted users
 	// (if a player was already greeted on first known join, greet with welcome back message instead)
 	greetStorePath = ".greeted_users.json"
+	// scoreStorePath is the path to the file that stores player paintball scores
+	scoreStorePath = ".paintball_scores.json"
 	// chatCooldownDuration is the minimum delay enforced between chat messages
 	chatCooldownDuration = 2 * time.Second
 	// chatQueueCapacity bounds the number of queued messages waiting for cooldown
@@ -33,6 +35,7 @@ const (
 var (
 	spectatorCounter = atomic.Int32{}
 	joinRegex        = regexp.MustCompile(`multiplayer\.player\.joined\s+\[(\w{1,16})\]`)
+	paintRegex       = regexp.MustCompile(`(\w+) painted (\w+)`)
 )
 
 func main() {
@@ -56,7 +59,10 @@ func main() {
 	gstore := newGreetStore(greetStorePath)
 	gstore.Load()
 
-	cmd := commandHandler{}
+	sstore := newScoreStore(scoreStorePath)
+	sstore.Load()
+
+	cmd := commandHandler{scoreStore: sstore}
 
 	c.RegisterHandler(func(c *client.Client, pkt *jp.Packet) {
 		// greet on join
@@ -81,13 +87,19 @@ func main() {
 			}
 		}
 
-		// commands
+		// commands and score tracking
 		if pkt.PacketID == packets.S2CPlayerChat.PacketID {
 			var d packets.S2CPlayerChatData
 			if err := jp.BytesToPacketData(pkt.Data, &d); err == nil {
 				sender := d.SenderName.GetText()
 				msg := string(d.Message)
 				_ = sender
+				
+				// check for paintball score
+				if sstore.ProcessChatMessage(msg) {
+					sstore.Save()
+				}
+				
 				if cmd.handle(c, sender, msg) {
 					return
 				}
@@ -147,9 +159,11 @@ func main() {
 	select {
 	case <-sigc:
 		gstore.Save()
+		sstore.Save()
 		_ = c.Close()
 	case err := <-done:
 		gstore.Save()
+		sstore.Save()
 		if err != nil {
 			log.Fatal(err)
 		}

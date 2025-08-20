@@ -7,9 +7,11 @@ import (
 	"github.com/go-mclib/client/client"
 )
 
-type commandHandler struct{}
+type commandHandler struct{
+	scoreStore *scoreStore
+}
 
-func (commandHandler) handle(c *client.Client, sender string, msg string) bool {
+func (ch commandHandler) handle(c *client.Client, sender string, msg string) bool {
 	if !strings.HasPrefix(msg, "!") {
 		return false
 	}
@@ -22,7 +24,7 @@ func (commandHandler) handle(c *client.Client, sender string, msg string) bool {
 
 	switch cmd {
 	case "help":
-		c.SendChatMessage("Commands: !help, !say <message>, !whoami, !disconnect")
+		c.SendChatMessage("Commands: !help, !say <message>, !whoami, !disconnect, !score [player]")
 		return true
 	case "say":
 		if arg == "" {
@@ -36,6 +38,14 @@ func (commandHandler) handle(c *client.Client, sender string, msg string) bool {
 		return true
 	case "disconnect":
 		c.Disconnect()
+		return true
+	case "score":
+		player := arg
+		if player == "" {
+			player = sender
+		}
+		score := ch.scoreStore.GetScore(player)
+		c.SendChatMessage(fmt.Sprintf("%s has %d points", player, score))
 		return true
 	}
 
