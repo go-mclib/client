@@ -1,8 +1,8 @@
 package client
 
 import (
+	"crypto/rand"
 	"encoding/binary"
-	"math/rand"
 	"time"
 
 	packets "github.com/go-mclib/data/go/772/java_packets"

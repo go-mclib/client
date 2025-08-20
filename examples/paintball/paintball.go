@@ -40,15 +40,17 @@ func main() {
 	var verbose bool
 	var username string
 	var online bool
+	var hasGravity bool
 
 	flag.StringVar(&addr, "s", "localhost:25565", "server address (host:port)")
 	flag.BoolVar(&verbose, "v", false, "verbose logging")
 	flag.StringVar(&username, "u", "", "offline username (empty = Microsoft auth)")
 	flag.BoolVar(&online, "online", true, "assume that the server is in online-mode")
+	flag.BoolVar(&hasGravity, "gravity", true, "enable (cheap) gravity")
 	flag.Parse()
 
 	host, port := parseAddr(addr)
-	c := client.NewClient(host, port, username, verbose, online)
+	c := client.NewClient(host, port, username, verbose, online, hasGravity)
 	c.RegisterDefaultHandlers()
 
 	gstore := newGreetStore(greetStorePath)
@@ -109,6 +111,31 @@ func main() {
 			}
 		}
 	})
+
+	go func() {
+		for {
+			// do not send packets in e. g. config state, it kicks the client
+			if c.GetState() != jp.StatePlay {
+				continue
+			}
+
+			time.Sleep(1 * time.Second)
+
+			// look randomly and use item
+			randomYaw := rand.Float64() * 360
+			randomPitch := rand.Float64()*280 + 90 // not directly into ground or above head
+			if err := c.UseAt(0, randomYaw, randomPitch); err != nil {
+				log.Println("error using item:", err)
+			}
+
+			// move randomly
+			randomDeltaX := rand.Float64()*10 - 5
+			randomDeltaZ := rand.Float64()*10 - 5
+			if err := c.Move(randomDeltaX, 0, randomDeltaZ); err != nil {
+				log.Println("error moving:", err)
+			}
+		}
+	}()
 
 	// gracefully save greeted users
 	done := make(chan error, 1)

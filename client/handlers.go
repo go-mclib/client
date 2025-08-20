@@ -3,7 +3,7 @@ package client
 import (
 	"time"
 
-	"github.com/go-mclib/data/go/772/java_packets"
+	packets "github.com/go-mclib/data/go/772/java_packets"
 	jp "github.com/go-mclib/protocol/java_protocol"
 	ns "github.com/go-mclib/protocol/net_structures"
 )
@@ -12,7 +12,7 @@ type Handler func(c *Client, pkt *jp.Packet)
 
 // defaultStateHandler drives the client through login -> configuration -> play
 func defaultStateHandler(c *Client, pkt *jp.Packet) {
-	switch c.state {
+	switch c.GetState() {
 	case jp.StateLogin:
 		if pkt.PacketID == packets.S2CHello.PacketID && c.SessionClient != nil {
 			handleEncryptionRequest(c, pkt)
@@ -20,12 +20,12 @@ func defaultStateHandler(c *Client, pkt *jp.Packet) {
 		}
 		handleLoginPacket(c, pkt)
 		if pkt.PacketID == packets.S2CLoginFinished.PacketID {
-			c.state = jp.StateConfiguration
+			c.SetState(jp.StateConfiguration)
 		}
 	case jp.StateConfiguration:
 		handleConfigurationPacket(c, pkt)
 		if pkt.PacketID == packets.S2CLoginCompression.PacketID {
-			c.state = jp.StatePlay
+			c.SetState(jp.StatePlay)
 		}
 	case jp.StatePlay:
 		handlePlayPacket(c, pkt)
@@ -180,7 +180,19 @@ func handlePlayPacket(c *Client, pkt *jp.Packet) {
 			c.Logger.Printf("disconnect: %s", d.Reason)
 		}
 	case packets.S2CLoginPlay.PacketID:
+		var d packets.S2CLoginPlayData
+		if err := jp.BytesToPacketData(pkt.Data, &d); err != nil {
+			c.Logger.Println("failed to parse login play data:", err)
+			return
+		}
+		c.Self.EntityID = ns.VarInt(d.EntityId)
 		c.Logger.Println("spawned; ready")
+
+		if err := c.WritePacket(packets.C2SPlayerLoaded); err != nil {
+			c.Logger.Println("failed to send player loaded:", err)
+		}
+
+		c.Respawn()
 	case packets.S2CPlayerChat.PacketID:
 		var chatData packets.S2CPlayerChatData
 		if err := jp.BytesToPacketData(pkt.Data, &chatData); err == nil {
@@ -218,6 +230,17 @@ func handlePlayPacket(c *Client, pkt *jp.Packet) {
 			} else {
 				c.Logger.Printf("[DISGUISED] %s: %s", sender, msg)
 			}
+		}
+	case packets.S2CPlayerCombatKill.PacketID:
+		// auto respawn on death
+		var d packets.S2CPlayerCombatKillData
+		if err := jp.BytesToPacketData(pkt.Data, &d); err != nil {
+			c.Logger.Printf("failed to parse player combat kill data: %s", err)
+			return
+		}
+		if d.PlayerId == c.Self.EntityID { // enable respawn screen
+			c.Logger.Printf("died: %s", d.Message.GetText())
+			c.Respawn()
 		}
 	}
 }

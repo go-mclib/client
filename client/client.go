@@ -25,9 +25,9 @@ type Client struct {
 	Username   string
 	Verbose    bool
 	OnlineMode bool
+	HasGravity bool
 
 	// Runtime
-	state               jp.State
 	Handlers            []Handler
 	Logger              *log.Logger
 	OutgoingPacketQueue chan *jp.Packet
@@ -36,10 +36,16 @@ type Client struct {
 	LoginData     auth.LoginData
 	SessionClient *session_server.SessionServerClient
 	ChatSigner    *chat.ChatSigner
+
+	// Stores
+	Self    *SelfStore
+
+	// Controllers
+	Physics *PhysicsController
 }
 
 // NewClient creates a high-level client suitable for bots.
-func NewClient(host string, port uint16, username string, verbose bool, onlineMode bool) *Client {
+func NewClient(host string, port uint16, username string, verbose bool, onlineMode bool, hasGravity bool) *Client {
 	logger := log.New(os.Stdout, "", log.LstdFlags)
 
 	c := &Client{
@@ -49,12 +55,14 @@ func NewClient(host string, port uint16, username string, verbose bool, onlineMo
 		Username:            username,
 		Verbose:             verbose,
 		OnlineMode:          onlineMode,
-		state:               jp.StateHandshake,
+		HasGravity:          hasGravity,
 		OutgoingPacketQueue: make(chan *jp.Packet, 100),
 		Logger:              logger,
+		Self:                NewSelfStore(),
 	}
 
 	c.TCPClient.EnableDebug(verbose)
+	c.Physics = NewPhysicsController(c)
 	return c
 }
 
@@ -66,6 +74,8 @@ func (c *Client) RegisterHandler(handler Handler) {
 // RegisterDefaultHandlers loads built-in handlers that drive the client to play state
 func (c *Client) RegisterDefaultHandlers() {
 	c.RegisterHandler(defaultStateHandler)
+	c.RegisterHandler(c.Self.HandlePacket)
+	c.RegisterHandler(c.Physics.HandlePacket)
 }
 
 // ConnectAndStart connects, performs handshake/login, and enters the packet loop.
@@ -79,6 +89,7 @@ func (c *Client) ConnectAndStart(ctx context.Context) error {
 		return err
 	}
 
+	// hello (handshake)
 	handshakePacket, err := packets.C2SIntention.WithData(packets.C2SIntentionData{
 		ProtocolVersion: protocolVersion,
 		ServerAddress:   ns.String(c.Host),
@@ -92,8 +103,7 @@ func (c *Client) ConnectAndStart(ctx context.Context) error {
 		return fmt.Errorf("handshake send: %w", err)
 	}
 
-	c.state = jp.StateLogin
-	c.SetState(c.state)
+	c.SetState(jp.StateLogin)
 
 	uuid, _ := ns.NewUUID(c.LoginData.UUID)
 	loginStartPacket, err := packets.C2SHello.WithData(packets.C2SHelloData{Name: ns.String(c.LoginData.Username), PlayerUuid: uuid})
@@ -104,6 +114,7 @@ func (c *Client) ConnectAndStart(ctx context.Context) error {
 		return fmt.Errorf("login start send: %w", err)
 	}
 
+	// out
 	go func() {
 		for pkt := range c.OutgoingPacketQueue {
 			if err := c.WritePacket(pkt); err != nil {
@@ -112,6 +123,11 @@ func (c *Client) ConnectAndStart(ctx context.Context) error {
 		}
 	}()
 
+	if c.HasGravity {
+		c.Physics.Start()
+	}
+
+	// in
 	for {
 		pkt, err := c.ReadPacket()
 		if err != nil {
@@ -124,7 +140,24 @@ func (c *Client) ConnectAndStart(ctx context.Context) error {
 	}
 }
 
+
+// SetVelocity sets the bot's velocity (blocks per tick)
+func (c *Client) SetVelocity(x, y, z float64) {
+	c.Physics.SetVelocity(x, y, z)
+}
+
+// GetVelocity returns the bot's current velocity (blocks per tick)
+func (c *Client) GetVelocity() (x, y, z float64) {
+	return c.Physics.GetVelocity()
+}
+
+// AddVelocity adds to the bot's current velocity
+func (c *Client) AddVelocity(dx, dy, dz float64) {
+	c.Physics.AddVelocity(dx, dy, dz)
+}
+
 // Disconnect closes the connection to the server
 func (c *Client) Disconnect() {
+	c.Physics.Stop()
 	c.TCPClient.Close()
 }
