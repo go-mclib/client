@@ -5,11 +5,13 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"os"
 	"os/signal"
 	"regexp"
-	"sync"
+	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -28,7 +30,10 @@ const (
 	chatQueueCapacity = 3
 )
 
-var joinRegex = regexp.MustCompile(`multiplayer\.player\.joined\s+\[(\w{1,16})\]`)
+var (
+	spectatorCounter = atomic.Int32{}
+	joinRegex        = regexp.MustCompile(`multiplayer\.player\.joined\s+\[(\w{1,16})\]`)
+)
 
 func main() {
 	var addr string
@@ -64,9 +69,9 @@ func main() {
 					}
 
 					if gstore.Has(name) {
-						sendChatWithCooldown(c, fmt.Sprintf("Welcome back, %s!", name))
+						c.SendChatMessage(fmt.Sprintf("Welcome back, %s!", name))
 					} else {
-						sendChatWithCooldown(c, fmt.Sprintf("Welcome, %s o/", name))
+						c.SendChatMessage(fmt.Sprintf("Welcome, %s o/", name))
 						gstore.Mark(name)
 						gstore.Save()
 					}
@@ -87,7 +92,7 @@ func main() {
 			}
 		}
 
-		// gamemode change
+		// gamemode change (just testing random stuff on our paintball server)
 		if pkt.PacketID == packets.S2CGameEvent.PacketID {
 			var d packets.S2CGameEventData
 			if err := jp.BytesToPacketData(pkt.Data, &d); err != nil {
@@ -95,7 +100,11 @@ func main() {
 			}
 			if d.Event == 3 { // change gamemode
 				if d.Value == 3 { // spectator
-					sendChatWithCooldown(c, "ouch! you got me :(")
+					// chance of 10 %
+					if rand.Intn(10) == 0 {
+						spectatorCounter.Add(1)
+						c.SendChatMessage(fmt.Sprintf("wowee, you shot me %d times!", spectatorCounter.Load()))
+					}
 				}
 			}
 		}
@@ -120,49 +129,6 @@ func main() {
 	}
 }
 
-var (
-	chatSendMu     sync.Mutex
-	chatLastSent   time.Time
-	chatQueue      chan string
-	chatSenderOnce sync.Once
-)
-
-func startChatSender(c *client.Client) {
-	chatSenderOnce.Do(func() {
-		chatQueue = make(chan string, chatQueueCapacity)
-		go func() {
-			for msg := range chatQueue {
-				chatSendMu.Lock()
-				if !chatLastSent.IsZero() {
-					wait := time.Until(chatLastSent.Add(chatCooldownDuration))
-					if wait > 0 {
-						time.Sleep(wait)
-					}
-				}
-				c.SendChatMessage(msg)
-				chatLastSent = time.Now()
-				chatSendMu.Unlock()
-			}
-		}()
-	})
-}
-
-func enqueueChat(msg string) bool {
-	select {
-	case chatQueue <- msg:
-		return true
-	default:
-		// queue full: drop message to keep at most chatQueueCapacity queued
-		log.Println("chat queue full; dropping message:", msg)
-		return false
-	}
-}
-
-func sendChatWithCooldown(c *client.Client, msg string) {
-	startChatSender(c)
-	_ = enqueueChat(msg)
-}
-
 func extractJoinUsername(text string) (string, bool) {
 	m := joinRegex.FindStringSubmatch(text)
 	if len(m) == 2 {
@@ -171,16 +137,16 @@ func extractJoinUsername(text string) (string, bool) {
 	return "", false
 }
 
-func parseAddr(addr string) (string, int) {
+func parseAddr(addr string) (string, uint16) {
 	host := addr
-	port := 25565
+	port := uint16(25565)
 	if h, p, err := net.SplitHostPort(addr); err == nil {
 		host = h
-		var parsed int
-		_, _ = fmt.Sscanf(p, "%d", &parsed)
-		if parsed > 0 && parsed <= 65535 {
-			port = parsed
+		convP, err := strconv.ParseUint(p, 10, 16)
+		if err != nil {
+			log.Println("error parsing port:", err)
 		}
+		port = uint16(convP)
 	}
 	return host, port
 }

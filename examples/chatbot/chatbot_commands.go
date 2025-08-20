@@ -19,9 +19,10 @@ func (commandHandler) handle(c *client.Client, sender string, msg string) bool {
 	if len(parts) == 2 {
 		arg = strings.TrimSpace(parts[1])
 	}
+
 	switch cmd {
 	case "help":
-		c.SendChatMessage("Commands: !help, !say <message>")
+		c.SendChatMessage("Commands: !help, !say <message>, !whoami, !disconnect")
 		return true
 	case "say":
 		if arg == "" {
@@ -33,6 +34,10 @@ func (commandHandler) handle(c *client.Client, sender string, msg string) bool {
 	case "whoami":
 		c.SendChatMessage(fmt.Sprintf("You are %s", sender))
 		return true
+	case "disconnect":
+		c.Disconnect()
+		return true
 	}
+
 	return false
 }

@@ -1,12 +1,9 @@
 package client
 
 import (
-	"bytes"
-	"encoding/json"
-	"log"
 	"time"
 
-	packets "github.com/go-mclib/data/go/772/java_packets"
+	"github.com/go-mclib/data/go/772/java_packets"
 	jp "github.com/go-mclib/protocol/java_protocol"
 	ns "github.com/go-mclib/protocol/net_structures"
 )
@@ -151,8 +148,11 @@ func handleLoginPacket(c *Client, pkt *jp.Packet) {
 func handleConfigurationPacket(c *Client, pkt *jp.Packet) {
 	switch pkt.PacketID {
 	case packets.S2CDisconnectConfiguration.PacketID:
-		msg := parseDisconnectReason([]byte(pkt.Data))
-		c.Logger.Printf("disconnected during configuration: %s", msg)
+		var data packets.S2CDisconnectConfigurationData
+		if err := jp.BytesToPacketData(pkt.Data, &data); err != nil {
+			c.Logger.Println("failed to parse disconnect configuration data:", err)
+		}
+		c.Logger.Printf("disconnected during configuration: %s", string(data.Reason.GetText()))
 	case packets.S2CFinishConfiguration.PacketID:
 		_ = c.WritePacket(packets.C2SFinishConfiguration)
 		c.SetState(jp.StatePlay)
@@ -191,13 +191,6 @@ func handlePlayPacket(c *Client, pkt *jp.Packet) {
 			} else {
 				c.Logger.Printf("[PLAYER] %s: %s", sender, msg)
 			}
-		} else {
-			_, _, msg, ok := parsePlayerChatFast(ns.ByteArray(pkt.Data))
-			if ok {
-				c.Logger.Printf("[PLAYER] %s", msg)
-			} else {
-				log.Println("player chat parse error:", err)
-			}
 		}
 	case packets.S2CKeepAlivePlay.PacketID:
 		var d packets.S2CKeepAlivePlayData
@@ -214,14 +207,6 @@ func handlePlayPacket(c *Client, pkt *jp.Packet) {
 			} else {
 				c.Logger.Printf("[SYSTEM] %s", txt)
 			}
-		} else {
-			if msg, overlay, ok := parseSystemChatFast(ns.ByteArray(pkt.Data)); ok {
-				if overlay {
-					c.Logger.Printf("[SYSTEM-ACTION] %s", msg)
-				} else {
-					c.Logger.Printf("[SYSTEM] %s", msg)
-				}
-			}
 		}
 	case packets.S2CDisguisedChat.PacketID:
 		var d packets.S2CDisguisedChatData
@@ -235,145 +220,4 @@ func handlePlayPacket(c *Client, pkt *jp.Packet) {
 			}
 		}
 	}
-}
-
-func sendClientInformation(c *Client) {
-	info := packets.C2SClientInformationConfigurationData{
-		Locale:              ns.String("en_us"),
-		ViewDistance:        ns.Byte(12),
-		ChatMode:            ns.VarInt(0),
-		ChatColors:          ns.Boolean(true),
-		DisplayedSkinParts:  ns.UnsignedByte(0x7F),
-		MainHand:            ns.VarInt(1),
-		EnableTextFiltering: ns.Boolean(true),
-		AllowServerListings: ns.Boolean(true),
-		ParticleStatus:      ns.VarInt(2),
-	}
-	if pkt, err := packets.C2SClientInformationConfiguration.WithData(info); err == nil {
-		_ = c.WritePacket(pkt)
-	}
-}
-
-func sendBrandPluginMessage(c *Client, brand string) {
-	dataBytes, err := ns.String(brand).ToBytes()
-	if err != nil {
-		return
-	}
-	if pkt, err := packets.C2SCustomPayloadConfiguration.WithData(packets.C2SCustomPayloadConfigurationData{
-		Channel: ns.Identifier("minecraft:brand"),
-		Data:    ns.ByteArray(dataBytes),
-	}); err == nil {
-		_ = c.WritePacket(pkt)
-	}
-}
-
-// HACK: integrate funcs below to go-mclib/data and go-mclib/protocol:
-
-func parseDisconnectReason(data []byte) string {
-	if v, ok := extractNBTTextValue(data, "text"); ok && v != "" {
-		return v
-	}
-	var str ns.String
-	if _, err := str.FromBytes(ns.ByteArray(data)); err == nil {
-		txt := string(str)
-		if len(txt) > 0 && (txt[0] == '{' || txt[0] == '[' || txt[0] == '"') {
-			var m map[string]any
-			if json.Unmarshal([]byte(txt), &m) == nil {
-				if v, ok := m["text"].(string); ok && v != "" {
-					return v
-				}
-			}
-		}
-		if txt != "" && txt != "color" {
-			return txt
-		}
-	}
-	return "<unknown reason>"
-}
-
-func extractNBTTextValue(data []byte, key string) (string, bool) {
-	keyBytes := []byte(key)
-	for i := 0; i+7 < len(data); i++ {
-		if data[i] == 0x08 { // TAG_String
-			if i+3+len(keyBytes) >= len(data) {
-				continue
-			}
-			nameLen := int(data[i+1])<<8 | int(data[i+2])
-			if nameLen == len(keyBytes) {
-				nameStart := i + 3
-				nameEnd := nameStart + nameLen
-				if nameEnd <= len(data) && bytes.Equal(data[nameStart:nameEnd], keyBytes) {
-					if nameEnd+2 > len(data) {
-						return "", false
-					}
-					valLen := int(data[nameEnd])<<8 | int(data[nameEnd+1])
-					valStart := nameEnd + 2
-					valEnd := valStart + valLen
-					if valEnd <= len(data) {
-						return string(data[valStart:valEnd]), true
-					}
-					return "", false
-				}
-			}
-		}
-	}
-	return "", false
-}
-
-func parseSystemChatFast(data ns.ByteArray) (string, bool, bool) {
-	var l ns.VarInt
-	n, err := l.FromBytes(data)
-	if err != nil {
-		return "", false, false
-	}
-	if len(data) < n+int(l)+1 {
-		return "", false, false
-	}
-	payload := string(data[n : n+int(l)])
-	overlay := data[n+int(l)] != 0
-	if comp, err := ns.ParseTextComponentFromString(payload); err == nil {
-		return comp.String(), overlay, true
-	}
-	return payload, overlay, true
-}
-
-func parsePlayerChatFast(data ns.ByteArray) (string, string, string, bool) {
-	offset := 0
-	var vi ns.VarInt
-	n, err := vi.FromBytes(data[offset:])
-	if err != nil {
-		return "", "", "", false
-	}
-	offset += n
-	var uuid ns.UUID
-	n, err = uuid.FromBytes(data[offset:])
-	if err != nil {
-		return "", "", "", false
-	}
-	offset += n
-	var idx ns.VarInt
-	n, err = idx.FromBytes(data[offset:])
-	if err != nil {
-		return "", "", "", false
-	}
-	offset += n
-	var present ns.Boolean
-	n, err = present.FromBytes(data[offset:])
-	if err != nil {
-		return "", "", "", false
-	}
-	offset += n
-	if bool(present) {
-		if len(data) < offset+256 {
-			return "", "", "", false
-		}
-		offset += 256
-	}
-	var msgStr ns.String
-	n, err = msgStr.FromBytes(data[offset:])
-	if err != nil {
-		return "", "", "", false
-	}
-	msg := string(msgStr)
-	return "", "", msg, true
 }

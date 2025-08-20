@@ -3,7 +3,7 @@ module github.com/go-mclib/client
 go 1.24.5
 
 require (
-	github.com/go-mclib/data v0.0.0-20250819111235-8793a5d76ba7
+	github.com/go-mclib/data v0.0.0-20250820060749-8dfa569f68f4
 	github.com/go-mclib/protocol v0.0.0-20250819111155-0e3a23dc2054
 )
 
