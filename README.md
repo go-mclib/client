@@ -17,10 +17,10 @@ Since the tears and sweat are real, it is unlikely that I will continue maintain
 
 See the [`examples`](./examples) directory for some sample bots/inspiration.
 
-For example, to run the chatbot example:
+For example, to run the [`paintball`](./examples/paintball) example:
 
 ```bash
-go run examples/chatbot/chatbot.go -s <your_server_ip> -u "<username (omit this parameter for Microsoft auth)>"
+go run examples/paintball/paintball.go -s <your_server_ip> -u "<username (omit this parameter for Microsoft auth)>"
 ```
 
 ## License
