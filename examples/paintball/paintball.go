@@ -156,14 +156,12 @@ func main() {
 					log.Println("error using item:", err)
 				}
 				lastUseTime = time.Now()
-			}
 
-			// move randomly
-			//randomDeltaX := (rand.Float64() - 0.01) * 0.001
-			//randomDeltaZ := (rand.Float64() - 0.01) * 0.001
-			//if err := c.MoveRelative(randomDeltaX, 0, randomDeltaZ); err != nil {
-			//	log.Println("error moving:", err)
-			//}
+				// rotate offset
+				if err := c.Rotate(0, rand.Float64()*2-1); err != nil {
+					log.Println("error rotating:", err)
+				}
+			}
 		}
 	}()
 
