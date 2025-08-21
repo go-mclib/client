@@ -3,11 +3,12 @@ package main
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/go-mclib/client/client"
 )
 
-type commandHandler struct{
+type commandHandler struct {
 	scoreStore *scoreStore
 }
 
@@ -24,17 +25,7 @@ func (ch commandHandler) handle(c *client.Client, sender string, msg string) boo
 
 	switch cmd {
 	case "help":
-		c.SendChatMessage("Commands: !help, !say <message>, !whoami, !disconnect, !score [player]")
-		return true
-	case "say":
-		if arg == "" {
-			c.SendChatMessage("Usage: !say <message>")
-			return true
-		}
-		c.SendChatMessage(arg)
-		return true
-	case "whoami":
-		c.SendChatMessage(fmt.Sprintf("You are %s", sender))
+		c.SendChatMessage("Commands: !help, !score [player], !top")
 		return true
 	case "disconnect":
 		c.Disconnect()
@@ -46,6 +37,18 @@ func (ch commandHandler) handle(c *client.Client, sender string, msg string) boo
 		}
 		score := ch.scoreStore.GetScore(player)
 		c.SendChatMessage(fmt.Sprintf("%s has %d points", player, score))
+		return true
+	case "top":
+		scores := ch.scoreStore.GetTopScores()
+		for i, score := range scores {
+			c.SendChatMessage(score)
+			time.Sleep(1 * time.Second)
+
+			if i >= 10 {
+				break
+			}
+		}
+
 		return true
 	}
 

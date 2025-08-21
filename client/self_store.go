@@ -70,5 +70,13 @@ func (s *SelfStore) HandlePacket(c *Client, pkt *jp.Packet) {
 		s.ExperienceBar = d.ExperienceBar
 		s.Level = d.Level
 		s.TotalExperience = d.TotalExperience
+	case packets.S2CPlayerPosition.PacketID:
+		var d packets.S2CPlayerPositionData
+		if err := jp.BytesToPacketData(pkt.Data, &d); err != nil {
+			return
+		}
+		s.X = d.X
+		s.Y = d.Y
+		s.Z = d.Z
 	}
 }

@@ -35,7 +35,6 @@ const (
 var (
 	spectatorCounter = atomic.Int32{}
 	joinRegex        = regexp.MustCompile(`multiplayer\.player\.joined\s+\[(\w{1,16})\]`)
-	paintRegex       = regexp.MustCompile(`(\w+) painted (\w+)`)
 )
 
 func main() {
@@ -94,14 +93,20 @@ func main() {
 				sender := d.SenderName.GetText()
 				msg := string(d.Message)
 				_ = sender
-				
-				// check for paintball score
-				if sstore.ProcessChatMessage(msg) {
-					sstore.Save()
-				}
-				
+
 				if cmd.handle(c, sender, msg) {
 					return
+				}
+			}
+		}
+
+		// paintball score tracking
+		if pkt.PacketID == packets.S2CSystemChat.PacketID {
+			var d packets.S2CSystemChatData
+			if err := jp.BytesToPacketData(pkt.Data, &d); err == nil {
+				text := d.Content.GetText()
+				if sstore.ProcessChatMessage(c, text) {
+					sstore.Save()
 				}
 			}
 		}
@@ -135,17 +140,18 @@ func main() {
 
 			// look randomly and use item
 			randomYaw := rand.Float64() * 360
-			randomPitch := rand.Float64()*280 + 90 // not directly into ground or above head
+			randomPitch := rand.Float64()*180 - 90
 			if err := c.UseAt(0, randomYaw, randomPitch); err != nil {
 				log.Println("error using item:", err)
 			}
 
 			// move randomly
-			randomDeltaX := rand.Float64()*10 - 5
-			randomDeltaZ := rand.Float64()*10 - 5
-			if err := c.Move(randomDeltaX, 0, randomDeltaZ); err != nil {
-				log.Println("error moving:", err)
-			}
+			// FIXME: debug why this isn't working
+			//randomDeltaX := (rand.Float64() - 0.5) * 0.2
+			//randomDeltaZ := (rand.Float64() - 0.5) * 0.2
+			//if err := c.MoveRelative(randomDeltaX, 0, randomDeltaZ); err != nil {
+			//	log.Println("error moving:", err)
+			//}
 		}
 	}()
 

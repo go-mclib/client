@@ -3,6 +3,7 @@ package client
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"fmt"
 	"time"
 
 	packets "github.com/go-mclib/data/go/772/java_packets"
@@ -10,7 +11,11 @@ import (
 	ns "github.com/go-mclib/protocol/net_structures"
 )
 
-func (c *Client) SendChatMessage(message string) {
+func (c *Client) SendChatMessage(message string) error {
+	if len(message) > 256 {
+		return fmt.Errorf("chat message too long: %d", len(message))
+	}
+
 	if c.ChatSigner != nil {
 		// signed message
 		saltBytes := make([]byte, 8)
@@ -20,8 +25,7 @@ func (c *Client) SendChatMessage(message string) {
 		lastSeen := c.ChatSigner.GetLastSeenMessages(20)
 		signedMsg, err := c.ChatSigner.SignMessage(message, timestamp, salt, lastSeen)
 		if err != nil {
-			c.Logger.Println("sign chat message:", err)
-			return
+			return err
 		}
 		ack := ns.FixedBitSet{Length: 20, Data: make([]byte, 3)}
 		pkt, err := packets.C2SChat.WithData(packets.C2SChatData{
@@ -34,11 +38,10 @@ func (c *Client) SendChatMessage(message string) {
 			Checksum:     ns.Byte(0),
 		})
 		if err != nil {
-			c.Logger.Println("build signed chat:", err)
-			return
+			return err
 		}
 		_ = c.WritePacket(pkt)
-		return
+		return nil
 	}
 
 	// unsigned
@@ -52,15 +55,15 @@ func (c *Client) SendChatMessage(message string) {
 		Checksum:     ns.Byte(0),
 	})
 	if err != nil {
-		c.Logger.Println("build unsigned chat:", err)
-		return
+		return err
 	}
 	_ = c.WritePacket(pkt)
+	return nil
 }
 
-func (c *Client) sendChatSessionData() {
+func (c *Client) sendChatSessionData() error {
 	if c.ChatSigner == nil {
-		return
+		return fmt.Errorf("no chat signer")
 	}
 
 	var sessionID ns.UUID
@@ -69,7 +72,7 @@ func (c *Client) sendChatSessionData() {
 
 	pub := c.ChatSigner.X509PublicKey
 	if len(pub) == 0 {
-		return
+		return fmt.Errorf("no public key")
 	}
 	expiresAt := ns.Long(c.ChatSigner.KeyExpiry.UnixMilli())
 	mojangSig := c.ChatSigner.SessionKey
@@ -91,7 +94,8 @@ func (c *Client) sendChatSessionData() {
 	})
 	if err != nil {
 		c.Logger.Println("build chat session packet:", err)
-		return
+		return err
 	}
 	_ = c.WritePacket(pkt)
+	return nil
 }
