@@ -157,8 +157,9 @@ func main() {
 				}
 				lastUseTime = time.Now()
 
-				// rotate offset
-				if err := c.Rotate(0, rand.Float64()*2-1); err != nil {
+				// rotation offset
+				yawChange := (rand.Float64() - 0.5) * 10
+				if err := c.Rotate(yawChange, 0); err != nil {
 					log.Println("error rotating:", err)
 				}
 			}
