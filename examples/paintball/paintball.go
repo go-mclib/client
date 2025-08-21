@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"math/rand"
 	"net"
 	"os"
@@ -130,25 +131,36 @@ func main() {
 	})
 
 	go func() {
+		var waveTime float64 = 0
+		lastUseTime := time.Now()
+
 		for {
 			// do not send packets in e. g. config state, it kicks the client
 			if c.GetState() != jp.StatePlay {
+				time.Sleep(50 * time.Millisecond)
 				continue
 			}
 
-			time.Sleep(1 * time.Second)
+			time.Sleep(50 * time.Millisecond)
+			waveTime += 0.05 // 50 ms
+			yaw := 90 * math.Sin(waveTime*math.Pi/2)
+			pitch := 30 * math.Sin(waveTime*math.Pi)
 
-			// look randomly and use item
-			randomYaw := rand.Float64() * 360
-			randomPitch := rand.Float64()*180 - 90
-			if err := c.UseAt(0, randomYaw, randomPitch); err != nil {
-				log.Println("error using item:", err)
+			if err := c.SetRotation(yaw, pitch); err != nil {
+				log.Println("error rotating:", err)
+			}
+
+			// use item every 100ms
+			if time.Since(lastUseTime) >= 100*time.Millisecond {
+				if err := c.Use(0); err != nil {
+					log.Println("error using item:", err)
+				}
+				lastUseTime = time.Now()
 			}
 
 			// move randomly
-			// FIXME: debug why this isn't working
-			//randomDeltaX := (rand.Float64() - 0.5) * 0.2
-			//randomDeltaZ := (rand.Float64() - 0.5) * 0.2
+			//randomDeltaX := (rand.Float64() - 0.01) * 0.001
+			//randomDeltaZ := (rand.Float64() - 0.01) * 0.001
 			//if err := c.MoveRelative(randomDeltaX, 0, randomDeltaZ); err != nil {
 			//	log.Println("error moving:", err)
 			//}

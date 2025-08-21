@@ -31,6 +31,11 @@ type SelfStore struct {
 	Y ns.Double
 	// The Z coordinate of the bot.
 	Z ns.Double
+	
+	// The yaw rotation of the bot (0-360 degrees).
+	Yaw ns.Float
+	// The pitch rotation of the bot (-90 to 90 degrees).
+	Pitch ns.Float
 }
 
 func NewSelfStore() *SelfStore {
@@ -45,6 +50,8 @@ func NewSelfStore() *SelfStore {
 		X:               ns.Double(0),
 		Y:               ns.Double(0),
 		Z:               ns.Double(0),
+		Yaw:             ns.Float(0),
+		Pitch:           ns.Float(0),
 	}
 }
 
@@ -78,5 +85,7 @@ func (s *SelfStore) HandlePacket(c *Client, pkt *jp.Packet) {
 		s.X = d.X
 		s.Y = d.Y
 		s.Z = d.Z
+		s.Yaw = d.Yaw
+		s.Pitch = d.Pitch
 	}
 }
