@@ -143,7 +143,7 @@ func main() {
 
 			time.Sleep(50 * time.Millisecond)
 			waveTime += 0.05 // 50 ms
-			yaw := 90 * math.Sin(waveTime*math.Pi/2)
+			yaw := 180 * math.Sin(waveTime*math.Pi/2) // Full 360 degree rotation (-180 to +180)
 			pitch := 30 * math.Sin(waveTime*math.Pi)
 
 			if err := c.SetRotation(yaw, pitch); err != nil {
