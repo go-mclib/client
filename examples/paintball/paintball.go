@@ -151,7 +151,7 @@ func main() {
 			}
 
 			// use item every 1ms
-			if time.Since(lastUseTime) >= 1*time.Millisecond {
+			if time.Since(lastUseTime) >= 10*time.Millisecond {
 				if err := c.Use(0); err != nil {
 					log.Println("error using item:", err)
 				}
