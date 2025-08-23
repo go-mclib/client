@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"math/rand"
 	"net"
 	"os"
@@ -130,7 +131,7 @@ func main() {
 	})
 
 	go func() {
-		var currentYaw float64 = 0
+		var waveTime float64 = 0
 		lastUseTime := time.Now()
 
 		for {
@@ -141,12 +142,11 @@ func main() {
 			}
 
 			time.Sleep(50 * time.Millisecond)
-			currentYaw += 10 // degrees per 50ms (200 degrees/second)
-			if currentYaw >= 360 {
-				currentYaw -= 360
-			}
+			waveTime += 0.05 // 50 ms
+			yaw := 90 * math.Sin(waveTime*math.Pi/2)
+			pitch := 30 * math.Sin(waveTime*math.Pi)
 
-			if err := c.SetRotation(currentYaw, 0); err != nil {
+			if err := c.SetRotation(yaw, pitch); err != nil {
 				log.Println("error rotating:", err)
 			}
 
