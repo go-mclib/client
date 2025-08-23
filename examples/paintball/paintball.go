@@ -132,7 +132,6 @@ func main() {
 
 	go func() {
 		var waveTime float64 = 0
-		lastUseTime := time.Now()
 
 		for {
 			// do not send packets in e. g. config state, it kicks the client
@@ -150,12 +149,8 @@ func main() {
 				log.Println("error rotating:", err)
 			}
 
-			// use item every 10ms
-			if time.Since(lastUseTime) >= 10*time.Millisecond {
-				if err := c.Use(0); err != nil {
-					log.Println("error using item:", err)
-				}
-				lastUseTime = time.Now()
+			if err := c.Use(0); err != nil {
+				log.Println("error using item:", err)
 			}
 		}
 	}()
