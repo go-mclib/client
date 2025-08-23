@@ -131,7 +131,7 @@ func main() {
 	})
 
 	go func() {
-		var waveTime float64 = 0
+		var currentYaw float64 = 0
 		lastUseTime := time.Now()
 
 		for {
@@ -142,26 +142,21 @@ func main() {
 			}
 
 			time.Sleep(50 * time.Millisecond)
-			waveTime += 0.05 // 50 ms
-			yaw := 90 * math.Sin(waveTime*math.Pi/2)
-			pitch := 30 * math.Sin(waveTime*math.Pi)
+			currentYaw += 10 // degrees per 50ms (200 degrees/second)
+			if currentYaw >= 360 {
+				currentYaw -= 360
+			}
 
-			if err := c.SetRotation(yaw, pitch); err != nil {
+			if err := c.SetRotation(currentYaw, 0); err != nil {
 				log.Println("error rotating:", err)
 			}
 
-			// use item every 1ms
+			// use item every 10ms
 			if time.Since(lastUseTime) >= 10*time.Millisecond {
 				if err := c.Use(0); err != nil {
 					log.Println("error using item:", err)
 				}
 				lastUseTime = time.Now()
-
-				// rotation offset
-				yawChange := (rand.Float64() - 0.5) * 10
-				if err := c.Rotate(yawChange, 0); err != nil {
-					log.Println("error rotating:", err)
-				}
 			}
 		}
 	}()
