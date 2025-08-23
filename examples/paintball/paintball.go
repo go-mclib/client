@@ -150,8 +150,8 @@ func main() {
 				log.Println("error rotating:", err)
 			}
 
-			// use item every 100ms
-			if time.Since(lastUseTime) >= 100*time.Millisecond {
+			// use item every 1ms
+			if time.Since(lastUseTime) >= 1*time.Millisecond {
 				if err := c.Use(0); err != nil {
 					log.Println("error using item:", err)
 				}
