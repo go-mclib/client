@@ -162,7 +162,7 @@ func handleConfigurationPacket(c *Client, pkt *jp.Packet) {
 	case packets.S2CKeepAliveConfiguration.PacketID:
 		var d packets.S2CKeepAliveConfigurationData
 		if err := jp.BytesToPacketData(pkt.Data, &d); err == nil {
-			reply, _ := packets.C2SKeepAliveConfiguration.WithData(packets.C2SKeepAliveConfigurationData{KeepAliveId: d.KeepAliveId})
+			reply, _ := packets.C2SKeepAliveConfiguration.WithData(packets.C2SKeepAliveConfigurationData(d))
 			_ = c.WritePacket(reply)
 		}
 	case packets.S2CSelectKnownPacks.PacketID:
@@ -220,7 +220,7 @@ func handlePlayPacket(c *Client, pkt *jp.Packet) {
 	case packets.S2CKeepAlivePlay.PacketID:
 		var d packets.S2CKeepAlivePlayData
 		if err := jp.BytesToPacketData(pkt.Data, &d); err == nil {
-			reply, _ := packets.C2SKeepAlivePlay.WithData(packets.C2SKeepAlivePlayData{KeepAliveId: d.KeepAliveId})
+			reply, _ := packets.C2SKeepAlivePlay.WithData(packets.C2SKeepAlivePlayData(d))
 			_ = c.WritePacket(reply)
 		}
 	case packets.S2CSystemChat.PacketID:
