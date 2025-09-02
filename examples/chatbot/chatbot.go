@@ -75,10 +75,9 @@ func main() {
 	// prompts
 	botName := mcClient.Username
 	systemPrompt := fmt.Sprintf(`You are %s, a Minecraft player in the game chat. You should ONLY respond when:
-1. Someone mentions your name (%s) or a part of it
+1. Someone mentions your name (%s), or references a "chatbot", "AI", "bot" or similar term in the chat
 2. Someone directly addresses you or asks you a question
 3. You're already part of an ongoing conversation
-4. The topic is interesting and you have something valuable to add
 
 If you should NOT respond (random chatter, conversations between others that don't involve you, spam, etc.), respond with exactly "none" (lowercase, no quotes).
 
