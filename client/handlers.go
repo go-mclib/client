@@ -169,6 +169,19 @@ func handleConfigurationPacket(c *Client, pkt *jp.Packet) {
 		if reply, err := packets.C2SSelectKnownPacks.WithData(packets.C2SSelectKnownPacksData{}); err == nil {
 			_ = c.WritePacket(reply)
 		}
+	case packets.S2CResourcePackPushConfiguration.PacketID:
+		var d packets.S2CResourcePackPushConfigurationData
+		if err := jp.BytesToPacketData(pkt.Data, &d); err == nil {
+			reply, _ := packets.C2SResourcePackConfiguration.WithData(packets.C2SResourcePackConfigurationData{
+				Uuid:   d.Uuid,
+				Result: 0, // Successfully downloaded
+			})
+			if err != nil {
+				c.Logger.Println("failed to build resource pack response:", err)
+				return
+			}
+			_ = c.WritePacket(reply)
+		}
 	}
 }
 

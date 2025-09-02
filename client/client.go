@@ -19,13 +19,21 @@ const protocolVersion = 772 // 1.21.8
 type Client struct {
 	*jp.TCPClient
 
-	// Configuration
-	Host       string
-	Port       uint16
-	Username   string
-	Verbose    bool
+	// Server hostname/IP address to connect to
+	Host string
+	// Server port to use
+	Port uint16
+	// Custom username to use (if offline-mode), if empty or not applicable
+	// (e. g. connecting to online-mode server), uses Microsoft auth
+	Username string
+	// Whether to log verbose output (raw packet data, can be noisy)
+	Verbose bool
+	// Whether to assume online-mode server
 	OnlineMode bool
-	HasGravity bool
+	// Whether to enable (cheap) gravity (currently not implemented, and has no effect, the bot hovers when in air)
+	HasGravity bool // currently unused
+	// Azure client ID for authentication
+	ClientID string
 
 	// Runtime
 	Handlers            []Handler
@@ -42,7 +50,7 @@ type Client struct {
 }
 
 // NewClient creates a high-level client suitable for bots.
-func NewClient(host string, port uint16, username string, verbose bool, onlineMode bool, hasGravity bool) *Client {
+func NewClient(host string, port uint16, username string, verbose bool, onlineMode bool, hasGravity bool, clientID string) *Client {
 	logger := log.New(os.Stdout, "", log.LstdFlags)
 
 	c := &Client{
@@ -53,6 +61,7 @@ func NewClient(host string, port uint16, username string, verbose bool, onlineMo
 		Verbose:             verbose,
 		OnlineMode:          onlineMode,
 		HasGravity:          hasGravity,
+		ClientID:            clientID,
 		OutgoingPacketQueue: make(chan *jp.Packet, 100),
 		Logger:              logger,
 		Self:                NewSelfStore(),
@@ -132,6 +141,6 @@ func (c *Client) ConnectAndStart(ctx context.Context) error {
 }
 
 // Disconnect closes the connection to the server
-func (c *Client) Disconnect() {
-	c.TCPClient.Close()
+func (c *Client) Disconnect() error {
+	return c.TCPClient.Close()
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/go-mclib/client/chat"
@@ -26,7 +25,7 @@ func (c *Client) initializeAuth(ctx context.Context) error {
 	}
 
 	// online mode
-	authClient := auth.NewClient(auth.AuthClientConfig{ClientID: os.Getenv("AZURE_CLIENT_ID")})
+	authClient := auth.NewClient(auth.AuthClientConfig{ClientID: c.ClientID})
 	loginCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	ld, err := authClient.Login(loginCtx)

@@ -27,10 +27,6 @@ const (
 	greetStorePath = ".greeted_users.json"
 	// scoreStorePath is the path to the file that stores player paintball scores
 	scoreStorePath = ".paintball_scores.json"
-	// chatCooldownDuration is the minimum delay enforced between chat messages
-	chatCooldownDuration = 2 * time.Second
-	// chatQueueCapacity bounds the number of queued messages waiting for cooldown
-	chatQueueCapacity = 3
 )
 
 var (
@@ -53,7 +49,8 @@ func main() {
 	flag.Parse()
 
 	host, port := parseAddr(addr)
-	c := client.NewClient(host, port, username, verbose, online, hasGravity)
+	clientID := os.Getenv("AZURE_CLIENT_ID")
+	c := client.NewClient(host, port, username, verbose, online, hasGravity, clientID)
 	c.RegisterDefaultHandlers()
 
 	gstore := newGreetStore(greetStorePath)
@@ -141,7 +138,7 @@ func main() {
 			}
 
 			time.Sleep(50 * time.Millisecond)
-			waveTime += 0.05 // 50 ms
+			waveTime += 0.05                          // 50 ms
 			yaw := 180 * math.Sin(waveTime*math.Pi/2) // Full 360 degree rotation (-180 to +180)
 			pitch := 30 * math.Sin(waveTime*math.Pi)
 

@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"sort"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 
@@ -65,7 +65,7 @@ func (s *scoreStore) RemoveScore(player string) {
 func (s *scoreStore) GetTopScores() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	scores := make([]string, 0, len(s.Scores))
 	for player, score := range s.Scores {
 		scores = append(scores, fmt.Sprintf("%s: %d", player, score))
@@ -83,7 +83,7 @@ func (s *scoreStore) ProcessChatMessage(c *client.Client, text string) bool {
 
 	if len(matches) > 0 {
 		var shooter, victim string
-		
+
 		if matches[2] != "" {
 			// "You were painted COLOR by Username"
 			shooter = matches[2]

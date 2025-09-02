@@ -63,20 +63,20 @@ func (c *Client) SetRotation(yaw, pitch float64) error {
 func (c *Client) Rotate(deltaYaw, deltaPitch float64) error {
 	newYaw := float64(c.Self.Yaw) + deltaYaw
 	newPitch := float64(c.Self.Pitch) + deltaPitch
-	
+
 	if newPitch > 90 {
 		newPitch = 90
 	} else if newPitch < -90 {
 		newPitch = -90
 	}
-	
+
 	for newYaw < 0 {
 		newYaw += 360
 	}
 	for newYaw >= 360 {
 		newYaw -= 360
 	}
-	
+
 	return c.SetRotation(newYaw, newPitch)
 }
 

@@ -31,7 +31,7 @@ type SelfStore struct {
 	Y ns.Double
 	// The Z coordinate of the bot.
 	Z ns.Double
-	
+
 	// The yaw rotation of the bot (0-360 degrees).
 	Yaw ns.Float
 	// The pitch rotation of the bot (-90 to 90 degrees).
