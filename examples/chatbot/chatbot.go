@@ -38,7 +38,6 @@ func handleChatMessage(c *client.Client, sender, message string, chatBuffer *Cha
 		return
 	}
 
-	log.Printf("Chat from %s: %s", sender, message)
 	chatBuffer.Add(sender, message)
 }
 
@@ -75,7 +74,7 @@ func main() {
 	// prompts
 	botName := mcClient.Username
 	systemPrompt := fmt.Sprintf(`You are %s, a Minecraft player in the game chat. You should ONLY respond when:
-1. Someone mentions your name (%s), or references a "chatbot", "AI", "bot" or similar term in the chat
+1. Someone mentions your name (%s) or mentions a "chatbot"
 2. Someone directly addresses you or asks you a question
 3. You're already part of an ongoing conversation
 
@@ -83,9 +82,9 @@ If you should NOT respond (random chatter, conversations between others that don
 
 When you DO respond:
 - Keep it brief (max 200 chars)
-- Be natural and casual
-- Use Minecraft terminology when appropriate
-- Don't be overly helpful or chatty`, botName, botName)
+- Be chaotic but lovable
+- Do not respond if you are not part of the conversation
+- Do not involve yourself in every chat message, your responses should be occasional`, botName, botName)
 	conversationHistory := []grok.ChatCompletionMessage{
 		{
 			Role:    "system",
@@ -108,8 +107,6 @@ When you DO respond:
 			}
 
 			combinedInput := strings.Join(messages, "\n")
-			log.Printf("Processing buffered messages:\n%s", combinedInput)
-
 			conversationHistory = append(conversationHistory, grok.ChatCompletionMessage{
 				Role:    "user",
 				Content: combinedInput,
@@ -187,8 +184,6 @@ When you DO respond:
 					sender := matches[2]
 					message := matches[3]
 					handleChatMessage(c, sender, message, chatBuffer)
-				} else {
-					log.Printf("[SYSTEM] %s", content)
 				}
 			}
 		}
