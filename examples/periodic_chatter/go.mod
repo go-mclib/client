@@ -1,4 +1,4 @@
-module github.com/go-mclib/client/examples/chatbot
+module github.com/go-mclib/client/examples/commands
 
 go 1.24.5
 
@@ -10,7 +10,6 @@ require (
 )
 
 require (
-	github.com/SimonMorphy/grok-go v1.0.0
 	github.com/Tnze/go-mc v1.20.2 // indirect
 	github.com/buger/jsonparser v1.1.1 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect

@@ -192,6 +192,12 @@ func handlePlayPacket(c *Client, pkt *jp.Packet) {
 		if err := jp.BytesToPacketData(pkt.Data, &d); err == nil {
 			c.Logger.Printf("disconnect: %s", d.Reason)
 		}
+	case packets.S2CStartConfiguration.PacketID:
+		if err := c.WritePacket(packets.C2SConfigurationAcknowledged); err != nil {
+			c.Logger.Println("failed to send configuration_acknowledged:", err)
+		}
+		c.SetState(jp.StateConfiguration)
+		c.Logger.Println("switched from play -> configuration phase, client is probably being transfered to another server")
 	case packets.S2CLoginPlay.PacketID:
 		var d packets.S2CLoginPlayData
 		if err := jp.BytesToPacketData(pkt.Data, &d); err != nil {

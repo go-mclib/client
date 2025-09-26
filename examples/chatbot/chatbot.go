@@ -27,7 +27,7 @@ const (
 )
 
 var (
-	grokApiKey = os.Getenv("GROK_API_KEY")
+	grokApiKey = os.Getenv("GROQ_API_KEY")
 	// format: <[RANK] USERNAME> MESSAGE
 	playerMessageRegex = regexp.MustCompile(`^\s*<\[([^\]]+)\]\s+([^>]+)>\s*(.*)$`)
 )
@@ -57,7 +57,7 @@ func main() {
 
 	// grok client
 	if grokApiKey == "" {
-		log.Fatal("GROK_API_KEY is not set")
+		log.Fatal("GROQ_API_KEY is not set")
 	}
 	grokClient, err := grok.NewClient(grokApiKey)
 	if err != nil {
