@@ -23,7 +23,7 @@ import (
 
 const (
 	bufferDuration = 3 * time.Second
-	maxMessageLen  = 256
+	maxMessageLen  = 255
 )
 
 var (

@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	CHAT_INTERVAL = 60 * time.Second
-	maxMessageLen = 256
+	chatInterval = 60 * time.Second
+	initialDelay  = 3 * time.Second
+	maxMessageLen = 255
 )
 
 var (
@@ -31,17 +32,33 @@ var (
 type periodicChatter struct {
 	groqClient *groq.Client
 	ready      chan bool
+	cancel     context.CancelFunc
+	started    bool
 }
 
-func (pc *periodicChatter) startChatting(c *client.Client) {
+func (pc *periodicChatter) startChatting(ctx context.Context, c *client.Client) {
 	<-pc.ready
-	log.Printf("starting periodic chat every %v", CHAT_INTERVAL)
+	log.Printf("starting periodic chat every %v with initial delay %v", chatInterval, initialDelay)
 
-	ticker := time.NewTicker(CHAT_INTERVAL)
+	time.Sleep(initialDelay)
+	select {
+	case <-ctx.Done():
+		return
+	default:
+		pc.sendPeriodicMessage(c)
+	}
+
+	ticker := time.NewTicker(chatInterval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		pc.sendPeriodicMessage(c)
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("stopping periodic chatter")
+			return
+		case <-ticker.C:
+			pc.sendPeriodicMessage(c)
+		}
 	}
 }
 
@@ -120,10 +137,13 @@ func main() {
 
 	mcClient.RegisterHandler(func(c *client.Client, pkt *jp.Packet) {
 		if pkt.PacketID == packets.S2CSystemChat.PacketID || pkt.PacketID == packets.S2CPlayerChat.PacketID || pkt.PacketID == packets.S2CDisguisedChat.PacketID {
-			select {
-			case chatter.ready <- true:
-				log.Println("first chat msg, ready to chat")
-			default:
+			if !chatter.started {
+				select {
+				case chatter.ready <- true:
+					log.Println("first chat msg, ready to chat")
+					chatter.started = true
+				default:
+				}
 			}
 		}
 	})
@@ -131,9 +151,21 @@ func main() {
 	done := make(chan error, 1)
 	go func() { done <- mcClient.ConnectAndStart(context.Background()) }()
 
-	go func() {
-		chatter.startChatting(mcClient)
-	}()
+	mcClient.RegisterHandler(func(c *client.Client, pkt *jp.Packet) {
+		if pkt.PacketID == packets.S2CStartConfiguration.PacketID {
+			if chatter.cancel != nil {
+				log.Println("server transfer detected, resetting periodic chatter")
+				chatter.cancel()
+				chatter.started = false
+				chatter.ready = make(chan bool, 1)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			chatter.cancel = cancel
+			go func() {
+				chatter.startChatting(ctx, mcClient)
+			}()
+		}
+	})
 
 	// graceful shutdown
 	sigc := make(chan os.Signal, 1)
