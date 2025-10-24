@@ -113,7 +113,7 @@ When you DO respond:
 			})
 
 			request := &grok.ChatCompletionRequest{
-				Model:       "gemma2-9b-it",
+				Model:       "llama-3.1-8b-instant",
 				Messages:    conversationHistory,
 				Temperature: 0.8,
 				MaxTokens:   60,

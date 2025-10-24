@@ -7,5 +7,5 @@ NB put your Grok API key in the `.envrc` file (`export GROQ_API_KEY="gsk-your-ap
 Then, run the bot with:
 
 ```bash
-go run main.go -s [server_address (default is localhost:25565)]
+go run . -s [server_address (default is localhost:25565)]
 ```

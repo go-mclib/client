@@ -99,6 +99,29 @@ func (c *Client) Use(hand int8) error {
 	return c.UseAt(hand, float64(c.Self.Yaw), float64(c.Self.Pitch))
 }
 
+// Drop drops the currently held item.
+// If `dropStack` is true, the entire stack is dropped
+func (c *Client) DropItem(dropStack bool) error {
+	var status ns.VarInt
+	if dropStack {
+		status = ns.VarInt(3)
+	} else {
+		status = ns.VarInt(4)
+	}
+
+	drop, err := packets.C2SPlayerAction.WithData(packets.C2SPlayerActionData{
+		Status: status,
+		Location: ns.Position{X: 0, Y: 0, Z: 0},
+		Face: ns.Byte(-64), // TODO: "Face is always set to -Y", is Y current player pos?
+		Sequence: ns.VarInt(0),
+	})
+	if err != nil {
+		return err
+	}
+
+	return c.WritePacket(drop)
+}
+
 func (c *Client) Respawn() error {
 	respawn, err := packets.C2SClientCommand.WithData(packets.C2SClientCommandData{
 		ActionId: 0, // perform respawn
