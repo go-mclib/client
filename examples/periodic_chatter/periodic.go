@@ -14,12 +14,12 @@ import (
 
 	"github.com/conneroisu/groq-go"
 	"github.com/go-mclib/client/client"
-	packets "github.com/go-mclib/data/go/772/java_packets"
+	packets "github.com/go-mclib/data/go/773/java_packets"
 	jp "github.com/go-mclib/protocol/java_protocol"
 )
 
 const (
-	chatInterval = 60 * time.Second
+	chatInterval  = 60 * time.Second
 	initialDelay  = 3 * time.Second
 	maxMessageLen = 255
 )

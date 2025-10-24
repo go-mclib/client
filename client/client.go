@@ -7,14 +7,14 @@ import (
 	"os"
 
 	"github.com/go-mclib/client/chat"
-	packets "github.com/go-mclib/data/go/772/java_packets"
+	packets "github.com/go-mclib/data/go/773/java_packets"
 	"github.com/go-mclib/protocol/auth"
 	jp "github.com/go-mclib/protocol/java_protocol"
 	ns "github.com/go-mclib/protocol/net_structures"
 	"github.com/go-mclib/protocol/session_server"
 )
 
-const protocolVersion = 772 // 1.21.8
+const protocolVersion = 773 // 1.21.9-1.21.10
 
 type Client struct {
 	*jp.TCPClient

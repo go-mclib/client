@@ -3,7 +3,7 @@ package client
 import (
 	"time"
 
-	packets "github.com/go-mclib/data/go/772/java_packets"
+	packets "github.com/go-mclib/data/go/773/java_packets"
 	jp "github.com/go-mclib/protocol/java_protocol"
 	ns "github.com/go-mclib/protocol/net_structures"
 )
@@ -19,14 +19,8 @@ func defaultStateHandler(c *Client, pkt *jp.Packet) {
 			return
 		}
 		handleLoginPacket(c, pkt)
-		if pkt.PacketID == packets.S2CLoginFinished.PacketID {
-			c.SetState(jp.StateConfiguration)
-		}
 	case jp.StateConfiguration:
 		handleConfigurationPacket(c, pkt)
-		if pkt.PacketID == packets.S2CLoginCompression.PacketID {
-			c.SetState(jp.StatePlay)
-		}
 	case jp.StatePlay:
 		handlePlayPacket(c, pkt)
 	}
@@ -130,9 +124,11 @@ func handleLoginPacket(c *Client, pkt *jp.Packet) {
 	case packets.S2CLoginFinished.PacketID:
 		c.Logger.Println("login successful")
 		_ = c.WritePacket(packets.C2SLoginAcknowledged)
-		c.SetState(jp.StateConfiguration)
 		sendBrandPluginMessage(c, "vanilla")
 		sendClientInformation(c)
+
+		c.SetState(jp.StateConfiguration)
+		c.Logger.Println("switched from login -> configuration state")
 	case packets.S2CLoginCompression.PacketID:
 		data := ns.ByteArray(pkt.Data)
 		var threshold ns.VarInt
@@ -156,7 +152,7 @@ func handleConfigurationPacket(c *Client, pkt *jp.Packet) {
 	case packets.S2CFinishConfiguration.PacketID:
 		_ = c.WritePacket(packets.C2SFinishConfiguration)
 		c.SetState(jp.StatePlay)
-		c.Logger.Println("entered play state")
+		c.Logger.Println("switched from configuration -> play state")
 		time.Sleep(100 * time.Millisecond)
 		c.sendChatSessionData()
 	case packets.S2CKeepAliveConfiguration.PacketID:

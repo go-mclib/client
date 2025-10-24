@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	packets "github.com/go-mclib/data/go/772/java_packets"
+	packets "github.com/go-mclib/data/go/773/java_packets"
 	jp "github.com/go-mclib/protocol/java_protocol"
 	ns "github.com/go-mclib/protocol/net_structures"
 )
