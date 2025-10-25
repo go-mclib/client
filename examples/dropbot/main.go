@@ -45,7 +45,9 @@ func main() {
 		}
 	})
 
-	mcClient.ConnectAndStart(context.Background())
+	if err := mcClient.ConnectAndStart(context.Background()); err != nil {
+		mcClient.Logger.Println(err)
+	}
 }
 
 func parseAddr(addr string) (string, uint16) {
