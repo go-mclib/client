@@ -112,7 +112,7 @@ func (c *Client) DropItem(dropStack bool) error {
 	drop, err := packets.C2SPlayerAction.WithData(packets.C2SPlayerActionData{
 		Status: status,
 		Location: ns.Position{X: 0, Y: 0, Z: 0},
-		Face: ns.Byte(-64), // TODO: "Face is always set to -Y", is Y current player pos?
+		Face: ns.Byte(0),
 		Sequence: ns.VarInt(0),
 	})
 	if err != nil {

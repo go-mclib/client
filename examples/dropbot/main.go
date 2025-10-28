@@ -10,7 +10,6 @@ import (
 	mcclient "github.com/go-mclib/client/client"
 	packets "github.com/go-mclib/data/go/773/java_packets"
 	jp "github.com/go-mclib/protocol/java_protocol"
-	//ns "github.com/go-mclib/protocol/net_structures"
 )
 
 func main() {

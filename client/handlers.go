@@ -225,6 +225,14 @@ func handlePlayPacket(c *Client, pkt *jp.Packet) {
 			reply, _ := packets.C2SKeepAlivePlay.WithData(packets.C2SKeepAlivePlayData(d))
 			_ = c.WritePacket(reply)
 		}
+	// vanilla server doesn't use this, but some AC plugins like Grim do
+	// and they kick bot if it doesn't respond to this packet (timed out):
+	case packets.S2CPingPlay.PacketID:
+		var d packets.S2CPingPlayData
+		if err := jp.BytesToPacketData(pkt.Data, &d); err == nil {
+			reply, _ := packets.C2SPongPlay.WithData(packets.C2SPongPlayData(d))
+			_ = c.WritePacket(reply)
+		}
 	case packets.S2CSystemChat.PacketID:
 		var d packets.S2CSystemChatData
 		if err := jp.BytesToPacketData(pkt.Data, &d); err == nil {
