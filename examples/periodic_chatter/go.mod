@@ -4,9 +4,9 @@ go 1.25
 
 require (
 	github.com/conneroisu/groq-go v0.9.5
-	github.com/go-mclib/client v0.0.0-20251024063720-b7fefaa913c7
-	github.com/go-mclib/data v0.0.0-20251024063138-811f53e053f0
-	github.com/go-mclib/protocol v0.0.0-20251024062106-9e1063000339
+	github.com/go-mclib/client v0.0.0-00010101000000-000000000000
+	github.com/go-mclib/data v0.0.0-20251024090320-3b40b8be7811
+	github.com/go-mclib/protocol v0.0.0-20251101090846-2ac9985fbcdf
 )
 
 require (

@@ -3,13 +3,13 @@ module github.com/go-mclib/client/examples/chatbot
 go 1.25
 
 require (
-	github.com/go-mclib/client v0.0.0-20251024063720-b7fefaa913c7
-	github.com/go-mclib/data v0.0.0-20251024075824-f24bdb682b63
-	github.com/go-mclib/protocol v0.0.0-20251024063549-22172982029e
+	github.com/SimonMorphy/grok-go v1.0.0
+	github.com/go-mclib/client v0.0.0-00010101000000-000000000000
+	github.com/go-mclib/data v0.0.0-20251024090320-3b40b8be7811
+	github.com/go-mclib/protocol v0.0.0-20251101090846-2ac9985fbcdf
 )
 
 require (
-	github.com/SimonMorphy/grok-go v1.0.0
 	github.com/Tnze/go-mc v1.20.2 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	golang.org/x/sys v0.37.0 // indirect

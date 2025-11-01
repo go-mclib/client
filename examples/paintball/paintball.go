@@ -43,9 +43,9 @@ func main() {
 
 	flag.StringVar(&addr, "s", "localhost:25565", "server address (host:port)")
 	flag.BoolVar(&verbose, "v", false, "verbose logging")
-	flag.StringVar(&username, "u", "", "offline username (empty = Microsoft auth)")
+	flag.StringVar(&username, "u", "", "offline username (offline or online)")
 	flag.BoolVar(&online, "online", true, "assume that the server is in online-mode")
-	flag.BoolVar(&hasGravity, "gravity", true, "enable (cheap) gravity")
+	flag.BoolVar(&hasGravity, "gravity", true, "currently not implemented")
 	flag.Parse()
 
 	host, port := parseAddr(addr)

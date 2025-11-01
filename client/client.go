@@ -23,14 +23,16 @@ type Client struct {
 	Host string
 	// Server port to use
 	Port uint16
-	// Custom username to use (if offline-mode), if empty or not applicable
-	// (e. g. connecting to online-mode server), uses Microsoft auth
+	// Username behavior depends on OnlineMode:
+	// - If OnlineMode=false: used as offline-mode username (defaults to "GoMclibPlayer" if empty)
+	// - If OnlineMode=true && Username!="": looks up cached credentials for this username, falls back to auth if not found
+	// - If OnlineMode=true && Username=="": performs fresh Microsoft auth and adds new account to cache
 	Username string
 	// Whether to log verbose output (raw packet data, can be noisy)
 	Verbose bool
-	// Whether to assume online-mode server
+	// Whether to assume online-mode server. If true, uses Microsoft authentication with credential caching.
 	OnlineMode bool
-	// Whether to enable (cheap) gravity (currently not implemented, and has no effect, the bot hovers when in air)
+	// Whether to currently not implemented (currently not implemented, and has no effect, the bot hovers when in air)
 	HasGravity bool // currently unused
 	// Azure client ID for authentication
 	ClientID string

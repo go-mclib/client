@@ -15,17 +15,21 @@ import (
 
 // initializeAuth performs online or offline auth and prepares chat/session structures
 func (c *Client) initializeAuth(ctx context.Context) error {
-	if !c.OnlineMode || c.Username != "" { // offline
+	if !c.OnlineMode { // offline mode
 		if c.Username == "" {
-			c.Username = "Player"
+			c.Username = "GoMclibPlayer"
+			c.Logger.Println("Warning: no username provided for offline mode, defaulting to 'GoMclibPlayer'")
 		}
 		uuid := mc_crypto.MinecraftSHA1(c.Username)
 		c.LoginData = auth.LoginData{Username: c.Username, UUID: uuid}
 		return nil
 	}
 
-	// online mode
-	authClient := auth.NewClient(auth.AuthClientConfig{ClientID: c.ClientID})
+	// online mode - use Microsoft auth with credential caching
+	authClient := auth.NewClient(auth.AuthClientConfig{
+		ClientID: c.ClientID,
+		Username: c.Username, // pass username for cache lookup (empty string means new account)
+	})
 	loginCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	ld, err := authClient.Login(loginCtx)
@@ -33,7 +37,12 @@ func (c *Client) initializeAuth(ctx context.Context) error {
 		return fmt.Errorf("authentication failed: %w", err)
 	}
 	c.LoginData = ld
-	c.Username = ld.Username // overwrite canonical (authenticated) username
+
+	// Warn if authenticated username differs from requested username
+	if c.Username != "" && c.Username != ld.Username {
+		c.Logger.Printf("Warning: authenticated as '%s' but requested username was '%s' (credentials may have changed)", ld.Username, c.Username)
+	}
+	c.Username = ld.Username // update to canonical (authenticated) username
 
 	cert, err := auth.FetchMojangCertificate(ld.AccessToken)
 	if err != nil {
