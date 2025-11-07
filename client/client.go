@@ -41,6 +41,12 @@ type Client struct {
 	// Maximum number of reconnect attempts on EOF or server disconnect/kick
 	// 0 = no reconnect (default), -1 = infinite reconnects, >0 = specific number of attempts
 	MaxReconnectAttempts int
+	// Whether to treat S2CStartConfiguration (server transfer in play state) as a disconnect, requiring reconnect.
+	// This is useful for servers that transfer players to lobby/other server on disconnect/kick (e. g. Minehut and friends)
+	// and you don't want the bot to hang out in the lobby, but instead attempt to reconnect to the original IP.
+	//
+	// Tip: if true and MaxReconnectAttempts == 0, the bot will exit on transfer.
+	TreatTransferAsDisconnect bool
 
 	// Runtime
 	Handlers            []Handler
@@ -73,6 +79,7 @@ func NewClient(host string, port uint16, username string, verbose bool, onlineMo
 		HasGravity:           hasGravity,
 		ClientID:             clientID,
 		MaxReconnectAttempts: 5,
+		TreatTransferAsDisconnect: false,
 		OutgoingPacketQueue:  make(chan *jp.Packet, 100),
 		Logger:               logger,
 		Self:                 NewSelfStore(),
@@ -197,7 +204,8 @@ func (c *Client) connectAndStartOnce(ctx context.Context) error {
 	}
 }
 
-// Disconnect closes the connection to the server
+// Disconnect closes the connection to the server and triggers reconnect if enabled
 func (c *Client) Disconnect() error {
+	c.shouldReconnect = true
 	return c.TCPClient.Close()
 }

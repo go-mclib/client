@@ -121,7 +121,7 @@ func handleLoginPacket(c *Client, pkt *jp.Packet) {
 		} else {
 			c.Logger.Printf("login disconnect: %s", string(reason))
 		}
-		c.shouldReconnect = true
+		c.Disconnect()
 	case packets.S2CLoginFinished.PacketID:
 		c.Logger.Println("login successful")
 		_ = c.WritePacket(packets.C2SLoginAcknowledged)
@@ -150,7 +150,7 @@ func handleConfigurationPacket(c *Client, pkt *jp.Packet) {
 			c.Logger.Println("failed to parse disconnect configuration data:", err)
 		}
 		c.Logger.Printf("disconnected during configuration: %s", string(data.Reason.GetText()))
-		c.shouldReconnect = true
+		c.Disconnect()
 	case packets.S2CFinishConfiguration.PacketID:
 		_ = c.WritePacket(packets.C2SFinishConfiguration)
 		c.SetState(jp.StatePlay)
@@ -190,8 +190,14 @@ func handlePlayPacket(c *Client, pkt *jp.Packet) {
 		if err := jp.BytesToPacketData(pkt.Data, &d); err == nil {
 			c.Logger.Printf("disconnect: %s", d.Reason)
 		}
-		c.shouldReconnect = true
+		c.Disconnect()
 	case packets.S2CStartConfiguration.PacketID:
+		if c.TreatTransferAsDisconnect {
+			c.Logger.Println("server transfer detected, treating as disconnect")
+			c.Disconnect()
+			return
+		}
+
 		if err := c.WritePacket(packets.C2SConfigurationAcknowledged); err != nil {
 			c.Logger.Println("failed to send configuration_acknowledged:", err)
 		}

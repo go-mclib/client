@@ -32,6 +32,7 @@ func main() {
 	host, port := parseAddr(addr)
 	clientID := os.Getenv("AZURE_CLIENT_ID")
 	mcClient := mcclient.NewClient(host, port, username, verbose, online, hasGravity, clientID)
+	mcClient.TreatTransferAsDisconnect = true
 	mcClient.RegisterDefaultHandlers()
 
 	// cheap - drop item in hand if any item in any container changes
