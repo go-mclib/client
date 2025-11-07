@@ -3,8 +3,10 @@ package client
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
+	"time"
 
 	"github.com/go-mclib/client/chat"
 	packets "github.com/go-mclib/data/go/773/java_packets"
@@ -36,6 +38,9 @@ type Client struct {
 	HasGravity bool // currently unused
 	// Azure client ID for authentication
 	ClientID string
+	// Maximum number of reconnect attempts on EOF or server disconnect/kick
+	// 0 = no reconnect (default), -1 = infinite reconnects, >0 = specific number of attempts
+	MaxReconnectAttempts int
 
 	// Runtime
 	Handlers            []Handler
@@ -49,6 +54,9 @@ type Client struct {
 
 	// Stores
 	Self *SelfStore
+
+	// Internal state
+	shouldReconnect bool
 }
 
 // NewClient creates a high-level client suitable for bots.
@@ -56,17 +64,18 @@ func NewClient(host string, port uint16, username string, verbose bool, onlineMo
 	logger := log.New(os.Stdout, "", log.LstdFlags)
 
 	c := &Client{
-		TCPClient:           jp.NewTCPClient(),
-		Host:                host,
-		Port:                port,
-		Username:            username,
-		Verbose:             verbose,
-		OnlineMode:          onlineMode,
-		HasGravity:          hasGravity,
-		ClientID:            clientID,
-		OutgoingPacketQueue: make(chan *jp.Packet, 100),
-		Logger:              logger,
-		Self:                NewSelfStore(),
+		TCPClient:            jp.NewTCPClient(),
+		Host:                 host,
+		Port:                 port,
+		Username:             username,
+		Verbose:              verbose,
+		OnlineMode:           onlineMode,
+		HasGravity:           hasGravity,
+		ClientID:             clientID,
+		MaxReconnectAttempts: 5,
+		OutgoingPacketQueue:  make(chan *jp.Packet, 100),
+		Logger:               logger,
+		Self:                 NewSelfStore(),
 	}
 
 	c.TCPClient.EnableDebug(verbose)
@@ -86,6 +95,49 @@ func (c *Client) RegisterDefaultHandlers() {
 
 // ConnectAndStart connects, performs handshake/login, and enters the packet loop.
 func (c *Client) ConnectAndStart(ctx context.Context) error {
+	attempts := 0
+	maxAttempts := c.MaxReconnectAttempts
+
+	for {
+		c.shouldReconnect = false // just (re)connected, reset
+		err := c.connectAndStartOnce(ctx)
+		if err == nil {
+			return nil
+		}
+
+		// should reconnect
+		if !c.shouldReconnect || maxAttempts == 0 {
+			return err
+		}
+
+		// reconnect attempts
+		attempts++
+		if maxAttempts > 0 && attempts > maxAttempts {
+			c.Logger.Printf("max reconnect attempts (%d) reached, giving up", maxAttempts)
+			return err
+		}
+		if maxAttempts == -1 {
+			c.Logger.Printf("reconnecting in 3 seconds... (attempt %d/∞)", attempts)
+		} else {
+			c.Logger.Printf("reconnecting in 3 seconds... (attempt %d/%d)", attempts, maxAttempts)
+		}
+
+		// delay reconnect
+		time.Sleep(3 * time.Second)
+
+		if maxAttempts == -1 {
+			c.Logger.Printf("attempting to reconnect indefinitely... (attempt %d)", attempts)
+		} else {
+			c.Logger.Printf("attempting to reconnect... (attempt %d/%d)", attempts, maxAttempts)
+		}
+	}
+}
+
+func (c *Client) connectAndStartOnce(ctx context.Context) error {
+	// reset TCP client for fresh connection
+	c.TCPClient = jp.NewTCPClient()
+	c.TCPClient.EnableDebug(c.Verbose)
+
 	addr := fmt.Sprintf("%s:%d", c.Host, c.Port)
 	if err := c.Connect(addr); err != nil {
 		return fmt.Errorf("connect failed: %w", err)
@@ -134,6 +186,9 @@ func (c *Client) ConnectAndStart(ctx context.Context) error {
 		pkt, err := c.ReadPacket()
 		if err != nil {
 			c.Logger.Println("read packet error:", err)
+			if err == io.EOF {
+				c.shouldReconnect = true
+			}
 			return err
 		}
 		for _, handler := range c.Handlers {
