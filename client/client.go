@@ -112,13 +112,38 @@ func (c *Client) ConnectAndStart(ctx context.Context) error {
 		c.tuiProgram = tuiProgram
 		c.Logger = log.New(writer, "", log.LstdFlags)
 
+		tuiDone := make(chan error, 1)
 		go func() {
-			if _, err := tuiProgram.Run(); err != nil {
-				fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
-			}
+			_, err := tuiProgram.Run()
+			tuiDone <- err
 		}()
+
+		clientDone := make(chan error, 1)
+		go func() {
+			clientDone <- c.runConnectionLoop(ctx)
+		}()
+
+		select {
+		case err := <-tuiDone:
+			// TUI exited (user pressed Ctrl+C), ensure client is disconnected
+			c.Disconnect()
+			if err != nil {
+				return err
+			}
+			return nil
+		case err := <-clientDone:
+			// client exited (error/disconnect), quit TUI
+			if c.tuiProgram != nil {
+				c.tuiProgram.Quit()
+			}
+			return err
+		}
 	}
 
+	return c.runConnectionLoop(ctx)
+}
+
+func (c *Client) runConnectionLoop(ctx context.Context) error {
 	attempts := 0
 	maxAttempts := c.MaxReconnectAttempts
 

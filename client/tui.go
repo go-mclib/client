@@ -3,7 +3,6 @@ package client
 import (
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"sync"
 
@@ -69,10 +68,7 @@ func (t *TUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyEsc:
 			t.quitting = true
-			go func() {
-				t.client.Disconnect()
-				os.Exit(0)
-			}()
+			t.client.Disconnect()
 			return t, tea.Quit
 
 		case tea.KeyEnter:
