@@ -82,14 +82,12 @@ func (t *TUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if err := t.client.SendCommand(input); err != nil {
 						t.AddLog(fmt.Sprintf("Error sending command: %v", err))
 					} else {
-						t.AddLog(fmt.Sprintf("> %s", input))
+						t.AddLog(fmt.Sprintf("cmd > %s", input))
 					}
 				} else {
 					// chat msg
 					if err := t.client.SendChatMessage(input); err != nil {
 						t.AddLog(fmt.Sprintf("Error sending message: %v", err))
-					} else {
-						t.AddLog(fmt.Sprintf("<%s> %s", t.client.Username, input))
 					}
 				}
 				t.textInput.SetValue("")
