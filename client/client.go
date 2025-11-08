@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/go-mclib/client/chat"
 	packets "github.com/go-mclib/data/go/773/java_packets"
 	"github.com/go-mclib/protocol/auth"
@@ -47,6 +48,8 @@ type Client struct {
 	//
 	// Tip: if true and MaxReconnectAttempts == 0, the bot will exit on transfer.
 	TreatTransferAsDisconnect bool
+	// Whether to enable interactive mode with a chat bar at the bottom for sending messages/commands
+	Interactive bool
 
 	// Runtime
 	Handlers            []Handler
@@ -61,8 +64,9 @@ type Client struct {
 	// Stores
 	Self *SelfStore
 
-	// Internal state
+	// Private
 	shouldReconnect bool
+	tuiProgram          *tea.Program
 }
 
 // NewClient creates a high-level client suitable for bots.
@@ -102,6 +106,19 @@ func (c *Client) RegisterDefaultHandlers() {
 
 // ConnectAndStart connects, performs handshake/login, and enters the packet loop.
 func (c *Client) ConnectAndStart(ctx context.Context) error {
+	// start TUI if interactive mode is enabled
+	if c.Interactive {
+		tuiProgram, writer := c.StartTUI()
+		c.tuiProgram = tuiProgram
+		c.Logger = log.New(writer, "", log.LstdFlags)
+
+		go func() {
+			if _, err := tuiProgram.Run(); err != nil {
+				fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
+			}
+		}()
+	}
+
 	attempts := 0
 	maxAttempts := c.MaxReconnectAttempts
 

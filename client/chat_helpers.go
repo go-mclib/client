@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"strings"
 	"time"
 
 	packets "github.com/go-mclib/data/go/773/java_packets"
@@ -40,8 +41,7 @@ func (c *Client) SendChatMessage(message string) error {
 		if err != nil {
 			return err
 		}
-		_ = c.WritePacket(pkt)
-		return nil
+		return c.WritePacket(pkt)
 	}
 
 	// unsigned
@@ -57,8 +57,20 @@ func (c *Client) SendChatMessage(message string) error {
 	if err != nil {
 		return err
 	}
-	_ = c.WritePacket(pkt)
-	return nil
+	return c.WritePacket(pkt)
+}
+
+func (c *Client) SendCommand(command string) error {
+	// if starts with /, remove it
+	command = strings.TrimPrefix(command, "/")
+	pkt, err := packets.C2SChatCommand.WithData(packets.C2SChatCommandData{
+		Command: ns.String(command),
+	})
+	if err != nil {
+		return err
+	}
+
+	return c.WritePacket(pkt)
 }
 
 func (c *Client) sendChatSessionData() error {
@@ -96,6 +108,5 @@ func (c *Client) sendChatSessionData() error {
 		c.Logger.Println("build chat session packet:", err)
 		return err
 	}
-	_ = c.WritePacket(pkt)
-	return nil
+	return c.WritePacket(pkt)
 }

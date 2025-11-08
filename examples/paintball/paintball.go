@@ -40,17 +40,23 @@ func main() {
 	var username string
 	var online bool
 	var hasGravity bool
+	var interactive bool
+	var treatTransferAsDisconnect bool
 
 	flag.StringVar(&addr, "s", "localhost:25565", "server address (host:port)")
 	flag.BoolVar(&verbose, "v", false, "verbose logging")
 	flag.StringVar(&username, "u", "", "offline username (offline or online)")
 	flag.BoolVar(&online, "online", true, "assume that the server is in online-mode")
 	flag.BoolVar(&hasGravity, "gravity", true, "currently not implemented")
+	flag.BoolVar(&interactive, "i", false, "enable interactive mode with chat input")
+	flag.BoolVar(&treatTransferAsDisconnect, "d", false, "treat server transfer as disconnect")
 	flag.Parse()
 
 	host, port := parseAddr(addr)
 	clientID := os.Getenv("AZURE_CLIENT_ID")
 	c := client.NewClient(host, port, username, verbose, online, hasGravity, clientID)
+	c.Interactive = interactive
+	c.TreatTransferAsDisconnect = treatTransferAsDisconnect
 	c.RegisterDefaultHandlers()
 
 	gstore := newGreetStore(greetStorePath)

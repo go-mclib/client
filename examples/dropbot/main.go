@@ -19,6 +19,8 @@ func main() {
 	var online bool
 	var hasGravity bool
 	var intervalSeconds int
+	var interactive bool
+	var treatTransferAsDisconnect bool
 
 	flag.StringVar(&addr, "s", "localhost:25565", "server address (host:port)")
 	flag.BoolVar(&verbose, "v", false, "verbose logging")
@@ -26,13 +28,16 @@ func main() {
 	flag.BoolVar(&online, "online", true, "assume that the server is in online-mode")
 	flag.BoolVar(&hasGravity, "gravity", true, "currently not implemented")
 	flag.IntVar(&intervalSeconds, "interval", 5, "interval in seconds between dropping items")
+	flag.BoolVar(&interactive, "i", false, "enable interactive mode with chat input")
+	flag.BoolVar(&treatTransferAsDisconnect, "d", false, "treat server transfer as disconnect")
 	flag.Parse()
 
 	// mc client
 	host, port := parseAddr(addr)
 	clientID := os.Getenv("AZURE_CLIENT_ID")
 	mcClient := mcclient.NewClient(host, port, username, verbose, online, hasGravity, clientID)
-	mcClient.TreatTransferAsDisconnect = true
+	mcClient.Interactive = interactive
+	mcClient.TreatTransferAsDisconnect = treatTransferAsDisconnect
 	mcClient.RegisterDefaultHandlers()
 
 	// cheap - drop item in hand if any item in any container changes

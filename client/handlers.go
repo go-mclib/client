@@ -212,6 +212,11 @@ func handlePlayPacket(c *Client, pkt *jp.Packet) {
 		c.Self.EntityID = ns.VarInt(d.EntityId)
 		c.Logger.Println("spawned; ready")
 
+		// Enable TUI input if in interactive mode
+		if c.Interactive {
+			c.EnableInput()
+		}
+
 		if err := c.WritePacket(packets.C2SPlayerLoaded); err != nil {
 			c.Logger.Println("failed to send player loaded:", err)
 		}
