@@ -180,6 +180,11 @@ func (t *TUI) AddLog(msg string) {
 	t.logMutex.Lock()
 	defer t.logMutex.Unlock()
 	t.logs = append(t.logs, msg)
+
+	// trim logs
+	if t.client.MaxLogLines > 0 && len(t.logs) > t.client.MaxLogLines {
+		t.logs = t.logs[len(t.logs)-t.client.MaxLogLines:]
+	}
 }
 
 func (t *TUI) renderLogs() string {

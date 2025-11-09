@@ -50,6 +50,9 @@ type Client struct {
 	TreatTransferAsDisconnect bool
 	// Whether to enable interactive mode with a chat bar at the bottom for sending messages/commands
 	Interactive bool
+	// Maximum number of log lines to keep in interactive mode.
+	// 0 = unlimited (default), >0 = limit to this many lines
+	MaxLogLines int
 
 	// Runtime
 	Handlers            []Handler
