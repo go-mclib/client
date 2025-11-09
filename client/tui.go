@@ -111,8 +111,12 @@ func (t *TUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case logMsg:
 		t.AddLog(string(msg))
 		if t.ready {
+			// do not scroll if not at bottom, to prevent flickering
+			wasAtBottom := t.viewport.AtBottom()
 			t.viewport.SetContent(t.renderLogs())
-			t.viewport.GotoBottom()
+			if wasAtBottom {
+				t.viewport.GotoBottom()
+			}
 		}
 		return t, nil
 
