@@ -115,6 +115,14 @@ func (c *Client) ConnectAndStart(ctx context.Context) error {
 		c.tuiProgram = tuiProgram
 		c.Logger = log.New(writer, "", log.LstdFlags)
 
+		// ensure TUI is always cleaned up on exit
+		defer func() {
+			if c.tuiProgram != nil {
+				c.tuiProgram.Quit()
+				c.tuiProgram = nil
+			}
+		}()
+
 		tuiDone := make(chan error, 1)
 		go func() {
 			_, err := tuiProgram.Run()
@@ -135,10 +143,7 @@ func (c *Client) ConnectAndStart(ctx context.Context) error {
 			}
 			return nil
 		case err := <-clientDone:
-			// client exited (error/disconnect), quit TUI
-			if c.tuiProgram != nil {
-				c.tuiProgram.Quit()
-			}
+			// client exited (error/disconnect)
 			return err
 		}
 	}
@@ -157,8 +162,13 @@ func (c *Client) runConnectionLoop(ctx context.Context) error {
 			return nil
 		}
 
+		// log error
+		c.Logger.Printf("connection error: %v", err)
+
 		// should reconnect
 		if !c.shouldReconnect || maxAttempts == 0 {
+			c.Logger.Printf("not reconnecting, exiting...")
+			time.Sleep(500 * time.Millisecond) // give TUI time to display error
 			return err
 		}
 
@@ -166,6 +176,7 @@ func (c *Client) runConnectionLoop(ctx context.Context) error {
 		attempts++
 		if maxAttempts > 0 && attempts > maxAttempts {
 			c.Logger.Printf("max reconnect attempts (%d) reached, giving up", maxAttempts)
+			time.Sleep(500 * time.Millisecond) // give TUI time to display error
 			return err
 		}
 		if maxAttempts == -1 {

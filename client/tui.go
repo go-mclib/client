@@ -145,7 +145,7 @@ func (t *TUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // View renders the TUI
 func (t *TUI) View() string {
 	if t.quitting {
-		return "Goodbye!\n"
+		return ""
 	}
 
 	if !t.ready {
