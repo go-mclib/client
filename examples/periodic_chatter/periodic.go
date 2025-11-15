@@ -180,7 +180,7 @@ func main() {
 	select {
 	case <-sigc:
 		log.Println("Shutting down...")
-		mcClient.Disconnect()
+		mcClient.Disconnect(true)
 	case err := <-done:
 		if err != nil {
 			log.Fatal(err)

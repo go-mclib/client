@@ -32,7 +32,6 @@ type TUI struct {
 	inputEnabled bool
 	width        int
 	height       int
-	quitting     bool
 }
 
 // NewTUI creates a new TUI instance
@@ -67,8 +66,7 @@ func (t *TUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyEsc:
-			t.quitting = true
-			t.client.Disconnect()
+			t.client.Disconnect(true)
 			return t, tea.Quit
 
 		case tea.KeyEnter:
@@ -144,10 +142,6 @@ func (t *TUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the TUI
 func (t *TUI) View() string {
-	if t.quitting {
-		return ""
-	}
-
 	if !t.ready {
 		return "Initializing..."
 	}

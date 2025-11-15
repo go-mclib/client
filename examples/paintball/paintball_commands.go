@@ -28,7 +28,7 @@ func (ch commandHandler) handle(c *client.Client, sender string, msg string) boo
 		c.SendChatMessage("Commands: !help, !score [player], !top")
 		return true
 	case "disconnect":
-		c.Disconnect()
+		c.Disconnect(true)
 		return true
 	case "score":
 		player := arg

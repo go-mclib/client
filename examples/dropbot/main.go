@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 
 	mcclient "github.com/go-mclib/client/client"
 	packets "github.com/go-mclib/data/go/773/java_packets"
@@ -47,6 +48,19 @@ func main() {
 	mcClient.RegisterHandler(func(c *mcclient.Client, pkt *jp.Packet) {
 		if pkt.PacketID == packets.S2CContainerSetSlot.PacketID {
 			c.DropItem(true)
+		}
+	})
+
+	// in case we get kicked, abort
+	mcClient.RegisterHandler(func(c *mcclient.Client, pkt *jp.Packet) {
+		if pkt.PacketID == packets.S2CSystemChat.PacketID {
+			var data packets.S2CSystemChatData
+			if err := jp.BytesToPacketData(pkt.Data, &data); err == nil {
+				if strings.Contains(data.Content.GetText(), "disconnect") {
+					c.Logger.Printf("encountered disconnect msg: %v", data)
+					c.Disconnect(true)
+				}
+			}
 		}
 	})
 

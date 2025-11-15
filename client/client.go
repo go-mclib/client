@@ -138,11 +138,11 @@ func (c *Client) ConnectAndStart(ctx context.Context) error {
 		select {
 		case err := <-tuiDone:
 			// TUI exited (user pressed Ctrl+C), ensure client is disconnected
-			c.Disconnect()
 			if err != nil {
 				return err
 			}
-			return nil
+			
+			return c.Disconnect(true)
 		case err := <-clientDone:
 			// client exited (error/disconnect)
 			return err
@@ -261,8 +261,9 @@ func (c *Client) connectAndStartOnce(ctx context.Context) error {
 	}
 }
 
-// Disconnect closes the connection to the server and triggers reconnect if enabled
-func (c *Client) Disconnect() error {
-	c.shouldReconnect = true
+// Disconnect closes the connection to the server and triggers reconnect, if enabled.
+// If force is true, will disconnect without reconnecting
+func (c *Client) Disconnect(force bool) error {
+	c.shouldReconnect = !force
 	return c.TCPClient.Close()
 }
