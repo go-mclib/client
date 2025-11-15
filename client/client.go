@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -69,7 +70,7 @@ type Client struct {
 
 	// Private
 	shouldReconnect bool
-	tuiProgram          *tea.Program
+	tuiProgram      *tea.Program
 }
 
 // NewClient creates a high-level client suitable for bots.
@@ -77,19 +78,19 @@ func NewClient(host string, port uint16, username string, verbose bool, onlineMo
 	logger := log.New(os.Stdout, "", log.LstdFlags)
 
 	c := &Client{
-		TCPClient:            jp.NewTCPClient(),
-		Host:                 host,
-		Port:                 port,
-		Username:             username,
-		Verbose:              verbose,
-		OnlineMode:           onlineMode,
-		HasGravity:           hasGravity,
-		ClientID:             clientID,
-		MaxReconnectAttempts: 5,
+		TCPClient:                 jp.NewTCPClient(),
+		Host:                      host,
+		Port:                      port,
+		Username:                  username,
+		Verbose:                   verbose,
+		OnlineMode:                onlineMode,
+		HasGravity:                hasGravity,
+		ClientID:                  clientID,
+		MaxReconnectAttempts:      5,
 		TreatTransferAsDisconnect: false,
-		OutgoingPacketQueue:  make(chan *jp.Packet, 100),
-		Logger:               logger,
-		Self:                 NewSelfStore(),
+		OutgoingPacketQueue:       make(chan *jp.Packet, 100),
+		Logger:                    logger,
+		Self:                      NewSelfStore(),
 	}
 
 	c.TCPClient.EnableDebug(verbose)
@@ -249,7 +250,7 @@ func (c *Client) connectAndStartOnce(ctx context.Context) error {
 		pkt, err := c.ReadPacket()
 		if err != nil {
 			c.Logger.Println("read packet error:", err)
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				c.shouldReconnect = true
 			}
 			return err
