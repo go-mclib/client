@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -250,9 +251,7 @@ func (c *Client) connectAndStartOnce(ctx context.Context) error {
 		pkt, err := c.ReadPacket()
 		if err != nil {
 			c.Logger.Println("read packet error:", err)
-			if errors.Is(err, io.EOF) {
-				c.shouldReconnect = true
-			}
+			c.shouldReconnect = true
 			return err
 		}
 		for _, handler := range c.Handlers {
