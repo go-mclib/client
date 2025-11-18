@@ -2,12 +2,9 @@ package client
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
-	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -142,7 +139,7 @@ func (c *Client) ConnectAndStart(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-			
+
 			return c.Disconnect(true)
 		case err := <-clientDone:
 			// client exited (error/disconnect)
