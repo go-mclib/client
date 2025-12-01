@@ -7,11 +7,9 @@ import (
 	"log"
 	"math"
 	"math/rand"
-	"net"
 	"os"
 	"os/signal"
 	"regexp"
-	"strconv"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -52,9 +50,8 @@ func main() {
 	flag.BoolVar(&treatTransferAsDisconnect, "d", false, "treat server transfer as disconnect")
 	flag.Parse()
 
-	host, port := parseAddr(addr)
 	clientID := os.Getenv("AZURE_CLIENT_ID")
-	c := client.NewClient(host, port, username, verbose, online, hasGravity, clientID)
+	c := client.NewClient(addr, username, verbose, online, hasGravity, clientID)
 	c.Interactive = interactive
 	c.TreatTransferAsDisconnect = treatTransferAsDisconnect
 	c.RegisterDefaultHandlers()
@@ -185,18 +182,4 @@ func extractJoinUsername(text string) (string, bool) {
 		return m[1], true
 	}
 	return "", false
-}
-
-func parseAddr(addr string) (string, uint16) {
-	host := addr
-	port := uint16(25565)
-	if h, p, err := net.SplitHostPort(addr); err == nil {
-		host = h
-		convP, err := strconv.ParseUint(p, 10, 16)
-		if err != nil {
-			log.Println("error parsing port:", err)
-		}
-		port = uint16(convP)
-	}
-	return host, port
 }

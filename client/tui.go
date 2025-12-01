@@ -146,8 +146,7 @@ func (t *TUI) View() string {
 		return "Initializing..."
 	}
 
-
-	title := titleStyle.Render(fmt.Sprintf("Minecraft Client - %s@%s:%d", t.client.Username, t.client.Host, t.client.Port))
+	title := titleStyle.Render(fmt.Sprintf("Minecraft Client - %s@%s", t.client.Username, t.client.Address))
 
 	var helpText string
 	if t.inputEnabled {

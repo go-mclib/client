@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -21,10 +22,8 @@ const protocolVersion = 773 // 1.21.9-1.21.10
 type Client struct {
 	*jp.TCPClient
 
-	// Server hostname/IP address to connect to
-	Host string
-	// Server port to use
-	Port uint16
+	// Server address to connect to (hostname/IP with optional port, e.g. "localhost:25565" or "example.com")
+	Address string
 	// Username behavior depends on OnlineMode:
 	// - If OnlineMode=false: used as offline-mode username (defaults to "GoMclibPlayer" if empty)
 	// - If OnlineMode=true && Username!="": looks up cached credentials for this username, falls back to auth if not found
@@ -72,13 +71,12 @@ type Client struct {
 }
 
 // NewClient creates a high-level client suitable for bots.
-func NewClient(host string, port uint16, username string, verbose bool, onlineMode bool, hasGravity bool, clientID string) *Client {
+func NewClient(address string, username string, verbose bool, onlineMode bool, hasGravity bool, clientID string) *Client {
 	logger := log.New(os.Stdout, "", log.LstdFlags)
 
 	c := &Client{
 		TCPClient:                 jp.NewTCPClient(),
-		Host:                      host,
-		Port:                      port,
+		Address:                   address,
 		Username:                  username,
 		Verbose:                   verbose,
 		OnlineMode:                onlineMode,
@@ -200,20 +198,26 @@ func (c *Client) connectAndStartOnce(ctx context.Context) error {
 	c.TCPClient = jp.NewTCPClient()
 	c.TCPClient.EnableDebug(c.Verbose)
 
-	addr := fmt.Sprintf("%s:%d", c.Host, c.Port)
-	if err := c.Connect(addr); err != nil {
+	// connect and get canonical host/port
+	resolvedHost, resolvedPort, err := c.Connect(c.Address)
+	if err != nil {
 		return fmt.Errorf("connect failed: %w", err)
 	}
 
+	// init auth
 	if err := c.initializeAuth(ctx); err != nil {
 		return err
 	}
 
 	// hello (handshake)
+	handshakePort, err := strconv.Atoi(resolvedPort)
+	if err != nil {
+		return fmt.Errorf("parse port: %w", err)
+	}
 	handshakePacket, err := packets.C2SIntention.WithData(packets.C2SIntentionData{
 		ProtocolVersion: protocolVersion,
-		ServerAddress:   ns.String(c.Host),
-		ServerPort:      ns.UnsignedShort(c.Port),
+		ServerAddress:   ns.String(resolvedHost),
+		ServerPort:      ns.UnsignedShort(handshakePort),
 		Intent:          2,
 	})
 	if err != nil {

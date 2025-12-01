@@ -5,11 +5,9 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"os/signal"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -70,9 +68,8 @@ func main() {
 	grokClient.BaseUrl = "https://api.groq.com/openai/v1/"
 
 	// mc client
-	host, port := parseAddr(addr)
 	clientID := os.Getenv("AZURE_CLIENT_ID")
-	mcClient := client.NewClient(host, port, username, verbose, online, hasGravity, clientID)
+	mcClient := client.NewClient(addr, username, verbose, online, hasGravity, clientID)
 	mcClient.Interactive = interactive
 	mcClient.TreatTransferAsDisconnect = treatTransferAsDisconnect
 	mcClient.RegisterDefaultHandlers()
@@ -265,14 +262,3 @@ func sanitizeChatMessage(msg string) string {
 	return cleaned
 }
 
-func parseAddr(addr string) (string, uint16) {
-	host := addr
-	port := uint16(25565)
-	if h, p, err := net.SplitHostPort(addr); err == nil {
-		host = h
-		if convP, err := strconv.ParseUint(p, 10, 16); err == nil {
-			port = uint16(convP)
-		}
-	}
-	return host, port
-}

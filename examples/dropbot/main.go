@@ -3,9 +3,7 @@ package main
 import (
 	"context"
 	"flag"
-	"net"
 	"os"
-	"strconv"
 	"strings"
 
 	mcclient "github.com/go-mclib/client/client"
@@ -34,9 +32,8 @@ func main() {
 	flag.Parse()
 
 	// mc client
-	host, port := parseAddr(addr)
 	clientID := os.Getenv("AZURE_CLIENT_ID")
-	mcClient := mcclient.NewClient(host, port, username, verbose, online, hasGravity, clientID)
+	mcClient := mcclient.NewClient(addr, username, verbose, online, hasGravity, clientID)
 	mcClient.Interactive = interactive
 	mcClient.TreatTransferAsDisconnect = treatTransferAsDisconnect
 	mcClient.RegisterDefaultHandlers()
@@ -67,16 +64,4 @@ func main() {
 	if err := mcClient.ConnectAndStart(context.Background()); err != nil {
 		mcClient.Logger.Println(err)
 	}
-}
-
-func parseAddr(addr string) (string, uint16) {
-	host := addr
-	port := uint16(25565)
-	if h, p, err := net.SplitHostPort(addr); err == nil {
-		host = h
-		if convP, err := strconv.ParseUint(p, 10, 16); err == nil {
-			port = uint16(convP)
-		}
-	}
-	return host, port
 }
