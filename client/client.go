@@ -51,6 +51,10 @@ type Client struct {
 	// Maximum number of log lines to keep in interactive mode.
 	// 0 = unlimited (default), >0 = limit to this many lines
 	MaxLogLines int
+	// Whether to automatically respawn on death (default: true)
+	AutoRespawn bool
+	// Brand string sent to the server (default: "gomclib:client_v773")
+	Brand string
 
 	// Runtime
 	Handlers            []Handler
@@ -84,6 +88,8 @@ func NewClient(address string, username string, verbose bool, onlineMode bool, h
 		ClientID:                  clientID,
 		MaxReconnectAttempts:      5,
 		TreatTransferAsDisconnect: false,
+		AutoRespawn:               true,
+		Brand:                     "vanilla",
 		OutgoingPacketQueue:       make(chan *jp.Packet, 100),
 		Logger:                    logger,
 		Self:                      NewSelfStore(),

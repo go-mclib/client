@@ -125,7 +125,7 @@ func handleLoginPacket(c *Client, pkt *jp.Packet) {
 	case packets.S2CLoginFinished.PacketID:
 		c.Logger.Println("login successful")
 		_ = c.WritePacket(packets.C2SLoginAcknowledged)
-		sendBrandPluginMessage(c, "vanilla")
+		sendBrandPluginMessage(c, c.Brand)
 		sendClientInformation(c)
 
 		c.SetState(jp.StateConfiguration)
@@ -221,7 +221,9 @@ func handlePlayPacket(c *Client, pkt *jp.Packet) {
 			c.Logger.Println("failed to send player loaded:", err)
 		}
 
-		c.Respawn() // health not available yet, just send the packet
+		if c.AutoRespawn {
+			c.Respawn() // health not available yet, just send the packet
+		}
 	case packets.S2CPlayerChat.PacketID:
 		var chatData packets.S2CPlayerChatData
 		if err := jp.BytesToPacketData(pkt.Data, &chatData); err == nil {
@@ -269,15 +271,16 @@ func handlePlayPacket(c *Client, pkt *jp.Packet) {
 			}
 		}
 	case packets.S2CPlayerCombatKill.PacketID:
-		// auto respawn on death
 		var d packets.S2CPlayerCombatKillData
 		if err := jp.BytesToPacketData(pkt.Data, &d); err != nil {
 			c.Logger.Printf("failed to parse player combat kill data: %s", err)
 			return
 		}
-		if d.PlayerId == c.Self.EntityID { // enable respawn screen
+		if d.PlayerId == c.Self.EntityID {
 			c.Logger.Printf("died: %s", d.Message.GetText())
-			c.Respawn()
+			if c.AutoRespawn {
+				c.Respawn()
+			}
 		}
 	}
 }
