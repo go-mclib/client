@@ -15,7 +15,7 @@ import (
 
 	grok "github.com/SimonMorphy/grok-go"
 	"github.com/go-mclib/client/client"
-	packets "github.com/go-mclib/data/go/773/java_packets"
+	packets "github.com/go-mclib/data/go/774/java_packets"
 	jp "github.com/go-mclib/protocol/java_protocol"
 )
 
@@ -261,4 +261,3 @@ func sanitizeChatMessage(msg string) string {
 
 	return cleaned
 }
-

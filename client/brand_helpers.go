@@ -1,7 +1,7 @@
 package client
 
 import (
-	packets "github.com/go-mclib/data/go/773/java_packets"
+	packets "github.com/go-mclib/data/go/774/java_packets"
 	ns "github.com/go-mclib/protocol/net_structures"
 )
 

@@ -10,14 +10,14 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/go-mclib/client/chat"
-	packets "github.com/go-mclib/data/go/773/java_packets"
+	packets "github.com/go-mclib/data/go/774/java_packets"
 	"github.com/go-mclib/protocol/auth"
 	jp "github.com/go-mclib/protocol/java_protocol"
 	ns "github.com/go-mclib/protocol/net_structures"
 	"github.com/go-mclib/protocol/session_server"
 )
 
-const protocolVersion = 773 // 1.21.9-1.21.10
+const protocolVersion = 774 // 1.21.11
 
 type Client struct {
 	*jp.TCPClient
@@ -53,7 +53,9 @@ type Client struct {
 	MaxLogLines int
 	// Whether to automatically respawn on death (default: true)
 	AutoRespawn bool
-	// Brand string sent to the server (default: "gomclib:client_v773")
+	// Brand string sent to the server (default: "vanilla")
+	//
+	// Note: ACs can detect this
 	Brand string
 
 	// Runtime
