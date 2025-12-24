@@ -30,6 +30,8 @@ github.com/go-mclib/data v0.0.0-20251215170733-d4d5987ba9e9 h1:s8AGQnus6v0XssXYa
 github.com/go-mclib/data v0.0.0-20251215170733-d4d5987ba9e9/go.mod h1:ypEHGLjA6kIhQ5ZmSY4mknRfJCtPrLbVIQ/C+cxa+FM=
 github.com/go-mclib/protocol v0.0.0-20251201083925-8d7afa267830 h1:N338BK8Nqatc589HoZym4efA/xfXC/brEGCcn2btEPE=
 github.com/go-mclib/protocol v0.0.0-20251201083925-8d7afa267830/go.mod h1:euq/MjyrCrJ2MC4qQaoDBvoYRSfg0CW329k19OAYwXE=
+github.com/go-mclib/protocol v0.0.0-20251224144838-5f651bbc939b h1:MWYPVbu1PSCxMs9DflC4S8RLbztYC0h+TdGI26SpOC0=
+github.com/go-mclib/protocol v0.0.0-20251224144838-5f651bbc939b/go.mod h1:euq/MjyrCrJ2MC4qQaoDBvoYRSfg0CW329k19OAYwXE=
 github.com/lucasb-eyer/go-colorful v1.3.0 h1:2/yBRLdWBZKrf7gB40FoiKfAWYQ0lqNcbuQwVHXptag=
 github.com/lucasb-eyer/go-colorful v1.3.0/go.mod h1:R4dSotOR9KMtayYi1e77YzuveK+i7ruzyGqttikkLy0=
 github.com/mattn/go-isatty v0.0.20 h1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWEY=

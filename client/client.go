@@ -37,8 +37,9 @@ type Client struct {
 	HasGravity bool // currently unused
 	// Azure client ID for authentication
 	ClientID string
-	// Maximum number of reconnect attempts on EOF or server disconnect/kick
-	// 0 = no reconnect (default), -1 = infinite reconnects, >0 = specific number of attempts
+	// Maximum number of reconnect attempts on EOF or server disconnect/kick.
+	// 0 = no reconnect, -1 = infinite reconnects, >0 = specific number of attempts.
+	// Default is 5
 	MaxReconnectAttempts int
 	// Whether to treat S2CStartConfiguration (server transfer in play state) as a disconnect, requiring reconnect.
 	// This is useful for servers that transfer players to lobby/other server on disconnect/kick (e. g. Minehut and friends)
