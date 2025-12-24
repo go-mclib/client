@@ -1,15 +1,26 @@
 #!/bin/bash
 # A helper script to run multiple bots on same IP at once, with specific bot binary
+#
+# Environment variables:
+#   USERNAMES   - space-separated list of usernames (required)
+#   CMD_PREFIX  - command template with <USERNAME> placeholder (required)
+#
+# Example:
+#   USERNAMES="Bot1 Bot2 Bot3" CMD_PREFIX="./botbinary -s 127.0.0.1 -u <USERNAME>" ./multi.sh
 
-# >>> configure these:
-USERNAMES=(
-    "Bot1"
-    "Bot2"
-    "Bot3"
-)
-CMD_PREFIX="./botbinary -s 127.0.0.1 -u <USERNAME>"
+if [[ -z "$USERNAMES" ]]; then
+    echo "Error: USERNAMES environment variable is required"
+    echo "Example: USERNAMES=\"Bot1 Bot2 Bot3\""
+    exit 1
+fi
 
-# <<< end of configuration section
+if [[ -z "$CMD_PREFIX" ]]; then
+    echo "Error: CMD_PREFIX environment variable is required"
+    echo "Example: CMD_PREFIX=\"./botbinary -s 127.0.0.1 -u <USERNAME>\""
+    exit 1
+fi
+
+read -ra USERNAMES_ARR <<< "$USERNAMES"
 
 PIDS=()
 cleanup() {
@@ -27,7 +38,7 @@ cleanup() {
 
 trap cleanup SIGINT SIGTERM EXIT
 
-for username in "${USERNAMES[@]}"; do
+for username in "${USERNAMES_ARR[@]}"; do
     cmd="${CMD_PREFIX//<USERNAME>/$username}"
     echo "Starting: $cmd"
     eval "$cmd" &
