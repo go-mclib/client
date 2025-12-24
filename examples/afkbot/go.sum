@@ -1,5 +1,3 @@
-github.com/SimonMorphy/grok-go v1.0.0 h1:h5pxFEutYnTUNpTfx5c4Hxno//CXxAoPUaUV2rE0QPk=
-github.com/SimonMorphy/grok-go v1.0.0/go.mod h1:kG7gue5Rd9eso7JgME6wvT3pvwVa8AdOi0fUFguE4Pw=
 github.com/Tnze/go-mc v1.20.2 h1:arHCE/WxLCxY73C/4ZNLdOymRYtdwoXE05ohB7HVN6Q=
 github.com/Tnze/go-mc v1.20.2/go.mod h1:geoRj2HsXSkB3FJBuhr7wCzXegRlzWsVXd7h7jiJ6aQ=
 github.com/atotto/clipboard v0.1.4 h1:EH0zSVneZPSuFR11BlR9YppQTVDbh5+16AmcJi4g1z4=
@@ -28,6 +26,8 @@ github.com/clipperhouse/uax29/v2 v2.3.0 h1:SNdx9DVUqMoBuBoW3iLOj4FQv3dN5mDtuqwuh
 github.com/clipperhouse/uax29/v2 v2.3.0/go.mod h1:Wn1g7MK6OoeDT0vL+Q0SQLDz/KpfsVRgg6W7ihQeh4g=
 github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f h1:Y/CXytFA4m6baUTXGLOoWe4PQhGxaX0KpnayAqC48p4=
 github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f/go.mod h1:vw97MGsxSvLiUE2X8qFplwetxpGLQrlU1Q9AUEIzCaM=
+github.com/go-mclib/client v0.0.0-20251201082931-20686b622393 h1:gtpgBNdRpkIyXKS7xFzaE0Y4TP3KUyuRDqKao9wERC8=
+github.com/go-mclib/client v0.0.0-20251201082931-20686b622393/go.mod h1:LKVVQrzX4TOt5K+S6yuxUlUGBgJllKGhCNLHh62bISk=
 github.com/go-mclib/data v0.0.0-20251201083958-168bf53dd3c3 h1:anI+X1/XU4ACsdHRs20PAbMPttFOB9vJvQ4mSWLGS3g=
 github.com/go-mclib/data v0.0.0-20251201083958-168bf53dd3c3/go.mod h1:ypEHGLjA6kIhQ5ZmSY4mknRfJCtPrLbVIQ/C+cxa+FM=
 github.com/go-mclib/protocol v0.0.0-20251201083925-8d7afa267830 h1:N338BK8Nqatc589HoZym4efA/xfXC/brEGCcn2btEPE=

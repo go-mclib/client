@@ -3,9 +3,7 @@ module github.com/go-mclib/client/examples/chatbot
 go 1.25
 
 require (
-	github.com/SimonMorphy/grok-go v1.0.0
 	github.com/go-mclib/client v0.0.0-20251201082931-20686b622393
-	github.com/go-mclib/data v0.0.0-20251201083958-168bf53dd3c3
 	github.com/go-mclib/protocol v0.0.0-20251201083925-8d7afa267830
 )
 
@@ -24,6 +22,7 @@ require (
 	github.com/clipperhouse/stringish v0.1.1 // indirect
 	github.com/clipperhouse/uax29/v2 v2.3.0 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
+	github.com/go-mclib/data v0.0.0-20251201083958-168bf53dd3c3 // indirect
 	github.com/lucasb-eyer/go-colorful v1.3.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-localereader v0.0.1 // indirect
