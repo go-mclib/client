@@ -3,9 +3,7 @@ package main
 import (
 	"context"
 	"flag"
-	"net"
 	"os"
-	"strconv"
 
 	mcclient "github.com/go-mclib/client/client"
 )
@@ -29,16 +27,7 @@ func main() {
 	flag.Parse()
 
 	clientID := os.Getenv("AZURE_CLIENT_ID")
-	host, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		panic(err)
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		panic(err)
-	}
-
-	mcClient := mcclient.NewClient(host, uint16(port), username, verbose, online, hasGravity, clientID)
+	mcClient := mcclient.NewClient(addr, username, verbose, online, hasGravity, clientID)
 	mcClient.MaxReconnectAttempts = -1
 	mcClient.Interactive = interactive
 	mcClient.TreatTransferAsDisconnect = treatTransferAsDisconnect

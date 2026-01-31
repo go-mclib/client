@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	mcclient "github.com/go-mclib/client/client"
-	packets "github.com/go-mclib/data/go/774/java_packets"
+	"github.com/go-mclib/data/packets"
 	jp "github.com/go-mclib/protocol/java_protocol"
 )
 
@@ -17,7 +17,6 @@ func main() {
 	var username string
 	var online bool
 	var hasGravity bool
-	var intervalSeconds int
 	var interactive bool
 	var treatTransferAsDisconnect bool
 
@@ -26,7 +25,6 @@ func main() {
 	flag.StringVar(&username, "u", "", "username (offline or online)")
 	flag.BoolVar(&online, "online", true, "assume that the server is in online-mode")
 	flag.BoolVar(&hasGravity, "gravity", true, "currently not implemented")
-	flag.IntVar(&intervalSeconds, "interval", 5, "interval in seconds between dropping items")
 	flag.BoolVar(&interactive, "i", false, "enable interactive mode with chat input")
 	flag.BoolVar(&treatTransferAsDisconnect, "d", false, "treat server transfer as disconnect")
 	flag.Parse()
@@ -42,18 +40,18 @@ func main() {
 	// since the bot doesnt open any container on its own,
 	// we are almost always guaranteed to drop the item when it appears in inv
 	// (only available container, unless server opens one for us)
-	mcClient.RegisterHandler(func(c *mcclient.Client, pkt *jp.Packet) {
-		if pkt.PacketID == packets.S2CContainerSetSlot.PacketID {
+	mcClient.RegisterHandler(func(c *mcclient.Client, pkt *jp.WirePacket) {
+		if pkt.PacketID == packets.S2CContainerSetSlotID {
 			c.DropItem(true)
 		}
 	})
 
 	// in case we get kicked, abort
-	mcClient.RegisterHandler(func(c *mcclient.Client, pkt *jp.Packet) {
-		if pkt.PacketID == packets.S2CSystemChat.PacketID {
-			var data packets.S2CSystemChatData
-			if err := jp.BytesToPacketData(pkt.Data, &data); err == nil {
-				if strings.Contains(data.Content.GetText(), "disconnect") {
+	mcClient.RegisterHandler(func(c *mcclient.Client, pkt *jp.WirePacket) {
+		if pkt.PacketID == packets.S2CSystemChatID {
+			var data packets.S2CSystemChat
+			if err := pkt.ReadInto(&data); err == nil {
+				if strings.Contains(data.Content.Text, "disconnect") {
 					c.Logger.Printf("encountered disconnect msg: %v", data)
 					c.Disconnect(true)
 				}

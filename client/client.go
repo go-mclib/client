@@ -10,11 +10,12 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/go-mclib/client/chat"
-	packets "github.com/go-mclib/data/go/774/java_packets"
+	"github.com/go-mclib/client/tui"
+	"github.com/go-mclib/data/packets"
 	"github.com/go-mclib/protocol/auth"
 	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/net_structures"
-	"github.com/go-mclib/protocol/session_server"
+	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	"github.com/go-mclib/protocol/java_protocol/session_server"
 )
 
 const protocolVersion = 774 // 1.21.11
@@ -62,7 +63,7 @@ type Client struct {
 	// Runtime
 	Handlers            []Handler
 	Logger              *log.Logger
-	OutgoingPacketQueue chan *jp.Packet
+	OutgoingPacketQueue chan jp.Packet
 
 	// Auth/session
 	LoginData     auth.LoginData
@@ -70,7 +71,8 @@ type Client struct {
 	ChatSigner    *chat.ChatSigner
 
 	// Stores
-	Self *SelfStore
+	Self  *SelfStore
+	World *WorldStore
 
 	// Private
 	shouldReconnect bool
@@ -93,10 +95,12 @@ func NewClient(address string, username string, verbose bool, onlineMode bool, h
 		TreatTransferAsDisconnect: false,
 		AutoRespawn:               true,
 		Brand:                     "vanilla",
-		OutgoingPacketQueue:       make(chan *jp.Packet, 100),
+		OutgoingPacketQueue:       make(chan jp.Packet, 100),
 		Logger:                    logger,
 		Self:                      NewSelfStore(),
 	}
+
+	c.World = NewWorldStore(c)
 
 	c.TCPClient.EnableDebug(verbose)
 	return c
@@ -111,13 +115,14 @@ func (c *Client) RegisterHandler(handler Handler) {
 func (c *Client) RegisterDefaultHandlers() {
 	c.RegisterHandler(defaultStateHandler)
 	c.RegisterHandler(c.Self.HandlePacket)
+	c.RegisterHandler(c.World.HandlePacket)
 }
 
 // ConnectAndStart connects, performs handshake/login, and enters the packet loop.
 func (c *Client) ConnectAndStart(ctx context.Context) error {
 	// start TUI if interactive mode is enabled
 	if c.Interactive {
-		tuiProgram, writer := c.StartTUI()
+		tuiProgram, writer := tui.Start(c)
 		c.tuiProgram = tuiProgram
 		c.Logger = log.New(writer, "", log.LstdFlags)
 
@@ -207,6 +212,9 @@ func (c *Client) connectAndStartOnce(ctx context.Context) error {
 	c.TCPClient = jp.NewTCPClient()
 	c.TCPClient.EnableDebug(c.Verbose)
 
+	// clear world data on reconnect
+	c.World.Clear()
+
 	// connect and get canonical host/port
 	resolvedHost, resolvedPort, err := c.Connect(c.Address)
 	if err != nil {
@@ -223,14 +231,11 @@ func (c *Client) connectAndStartOnce(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("parse port: %w", err)
 	}
-	handshakePacket, err := packets.C2SIntention.WithData(packets.C2SIntentionData{
+	handshakePacket := &packets.C2SIntention{
 		ProtocolVersion: protocolVersion,
 		ServerAddress:   ns.String(resolvedHost),
-		ServerPort:      ns.UnsignedShort(handshakePort),
+		ServerPort:      ns.Uint16(handshakePort),
 		Intent:          2,
-	})
-	if err != nil {
-		return fmt.Errorf("handshake build: %w", err)
 	}
 	if err := c.WritePacket(handshakePacket); err != nil {
 		return fmt.Errorf("handshake send: %w", err)
@@ -238,11 +243,8 @@ func (c *Client) connectAndStartOnce(ctx context.Context) error {
 
 	c.SetState(jp.StateLogin)
 
-	uuid, _ := ns.NewUUID(c.LoginData.UUID)
-	loginStartPacket, err := packets.C2SHello.WithData(packets.C2SHelloData{Name: ns.String(c.LoginData.Username), PlayerUuid: uuid})
-	if err != nil {
-		return fmt.Errorf("login start build: %w", err)
-	}
+	uuid, _ := ns.UUIDFromString(c.LoginData.UUID)
+	loginStartPacket := &packets.C2SHello{Name: ns.String(c.LoginData.Username), PlayerUuid: uuid}
 	if err := c.WritePacket(loginStartPacket); err != nil {
 		return fmt.Errorf("login start send: %w", err)
 	}
@@ -258,14 +260,14 @@ func (c *Client) connectAndStartOnce(ctx context.Context) error {
 
 	// in
 	for {
-		pkt, err := c.ReadPacket()
+		wire, err := c.ReadWirePacket()
 		if err != nil {
 			c.Logger.Println("read packet error:", err)
 			c.shouldReconnect = true
 			return err
 		}
 		for _, handler := range c.Handlers {
-			handler(c, pkt)
+			handler(c, wire)
 		}
 	}
 }
@@ -275,4 +277,24 @@ func (c *Client) connectAndStartOnce(ctx context.Context) error {
 func (c *Client) Disconnect(force bool) error {
 	c.shouldReconnect = !force
 	return c.TCPClient.Close()
+}
+
+// GetUsername returns the client's username (implements tui.ClientInterface)
+func (c *Client) GetUsername() string {
+	return c.Username
+}
+
+// GetAddress returns the server address (implements tui.ClientInterface)
+func (c *Client) GetAddress() string {
+	return c.Address
+}
+
+// GetMaxLogLines returns the maximum log lines setting (implements tui.ClientInterface)
+func (c *Client) GetMaxLogLines() int {
+	return c.MaxLogLines
+}
+
+// EnableInput enables the chat input in the TUI
+func (c *Client) EnableInput() {
+	tui.EnableInput(c.tuiProgram)
 }

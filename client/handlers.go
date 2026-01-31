@@ -3,18 +3,18 @@ package client
 import (
 	"time"
 
-	packets "github.com/go-mclib/data/go/774/java_packets"
+	"github.com/go-mclib/data/packets"
 	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/net_structures"
+	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
 )
 
-type Handler func(c *Client, pkt *jp.Packet)
+type Handler func(c *Client, pkt *jp.WirePacket)
 
 // defaultStateHandler drives the client through login -> configuration -> play
-func defaultStateHandler(c *Client, pkt *jp.Packet) {
-	switch c.GetState() {
+func defaultStateHandler(c *Client, pkt *jp.WirePacket) {
+	switch c.State() {
 	case jp.StateLogin:
-		if pkt.PacketID == packets.S2CHello.PacketID && c.SessionClient != nil {
+		if pkt.PacketID == packets.S2CHelloID && c.SessionClient != nil {
 			handleEncryptionRequest(c, pkt)
 			return
 		}
@@ -26,80 +26,40 @@ func defaultStateHandler(c *Client, pkt *jp.Packet) {
 	}
 }
 
-func handleEncryptionRequest(c *Client, pkt *jp.Packet) {
+func handleEncryptionRequest(c *Client, pkt *jp.WirePacket) {
 	c.Logger.Println("received encryption request")
-	data := ns.ByteArray(pkt.Data)
-	offset := 0
 
-	var serverID ns.String
-	n, err := serverID.FromBytes(data[offset:])
-	if err != nil {
-		c.Logger.Println("server id:", err)
+	var encReq packets.S2CHello
+	if err := pkt.ReadInto(&encReq); err != nil {
+		c.Logger.Println("parse encryption request:", err)
 		return
 	}
-	offset += n
 
-	var publicKeyLength ns.VarInt
-	n, err = publicKeyLength.FromBytes(data[offset:])
-	if err != nil {
-		c.Logger.Println("public key len:", err)
-		return
-	}
-	offset += n
-
-	publicKey := make([]byte, publicKeyLength)
-	copy(publicKey, data[offset:offset+int(publicKeyLength)])
-	offset += int(publicKeyLength)
-
-	var verifyTokenLength ns.VarInt
-	n, err = verifyTokenLength.FromBytes(data[offset:])
-	if err != nil {
-		c.Logger.Println("verify token len:", err)
-		return
-	}
-	offset += n
-
-	verifyToken := make([]byte, verifyTokenLength)
-	copy(verifyToken, data[offset:offset+int(verifyTokenLength)])
-
-	encryption := c.GetEncryption()
+	encryption := c.Conn().Encryption()
 	sharedSecret, err := encryption.GenerateSharedSecret()
 	if err != nil {
 		c.Logger.Println("gen shared secret:", err)
 		return
 	}
 
-	encryptedSharedSecret, err := encryption.EncryptWithPublicKey(publicKey, sharedSecret)
+	encryptedSharedSecret, err := encryption.EncryptWithPublicKey(encReq.PublicKey, sharedSecret)
 	if err != nil {
 		c.Logger.Println("encrypt shared secret:", err)
 		return
 	}
-	encryptedVerifyToken, err := encryption.EncryptWithPublicKey(publicKey, verifyToken)
+	encryptedVerifyToken, err := encryption.EncryptWithPublicKey(encReq.PublicKey, encReq.VerifyToken)
 	if err != nil {
 		c.Logger.Println("encrypt verify token:", err)
 		return
 	}
 
 	if c.SessionClient != nil {
-		if err := c.SessionClient.Join(c.LoginData.AccessToken, c.LoginData.UUID, string(serverID), sharedSecret, publicKey); err != nil {
+		if err := c.SessionClient.Join(c.LoginData.AccessToken, c.LoginData.UUID, string(encReq.ServerId), sharedSecret, encReq.PublicKey); err != nil {
 			c.Logger.Println("session join warn:", err)
 		}
 	}
 
-	ss := make([]ns.Byte, len(encryptedSharedSecret))
-	for i, b := range encryptedSharedSecret {
-		ss[i] = ns.Byte(b)
-	}
-	vt := make([]ns.Byte, len(encryptedVerifyToken))
-	for i, b := range encryptedVerifyToken {
-		vt[i] = ns.Byte(b)
-	}
-
-	resp, err := packets.C2SKey.WithData(packets.C2SKeyData{SharedSecret: ss, VerifyToken: vt})
-	if err != nil {
-		c.Logger.Println("build enc resp:", err)
-		return
-	}
+	resp := &packets.C2SKey{SharedSecret: encryptedSharedSecret, VerifyToken: encryptedVerifyToken}
 	if err := c.WritePacket(resp); err != nil {
 		c.Logger.Println("send enc resp:", err)
 	}
@@ -111,105 +71,97 @@ func handleEncryptionRequest(c *Client, pkt *jp.Packet) {
 	c.Logger.Println("encryption enabled")
 }
 
-func handleLoginPacket(c *Client, pkt *jp.Packet) {
+func handleLoginPacket(c *Client, pkt *jp.WirePacket) {
 	switch pkt.PacketID {
-	case packets.S2CLoginDisconnectLogin.PacketID:
-		data := ns.ByteArray(pkt.Data)
-		var reason ns.String
-		if _, err := reason.FromBytes(data); err != nil {
+	case packets.S2CLoginDisconnectLoginID:
+		var d packets.S2CLoginDisconnectLogin
+		if err := pkt.ReadInto(&d); err != nil {
 			c.Logger.Println("login disconnect (parse):", err)
 		} else {
-			c.Logger.Printf("login disconnect: %s", string(reason))
+			c.Logger.Printf("login disconnect: %s", d.Reason.Text)
 		}
 		c.Disconnect(false)
-	case packets.S2CLoginFinished.PacketID:
+	case packets.S2CLoginFinishedID:
 		c.Logger.Println("login successful")
-		_ = c.WritePacket(packets.C2SLoginAcknowledged)
+		_ = c.WritePacket(&packets.C2SLoginAcknowledged{})
 		sendBrandPluginMessage(c, c.Brand)
 		sendClientInformation(c)
 
 		c.SetState(jp.StateConfiguration)
 		c.Logger.Println("switched from login -> configuration state")
-	case packets.S2CLoginCompression.PacketID:
-		data := ns.ByteArray(pkt.Data)
-		var threshold ns.VarInt
-		if _, err := threshold.FromBytes(data); err != nil {
+	case packets.S2CLoginCompressionID:
+		var d packets.S2CLoginCompression
+		if err := pkt.ReadInto(&d); err != nil {
 			c.Logger.Println("compression threshold:", err)
 		} else {
-			c.TCPClient.SetCompressionThreshold(int(threshold))
-			c.Logger.Printf("compression enabled: %d", threshold)
+			c.TCPClient.SetCompressionThreshold(int(d.Threshold))
+			c.Logger.Printf("compression enabled: %d", d.Threshold)
 		}
 	}
 }
 
-func handleConfigurationPacket(c *Client, pkt *jp.Packet) {
+func handleConfigurationPacket(c *Client, pkt *jp.WirePacket) {
 	switch pkt.PacketID {
-	case packets.S2CDisconnectConfiguration.PacketID:
-		var data packets.S2CDisconnectConfigurationData
-		if err := jp.BytesToPacketData(pkt.Data, &data); err != nil {
+	case packets.S2CDisconnectConfigurationID:
+		var d packets.S2CDisconnectConfiguration
+		if err := pkt.ReadInto(&d); err != nil {
 			c.Logger.Println("failed to parse disconnect configuration data:", err)
 		}
-		c.Logger.Printf("disconnected during configuration: %s", string(data.Reason.GetText()))
+		c.Logger.Printf("disconnected during configuration: %s", d.Reason.Text)
 		c.Disconnect(false)
-	case packets.S2CFinishConfiguration.PacketID:
-		_ = c.WritePacket(packets.C2SFinishConfiguration)
+	case packets.S2CFinishConfigurationID:
+		_ = c.WritePacket(&packets.C2SFinishConfiguration{})
 		c.SetState(jp.StatePlay)
 		c.Logger.Println("switched from configuration -> play state")
 		time.Sleep(100 * time.Millisecond)
 		c.sendChatSessionData()
-	case packets.S2CKeepAliveConfiguration.PacketID:
-		var d packets.S2CKeepAliveConfigurationData
-		if err := jp.BytesToPacketData(pkt.Data, &d); err == nil {
-			reply, _ := packets.C2SKeepAliveConfiguration.WithData(packets.C2SKeepAliveConfigurationData(d))
-			_ = c.WritePacket(reply)
+	case packets.S2CKeepAliveConfigurationID:
+		var d packets.S2CKeepAliveConfiguration
+		if err := pkt.ReadInto(&d); err == nil {
+			_ = c.WritePacket(&packets.C2SKeepAliveConfiguration{KeepAliveId: d.KeepAliveId})
 		}
-	case packets.S2CSelectKnownPacks.PacketID:
-		if reply, err := packets.C2SSelectKnownPacks.WithData(packets.C2SSelectKnownPacksData{}); err == nil {
-			_ = c.WritePacket(reply)
-		}
-	case packets.S2CResourcePackPushConfiguration.PacketID:
-		var d packets.S2CResourcePackPushConfigurationData
-		if err := jp.BytesToPacketData(pkt.Data, &d); err == nil {
-			reply, _ := packets.C2SResourcePackConfiguration.WithData(packets.C2SResourcePackConfigurationData{
+	case packets.S2CSelectKnownPacksID:
+		_ = c.WritePacket(&packets.C2SSelectKnownPacks{})
+	case packets.S2CResourcePackPushConfigurationID:
+		var d packets.S2CResourcePackPushConfiguration
+		if err := pkt.ReadInto(&d); err == nil {
+			_ = c.WritePacket(&packets.C2SResourcePackConfiguration{
 				Uuid:   d.Uuid,
-				Result: 0, // Successfully downloaded
+				Result: 0, // successfully downloaded
 			})
-			if err != nil {
-				c.Logger.Println("failed to build resource pack response:", err)
-				return
-			}
-			_ = c.WritePacket(reply)
 		}
 	}
 }
 
-func handlePlayPacket(c *Client, pkt *jp.Packet) {
+func handlePlayPacket(c *Client, pkt *jp.WirePacket) {
 	switch pkt.PacketID {
-	case packets.S2CDisconnectPlay.PacketID:
-		var d packets.S2CDisconnectPlayData
-		if err := jp.BytesToPacketData(pkt.Data, &d); err == nil {
-			c.Logger.Printf("disconnect: %s", d.Reason)
+	case packets.S2CDisconnectPlayID:
+		var d packets.S2CDisconnectPlay
+		if err := pkt.ReadInto(&d); err == nil {
+			c.Logger.Printf("disconnect: %s", d.Reason.Text)
 		}
 		c.Disconnect(false)
-	case packets.S2CStartConfiguration.PacketID:
+	case packets.S2CStartConfigurationID:
 		if c.TreatTransferAsDisconnect {
 			c.Logger.Println("server transfer detected, treating as disconnect")
 			c.Disconnect(false)
 			return
 		}
 
-		if err := c.WritePacket(packets.C2SConfigurationAcknowledged); err != nil {
+		if err := c.WritePacket(&packets.C2SConfigurationAcknowledged{}); err != nil {
 			c.Logger.Println("failed to send configuration_acknowledged:", err)
 		}
 		c.SetState(jp.StateConfiguration)
 		c.Logger.Println("switched from play -> configuration phase, client is probably being transfered to another server")
-	case packets.S2CLoginPlay.PacketID:
-		var d packets.S2CLoginPlayData
-		if err := jp.BytesToPacketData(pkt.Data, &d); err != nil {
+	case packets.S2CLoginPlayID:
+		var d packets.S2CLoginPlay
+		if err := pkt.ReadInto(&d); err != nil {
 			c.Logger.Println("failed to parse login play data:", err)
 			return
 		}
 		c.Self.EntityID = ns.VarInt(d.EntityId)
+		c.Self.DeathLocation = d.DeathLocation
+		c.Self.Gamemode = d.GameMode
 		c.Logger.Println("spawned; ready")
 
 		// Enable TUI input if in interactive mode
@@ -217,67 +169,64 @@ func handlePlayPacket(c *Client, pkt *jp.Packet) {
 			c.EnableInput()
 		}
 
-		if err := c.WritePacket(packets.C2SPlayerLoaded); err != nil {
+		if err := c.WritePacket(&packets.C2SPlayerLoaded{}); err != nil {
 			c.Logger.Println("failed to send player loaded:", err)
 		}
 
 		if c.AutoRespawn {
 			c.Respawn() // health not available yet, just send the packet
 		}
-	case packets.S2CPlayerChat.PacketID:
-		var chatData packets.S2CPlayerChatData
-		if err := jp.BytesToPacketData(pkt.Data, &chatData); err == nil {
-			sender := chatData.SenderName.GetText()
-			msg := string(chatData.Message)
-			if chatData.TargetName.Present {
-				c.Logger.Printf("[PLAYER] %s -> %s: %s", sender, chatData.TargetName.Value.GetText(), msg)
+	case packets.S2CPlayerChatID:
+		var d packets.S2CPlayerChat
+		if err := pkt.ReadInto(&d); err == nil {
+			c.Logger.Printf("%v", d.ChatType.ChatType)
+			if d.ChatType.TargetName.Present {
+				c.Logger.Printf("[CHAT-WHISPER] %s -> %s: %s", d.ChatType.Name.ToANSI(), d.ChatType.TargetName.Value.ToANSI(), d.Body.Content)
 			} else {
-				c.Logger.Printf("[PLAYER] %s: %s", sender, msg)
+				c.Logger.Printf("[CHAT] %s: %s", d.ChatType.Name.ToANSI(), d.Body.Content)
 			}
 		}
-	case packets.S2CKeepAlivePlay.PacketID:
-		var d packets.S2CKeepAlivePlayData
-		if err := jp.BytesToPacketData(pkt.Data, &d); err == nil {
-			reply, _ := packets.C2SKeepAlivePlay.WithData(packets.C2SKeepAlivePlayData(d))
-			_ = c.WritePacket(reply)
+	case packets.S2CKeepAlivePlayID:
+		var d packets.S2CKeepAlivePlay
+		if err := pkt.ReadInto(&d); err == nil {
+			_ = c.WritePacket(&packets.C2SKeepAlivePlay{KeepAliveId: d.KeepAliveId})
 		}
 	// vanilla server doesn't use this, but some AC plugins like Grim do
 	// and they kick bot if it doesn't respond to this packet (timed out):
-	case packets.S2CPingPlay.PacketID:
-		var d packets.S2CPingPlayData
-		if err := jp.BytesToPacketData(pkt.Data, &d); err == nil {
-			reply, _ := packets.C2SPongPlay.WithData(packets.C2SPongPlayData(d))
-			_ = c.WritePacket(reply)
+	case packets.S2CPingPlayID:
+		var d packets.S2CPingPlay
+		if err := pkt.ReadInto(&d); err == nil {
+			_ = c.WritePacket(&packets.C2SPongPlay{Id: d.Id})
 		}
-	case packets.S2CSystemChat.PacketID:
-		var d packets.S2CSystemChatData
-		if err := jp.BytesToPacketData(pkt.Data, &d); err == nil {
-			txt := d.Content.GetText()
+	case packets.S2CSystemChatID:
+		var d packets.S2CSystemChat
+		if err := pkt.ReadInto(&d); err == nil {
+			txt := d.Content.ToANSI()
 			if d.Overlay {
 				c.Logger.Printf("[SYSTEM-ACTION] %s", txt)
 			} else {
 				c.Logger.Printf("[SYSTEM] %s", txt)
 			}
 		}
-	case packets.S2CDisguisedChat.PacketID:
-		var d packets.S2CDisguisedChatData
-		if err := jp.BytesToPacketData(pkt.Data, &d); err == nil {
-			msg := d.Message.GetText()
-			sender := d.SenderName.GetText()
+	case packets.S2CDisguisedChatID:
+		var d packets.S2CDisguisedChat
+		if err := pkt.ReadInto(&d); err == nil {
+			msg := d.Message.ToANSI()
+			sender := d.SenderName.ToANSI()
 			if d.TargetName.Present {
-				c.Logger.Printf("[DISGUISED] %s -> %s: %s", sender, d.TargetName.Value.GetText(), msg)
+				c.Logger.Printf("[DISGUISED] %s -> %s: %s", sender, d.TargetName.Value.String(), msg)
 			} else {
 				c.Logger.Printf("[DISGUISED] %s: %s", sender, msg)
 			}
 		}
-	case packets.S2CPlayerCombatKill.PacketID:
-		var d packets.S2CPlayerCombatKillData
-		if err := jp.BytesToPacketData(pkt.Data, &d); err != nil {
+	case packets.S2CPlayerCombatKillID:
+		var d packets.S2CPlayerCombatKill
+		if err := pkt.ReadInto(&d); err != nil {
 			c.Logger.Printf("failed to parse player combat kill data: %s", err)
 			return
 		}
 		if d.PlayerId == c.Self.EntityID {
-			c.Logger.Printf("died: %s", d.Message.GetText())
+			c.Logger.Printf("died: %s", d.Message.ToANSI())
 			if c.AutoRespawn {
 				c.Respawn()
 			}

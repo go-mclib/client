@@ -4,20 +4,17 @@ import (
 	"math"
 	"math/rand"
 
-	packets "github.com/go-mclib/data/go/774/java_packets"
-	ns "github.com/go-mclib/protocol/net_structures"
+	"github.com/go-mclib/data/packets"
+	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
 )
 
 // Move moves the player to the given x, y, z position
 func (c *Client) Move(x, y, z float64) error {
-	move, err := packets.C2SMovePlayerPos.WithData(packets.C2SMovePlayerPosData{
-		X:     ns.Double(x),
-		FeetY: ns.Double(y),
-		Z:     ns.Double(z),
+	move := &packets.C2SMovePlayerPos{
+		X:     ns.Float64(x),
+		FeetY: ns.Float64(y),
+		Z:     ns.Float64(z),
 		Flags: 0x01, // on ground
-	})
-	if err != nil {
-		return err
 	}
 
 	return c.WritePacket(move)
@@ -30,13 +27,10 @@ func (c *Client) MoveRelative(deltaX, deltaY, deltaZ float64) error {
 
 // LookAt looks at the given x, y, z position
 func (c *Client) LookAt(x, y, z float64) error {
-	look, err := packets.C2SMovePlayerRot.WithData(packets.C2SMovePlayerRotData{
-		Yaw:   ns.Float(rand.Float64() * 360),
-		Pitch: ns.Float(rand.Float64() * 360),
+	look := &packets.C2SMovePlayerRot{
+		Yaw:   ns.Float32(rand.Float64() * 360),
+		Pitch: ns.Float32(rand.Float64() * 360),
 		Flags: 0x01, // on ground
-	})
-	if err != nil {
-		return err
 	}
 
 	return c.WritePacket(look)
@@ -44,17 +38,14 @@ func (c *Client) LookAt(x, y, z float64) error {
 
 // SetRotation sets the absolute yaw and pitch of the player
 func (c *Client) SetRotation(yaw, pitch float64) error {
-	rotate, err := packets.C2SMovePlayerRot.WithData(packets.C2SMovePlayerRotData{
-		Yaw:   ns.Float(yaw),
-		Pitch: ns.Float(pitch),
+	rotate := &packets.C2SMovePlayerRot{
+		Yaw:   ns.Float32(yaw),
+		Pitch: ns.Float32(pitch),
 		Flags: 0x01, // on ground
-	})
-	if err != nil {
-		return err
 	}
 
-	c.Self.Yaw = ns.Float(yaw)
-	c.Self.Pitch = ns.Float(pitch)
+	c.Self.Yaw = ns.Float32(yaw)
+	c.Self.Pitch = ns.Float32(pitch)
 
 	return c.WritePacket(rotate)
 }
@@ -82,13 +73,11 @@ func (c *Client) Rotate(deltaYaw, deltaPitch float64) error {
 
 // UseAt uses the item in the specified hand at the given yaw and pitch
 func (c *Client) UseAt(hand int8, yaw, pitch float64) error {
-	use, err := packets.C2SUseItem.WithData(packets.C2SUseItemData{
-		Hand:  ns.VarInt(hand),
-		Yaw:   ns.Float(yaw),
-		Pitch: ns.Float(pitch),
-	})
-	if err != nil {
-		return err
+	use := &packets.C2SUseItem{
+		Hand:     ns.VarInt(hand),
+		Sequence: 0,
+		Yaw:      ns.Float32(yaw),
+		Pitch:    ns.Float32(pitch),
 	}
 
 	return c.WritePacket(use)
@@ -109,25 +98,19 @@ func (c *Client) DropItem(dropStack bool) error {
 		status = ns.VarInt(4)
 	}
 
-	drop, err := packets.C2SPlayerAction.WithData(packets.C2SPlayerActionData{
+	drop := &packets.C2SPlayerAction{
 		Status:   status,
 		Location: ns.Position{X: 0, Y: 0, Z: 0},
-		Face:     ns.Byte(0),
+		Face:     ns.Int8(0),
 		Sequence: ns.VarInt(0),
-	})
-	if err != nil {
-		return err
 	}
 
 	return c.WritePacket(drop)
 }
 
 func (c *Client) Respawn() error {
-	respawn, err := packets.C2SClientCommand.WithData(packets.C2SClientCommandData{
+	respawn := &packets.C2SClientCommand{
 		ActionId: 0, // perform respawn
-	})
-	if err != nil {
-		return err
 	}
 	return c.WritePacket(respawn)
 }
@@ -139,4 +122,94 @@ func WorldPosToYawPitch(x, y, z, lookX, lookY, lookZ float64) (yaw, pitch float6
 	yaw = math.Atan2(dz, dx) * 180 / math.Pi
 	pitch = -math.Atan2(y-lookY, math.Sqrt(dx*dx+dz*dz)) * 180 / math.Pi
 	return
+}
+
+// Block face constants
+const (
+	FaceBottom = 0 // -Y
+	FaceTop    = 1 // +Y
+	FaceNorth  = 2 // -Z
+	FaceSouth  = 3 // +Z
+	FaceWest   = 4 // -X
+	FaceEast   = 5 // +X
+)
+
+// Hand constants
+const (
+	HandMain = 0
+	HandOff  = 1
+)
+
+// GetBlockAt returns the block state ID at the given world coordinates
+func (c *Client) GetBlockAt(x, y, z int) int32 {
+	return c.World.GetBlock(x, y, z)
+}
+
+// BreakBlock starts or finishes breaking a block at the given position.
+// This sends the appropriate PlayerAction packets.
+// For instant break (creative mode), call with start=true only.
+// For survival mode, call with start=true, wait for the block to break, then call with start=false.
+func (c *Client) BreakBlock(x, y, z int, face int8, start bool) error {
+	var status ns.VarInt
+	if start {
+		status = 0 // Started digging
+	} else {
+		status = 2 // Finished digging
+	}
+
+	action := &packets.C2SPlayerAction{
+		Status:   status,
+		Location: ns.Position{X: x, Y: y, Z: z},
+		Face:     ns.Int8(face),
+		Sequence: 0,
+	}
+
+	return c.WritePacket(action)
+}
+
+// CancelBreakBlock cancels the current block breaking action
+func (c *Client) CancelBreakBlock(x, y, z int, face int8) error {
+	action := &packets.C2SPlayerAction{
+		Status:   1, // Cancelled digging
+		Location: ns.Position{X: x, Y: y, Z: z},
+		Face:     ns.Int8(face),
+		Sequence: 0,
+	}
+
+	return c.WritePacket(action)
+}
+
+// PlaceBlock places a block from the given hand at the specified position and face.
+// cursorX, cursorY, cursorZ are the positions of the crosshair on the block (0.0 to 1.0).
+func (c *Client) PlaceBlock(x, y, z int, face int8, hand int8, cursorX, cursorY, cursorZ float32) error {
+	place := &packets.C2SUseItemOn{
+		Hand:            ns.VarInt(hand),
+		Location:        ns.Position{X: x, Y: y, Z: z},
+		Face:            ns.VarInt(face),
+		CursorPositionX: ns.Float32(cursorX),
+		CursorPositionY: ns.Float32(cursorY),
+		CursorPositionZ: ns.Float32(cursorZ),
+		InsideBlock:     false,
+		WorldBorderHit:  false,
+		Sequence:        0,
+	}
+
+	return c.WritePacket(place)
+}
+
+// InteractBlock right-clicks on a block at the specified position and face.
+// This is used for interacting with blocks like doors, buttons, levers, etc.
+// cursorX, cursorY, cursorZ are the positions of the crosshair on the block (0.0 to 1.0).
+func (c *Client) InteractBlock(x, y, z int, face int8, hand int8, cursorX, cursorY, cursorZ float32) error {
+	// InteractBlock is the same as PlaceBlock at the protocol level
+	return c.PlaceBlock(x, y, z, face, hand, cursorX, cursorY, cursorZ)
+}
+
+// SwingArm swings the player's arm (for animation)
+func (c *Client) SwingArm(hand int8) error {
+	swing := &packets.C2SSwing{
+		Hand: ns.VarInt(hand),
+	}
+
+	return c.WritePacket(swing)
 }

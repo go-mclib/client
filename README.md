@@ -2,6 +2,10 @@
 
 A higher-level framework for building Minecraft (chat)bots with Go.
 
+## Dependency Chain
+
+[go-mclib/protocol](https://github.com/go-mclib/protocol) <–––(requires)––– [go-mclib/data](https://github.com/go-mclib/data) <–––(requires)––– **[go-mclib/client](https://github.com/go-mclib/client)**
+
 ## Capabilities / TODO
 
 The bot is NOT ready for complex tasks yet. In its current state, it can join a server, remain online and chat.
@@ -21,9 +25,7 @@ It can also listen and send any packet, but there are no "smart" features yet. H
 
 ## Disclaimer
 
-This project is a work in progress. It was made to learn more about the Minecraft protocol, and also because there isn't really a good framework for building bots with Go.
-
-Since the tears and sweat are real, it is unlikely that I will continue maintaining this before taking a break from it.
+This project is a work in progress. It was made to learn more about the Minecraft protocol, and also because there isn't really a good framework for building Minecraft bots with Go.
 
 ## Dependencies
 

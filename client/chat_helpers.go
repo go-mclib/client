@@ -7,9 +7,8 @@ import (
 	"strings"
 	"time"
 
-	packets "github.com/go-mclib/data/go/774/java_packets"
-	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/net_structures"
+	"github.com/go-mclib/data/packets"
+	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
 )
 
 func (c *Client) SendChatMessage(message string) error {
@@ -28,34 +27,27 @@ func (c *Client) SendChatMessage(message string) error {
 		if err != nil {
 			return err
 		}
-		ack := ns.FixedBitSet{Length: 20, Data: make([]byte, 3)}
-		pkt, err := packets.C2SChat.WithData(packets.C2SChatData{
+		pkt := &packets.C2SChat{
 			Message:      ns.String(message),
-			Timestamp:    ns.Long(timestamp.UnixMilli()),
-			Salt:         ns.Long(salt),
+			Timestamp:    ns.Int64(timestamp.UnixMilli()),
+			Salt:         ns.Int64(salt),
 			Signature:    ns.PrefixedOptional[ns.ByteArray]{Present: true, Value: ns.ByteArray(signedMsg.Signature)},
 			MessageCount: ns.VarInt(len(lastSeen)),
-			Acknowledged: ack,
-			Checksum:     ns.Byte(0),
-		})
-		if err != nil {
-			return err
+			Acknowledged: ns.NewFixedBitSet(20),
+			Checksum:     ns.Int8(0),
 		}
 		return c.WritePacket(pkt)
 	}
 
 	// unsigned
-	pkt, err := packets.C2SChat.WithData(packets.C2SChatData{
+	pkt := &packets.C2SChat{
 		Message:      ns.String(message),
-		Timestamp:    ns.Long(time.Now().UnixMilli()),
-		Salt:         ns.Long(0),
+		Timestamp:    ns.Int64(time.Now().UnixMilli()),
+		Salt:         ns.Int64(0),
 		Signature:    ns.PrefixedOptional[ns.ByteArray]{},
 		MessageCount: ns.VarInt(0),
-		Acknowledged: ns.FixedBitSet{Length: 20, Data: make([]byte, 3)},
-		Checksum:     ns.Byte(0),
-	})
-	if err != nil {
-		return err
+		Acknowledged: ns.NewFixedBitSet(20),
+		Checksum:     ns.Int8(0),
 	}
 	return c.WritePacket(pkt)
 }
@@ -63,11 +55,8 @@ func (c *Client) SendChatMessage(message string) error {
 func (c *Client) SendCommand(command string) error {
 	// if starts with /, remove it
 	command = strings.TrimPrefix(command, "/")
-	pkt, err := packets.C2SChatCommand.WithData(packets.C2SChatCommandData{
+	pkt := &packets.C2SChatCommand{
 		Command: ns.String(command),
-	})
-	if err != nil {
-		return err
 	}
 
 	return c.WritePacket(pkt)
@@ -86,27 +75,14 @@ func (c *Client) sendChatSessionData() error {
 	if len(pub) == 0 {
 		return fmt.Errorf("no public key")
 	}
-	expiresAt := ns.Long(c.ChatSigner.KeyExpiry.UnixMilli())
+	expiresAt := ns.Int64(c.ChatSigner.KeyExpiry.UnixMilli())
 	mojangSig := c.ChatSigner.SessionKey
 
-	pubBytes := make([]ns.Byte, len(pub))
-	for i, b := range pub {
-		pubBytes[i] = ns.Byte(b)
-	}
-	sigBytes := make([]ns.Byte, len(mojangSig))
-	for i, b := range mojangSig {
-		sigBytes[i] = ns.Byte(b)
-	}
-
-	pkt, err := jp.NewPacket(jp.StatePlay, jp.C2S, 0x09).WithData(packets.C2SChatSessionUpdateData{
+	pkt := &packets.C2SChatSessionUpdate{
 		SessionId:    sessionID,
 		ExpiresAt:    expiresAt,
-		PublicKey:    ns.PrefixedArray[ns.Byte](pubBytes),
-		KeySignature: ns.PrefixedArray[ns.Byte](sigBytes),
-	})
-	if err != nil {
-		c.Logger.Println("build chat session packet:", err)
-		return err
+		PublicKey:    ns.ByteArray(pub),
+		KeySignature: ns.ByteArray(mojangSig),
 	}
 	return c.WritePacket(pkt)
 }

@@ -6,12 +6,11 @@ require (
 	github.com/charmbracelet/bubbles v0.21.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
-	github.com/go-mclib/data v0.0.0-20251215170733-d4d5987ba9e9
-	github.com/go-mclib/protocol v0.0.0-20251224144838-5f651bbc939b
+	github.com/go-mclib/data v0.0.0-20260131202347-8299357d4a80
+	github.com/go-mclib/protocol v0.0.0-20260131202152-ceaeb62760d5
 )
 
 require (
-	github.com/Tnze/go-mc v1.20.2 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/charmbracelet/colorprofile v0.4.1 // indirect

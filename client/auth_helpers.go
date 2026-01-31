@@ -9,8 +9,8 @@ import (
 	"github.com/go-mclib/client/chat"
 	auth "github.com/go-mclib/protocol/auth"
 	mc_crypto "github.com/go-mclib/protocol/crypto"
-	ns "github.com/go-mclib/protocol/net_structures"
-	session_server "github.com/go-mclib/protocol/session_server"
+	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	session_server "github.com/go-mclib/protocol/java_protocol/session_server"
 )
 
 // initializeAuth performs online or offline auth and prepares chat/session structures
@@ -52,7 +52,7 @@ func (c *Client) initializeAuth(ctx context.Context) error {
 	c.ChatSigner = chat.NewChatSigner()
 	c.ChatSigner.SetKeys(cert.PrivateKey, cert.PublicKey)
 
-	playerUUID, err := ns.NewUUID(ld.UUID)
+	playerUUID, err := ns.UUIDFromString(ld.UUID)
 	if err != nil {
 		return fmt.Errorf("parse player uuid: %w", err)
 	}
