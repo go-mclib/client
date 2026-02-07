@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 	"time"
 
 	mcclient "github.com/go-mclib/client/client"
+	"github.com/go-mclib/data/pkg/data/blocks"
 )
 
 func main() {
@@ -35,12 +37,18 @@ func main() {
 	mcClient.RegisterDefaultHandlers()
 
 	go func() {
+		var lastBlockHash string
 		for {
 			time.Sleep(1 * time.Second)
-			block := mcClient.World.GetBlock(0, -64, 0)
-			mcClient.Logger.Printf("Block at (0, -64, 0): %d", block)
-			deathPos := mcClient.Self.DeathLocation.Value.Pos
-			mcClient.Logger.Printf("Death location: %d %d %d", deathPos.X, deathPos.Y, deathPos.Z)
+			blockID, blockProperties := blocks.StateProperties(int(mcClient.World.GetBlock(0, -59, -5)))
+
+			if fmt.Sprintf("%d:%s", blockID, blockProperties) == lastBlockHash {
+				continue
+			}
+			lastBlockHash = fmt.Sprintf("%d:%s", blockID, blockProperties)
+
+			blockName := blocks.BlockName(blockID)
+			mcClient.SendChatMessage(fmt.Sprintf("Block at (0, -59, -5): %s{%s} (protocol ID: %d)", blockName, blockProperties, blockID))
 		}
 	}()
 
