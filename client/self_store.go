@@ -1,7 +1,8 @@
 package client
 
 import (
-	"github.com/go-mclib/data/packets"
+	"github.com/go-mclib/data/pkg/data/packet_ids"
+	"github.com/go-mclib/data/pkg/packets"
 	jp "github.com/go-mclib/protocol/java_protocol"
 	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
 )
@@ -66,7 +67,7 @@ func (s *SelfStore) IsDead() bool {
 
 func (s *SelfStore) HandlePacket(c *Client, pkt *jp.WirePacket) {
 	switch pkt.PacketID {
-	case packets.S2CSetHealthID:
+	case packet_ids.S2CSetHealthID:
 		var d packets.S2CSetHealth
 		if err := pkt.ReadInto(&d); err != nil {
 			return
@@ -74,7 +75,7 @@ func (s *SelfStore) HandlePacket(c *Client, pkt *jp.WirePacket) {
 		s.Health = d.Health
 		s.Food = d.Food
 		s.FoodSaturation = d.FoodSaturation
-	case packets.S2CSetExperienceID:
+	case packet_ids.S2CSetExperienceID:
 		var d packets.S2CSetExperience
 		if err := pkt.ReadInto(&d); err != nil {
 			return
@@ -82,7 +83,7 @@ func (s *SelfStore) HandlePacket(c *Client, pkt *jp.WirePacket) {
 		s.ExperienceBar = d.ExperienceBar
 		s.Level = d.Level
 		s.TotalExperience = d.TotalExperience
-	case packets.S2CPlayerPositionID:
+	case packet_ids.S2CPlayerPositionID:
 		var d packets.S2CPlayerPosition
 		if err := pkt.ReadInto(&d); err != nil {
 			return

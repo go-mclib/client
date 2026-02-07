@@ -11,7 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/go-mclib/client/chat"
 	"github.com/go-mclib/client/tui"
-	"github.com/go-mclib/data/packets"
+	"github.com/go-mclib/data/pkg/packets"
 	"github.com/go-mclib/protocol/auth"
 	jp "github.com/go-mclib/protocol/java_protocol"
 	ns "github.com/go-mclib/protocol/java_protocol/net_structures"

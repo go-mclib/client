@@ -1,7 +1,7 @@
 .env*
 .DS_Store
 
-mclib-credentials.txt
+minecraft_source
 
 # tests
 integration_tests/*.jar

@@ -3,7 +3,8 @@ package client
 import (
 	"time"
 
-	"github.com/go-mclib/data/packets"
+	"github.com/go-mclib/data/pkg/data/packet_ids"
+	"github.com/go-mclib/data/pkg/packets"
 	jp "github.com/go-mclib/protocol/java_protocol"
 	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
 )
@@ -14,7 +15,7 @@ type Handler func(c *Client, pkt *jp.WirePacket)
 func defaultStateHandler(c *Client, pkt *jp.WirePacket) {
 	switch c.State() {
 	case jp.StateLogin:
-		if pkt.PacketID == packets.S2CHelloID && c.SessionClient != nil {
+		if pkt.PacketID == packet_ids.S2CHelloID && c.SessionClient != nil {
 			handleEncryptionRequest(c, pkt)
 			return
 		}
@@ -73,7 +74,7 @@ func handleEncryptionRequest(c *Client, pkt *jp.WirePacket) {
 
 func handleLoginPacket(c *Client, pkt *jp.WirePacket) {
 	switch pkt.PacketID {
-	case packets.S2CLoginDisconnectLoginID:
+	case packet_ids.S2CLoginDisconnectID:
 		var d packets.S2CLoginDisconnectLogin
 		if err := pkt.ReadInto(&d); err != nil {
 			c.Logger.Println("login disconnect (parse):", err)
@@ -81,7 +82,7 @@ func handleLoginPacket(c *Client, pkt *jp.WirePacket) {
 			c.Logger.Printf("login disconnect: %s", d.Reason.Text)
 		}
 		c.Disconnect(false)
-	case packets.S2CLoginFinishedID:
+	case packet_ids.S2CLoginFinishedID:
 		c.Logger.Println("login successful")
 		_ = c.WritePacket(&packets.C2SLoginAcknowledged{})
 		sendBrandPluginMessage(c, c.Brand)
@@ -89,7 +90,7 @@ func handleLoginPacket(c *Client, pkt *jp.WirePacket) {
 
 		c.SetState(jp.StateConfiguration)
 		c.Logger.Println("switched from login -> configuration state")
-	case packets.S2CLoginCompressionID:
+	case packet_ids.S2CLoginCompressionID:
 		var d packets.S2CLoginCompression
 		if err := pkt.ReadInto(&d); err != nil {
 			c.Logger.Println("compression threshold:", err)
@@ -102,27 +103,27 @@ func handleLoginPacket(c *Client, pkt *jp.WirePacket) {
 
 func handleConfigurationPacket(c *Client, pkt *jp.WirePacket) {
 	switch pkt.PacketID {
-	case packets.S2CDisconnectConfigurationID:
+	case packet_ids.S2CDisconnectConfigurationID:
 		var d packets.S2CDisconnectConfiguration
 		if err := pkt.ReadInto(&d); err != nil {
 			c.Logger.Println("failed to parse disconnect configuration data:", err)
 		}
 		c.Logger.Printf("disconnected during configuration: %s", d.Reason.Text)
 		c.Disconnect(false)
-	case packets.S2CFinishConfigurationID:
+	case packet_ids.S2CFinishConfigurationID:
 		_ = c.WritePacket(&packets.C2SFinishConfiguration{})
 		c.SetState(jp.StatePlay)
 		c.Logger.Println("switched from configuration -> play state")
 		time.Sleep(100 * time.Millisecond)
 		c.sendChatSessionData()
-	case packets.S2CKeepAliveConfigurationID:
+	case packet_ids.S2CKeepAliveConfigurationID:
 		var d packets.S2CKeepAliveConfiguration
 		if err := pkt.ReadInto(&d); err == nil {
 			_ = c.WritePacket(&packets.C2SKeepAliveConfiguration{KeepAliveId: d.KeepAliveId})
 		}
-	case packets.S2CSelectKnownPacksID:
+	case packet_ids.S2CSelectKnownPacksID:
 		_ = c.WritePacket(&packets.C2SSelectKnownPacks{})
-	case packets.S2CResourcePackPushConfigurationID:
+	case packet_ids.S2CResourcePackPushConfigurationID:
 		var d packets.S2CResourcePackPushConfiguration
 		if err := pkt.ReadInto(&d); err == nil {
 			_ = c.WritePacket(&packets.C2SResourcePackConfiguration{
@@ -135,13 +136,13 @@ func handleConfigurationPacket(c *Client, pkt *jp.WirePacket) {
 
 func handlePlayPacket(c *Client, pkt *jp.WirePacket) {
 	switch pkt.PacketID {
-	case packets.S2CDisconnectPlayID:
+	case packet_ids.S2CDisconnectPlayID:
 		var d packets.S2CDisconnectPlay
 		if err := pkt.ReadInto(&d); err == nil {
 			c.Logger.Printf("disconnect: %s", d.Reason.Text)
 		}
 		c.Disconnect(false)
-	case packets.S2CStartConfigurationID:
+	case packet_ids.S2CStartConfigurationID:
 		if c.TreatTransferAsDisconnect {
 			c.Logger.Println("server transfer detected, treating as disconnect")
 			c.Disconnect(false)
@@ -153,8 +154,8 @@ func handlePlayPacket(c *Client, pkt *jp.WirePacket) {
 		}
 		c.SetState(jp.StateConfiguration)
 		c.Logger.Println("switched from play -> configuration phase, client is probably being transfered to another server")
-	case packets.S2CLoginPlayID:
-		var d packets.S2CLoginPlay
+	case packet_ids.S2CLoginID:
+		var d packets.S2CLogin
 		if err := pkt.ReadInto(&d); err != nil {
 			c.Logger.Println("failed to parse login play data:", err)
 			return
@@ -176,57 +177,57 @@ func handlePlayPacket(c *Client, pkt *jp.WirePacket) {
 		if c.AutoRespawn {
 			c.Respawn() // health not available yet, just send the packet
 		}
-	case packets.S2CPlayerChatID:
+	case packet_ids.S2CPlayerChatID:
 		var d packets.S2CPlayerChat
 		if err := pkt.ReadInto(&d); err == nil {
 			c.Logger.Printf("%v", d.ChatType.ChatType)
 			if d.ChatType.TargetName.Present {
-				c.Logger.Printf("[CHAT-WHISPER] %s -> %s: %s", d.ChatType.Name.ToANSI(), d.ChatType.TargetName.Value.ToANSI(), d.Body.Content)
+				c.Logger.Printf("[CHAT-WHISPER] %s -> %s: %s", d.ChatType.Name.Text, d.ChatType.TargetName.Value.Text, d.Body.Content)
 			} else {
-				c.Logger.Printf("[CHAT] %s: %s", d.ChatType.Name.ToANSI(), d.Body.Content)
+				c.Logger.Printf("[CHAT] %s: %s", d.ChatType.Name.Text, d.Body.Content)
 			}
 		}
-	case packets.S2CKeepAlivePlayID:
+	case packet_ids.S2CKeepAlivePlayID:
 		var d packets.S2CKeepAlivePlay
 		if err := pkt.ReadInto(&d); err == nil {
 			_ = c.WritePacket(&packets.C2SKeepAlivePlay{KeepAliveId: d.KeepAliveId})
 		}
 	// vanilla server doesn't use this, but some AC plugins like Grim do
 	// and they kick bot if it doesn't respond to this packet (timed out):
-	case packets.S2CPingPlayID:
+	case packet_ids.S2CPingPlayID:
 		var d packets.S2CPingPlay
 		if err := pkt.ReadInto(&d); err == nil {
 			_ = c.WritePacket(&packets.C2SPongPlay{Id: d.Id})
 		}
-	case packets.S2CSystemChatID:
+	case packet_ids.S2CSystemChatID:
 		var d packets.S2CSystemChat
 		if err := pkt.ReadInto(&d); err == nil {
-			txt := d.Content.ToANSI()
+			txt := d.Content.Text
 			if d.Overlay {
 				c.Logger.Printf("[SYSTEM-ACTION] %s", txt)
 			} else {
 				c.Logger.Printf("[SYSTEM] %s", txt)
 			}
 		}
-	case packets.S2CDisguisedChatID:
+	case packet_ids.S2CDisguisedChatID:
 		var d packets.S2CDisguisedChat
 		if err := pkt.ReadInto(&d); err == nil {
-			msg := d.Message.ToANSI()
-			sender := d.SenderName.ToANSI()
+			msg := d.Message.Text
+			sender := d.SenderName.Text
 			if d.TargetName.Present {
-				c.Logger.Printf("[DISGUISED] %s -> %s: %s", sender, d.TargetName.Value.String(), msg)
+				c.Logger.Printf("[DISGUISED] %s -> %s: %s", sender, d.TargetName.Value.Text, msg)
 			} else {
 				c.Logger.Printf("[DISGUISED] %s: %s", sender, msg)
 			}
 		}
-	case packets.S2CPlayerCombatKillID:
+	case packet_ids.S2CPlayerCombatKillID:
 		var d packets.S2CPlayerCombatKill
 		if err := pkt.ReadInto(&d); err != nil {
 			c.Logger.Printf("failed to parse player combat kill data: %s", err)
 			return
 		}
 		if d.PlayerId == c.Self.EntityID {
-			c.Logger.Printf("died: %s", d.Message.ToANSI())
+			c.Logger.Printf("died: %s", d.Message.Text)
 			if c.AutoRespawn {
 				c.Respawn()
 			}

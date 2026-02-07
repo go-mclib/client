@@ -3,7 +3,8 @@ package client
 import (
 	"sync"
 
-	"github.com/go-mclib/data/packets"
+	"github.com/go-mclib/data/pkg/packets"
+	"github.com/go-mclib/data/pkg/data/packet_ids"
 	jp "github.com/go-mclib/protocol/java_protocol"
 	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
 )
@@ -36,19 +37,19 @@ func NewWorldStore(client *Client) *WorldStore {
 // HandlePacket handles world-related packets
 func (w *WorldStore) HandlePacket(c *Client, pkt *jp.WirePacket) {
 	switch pkt.PacketID {
-	case packets.S2CLevelChunkWithLightID:
+	case packet_ids.S2CLevelChunkWithLightID:
 		w.handleChunkData(pkt)
-	case packets.S2CForgetLevelChunkID:
+	case packet_ids.S2CForgetLevelChunkID:
 		w.handleUnloadChunk(pkt)
-	case packets.S2CBlockUpdateID:
+	case packet_ids.S2CBlockUpdateID:
 		w.handleBlockUpdate(pkt)
-	case packets.S2CSectionBlocksUpdateID:
+	case packet_ids.S2CSectionBlocksUpdateID:
 		w.handleSectionBlocksUpdate(pkt)
-	case packets.S2CSetChunkCacheCenterID:
+	case packet_ids.S2CSetChunkCacheCenterID:
 		w.handleSetChunkCacheCenter(pkt)
-	case packets.S2CSetChunkCacheRadiusID:
+	case packet_ids.S2CSetChunkCacheRadiusID:
 		w.handleSetChunkCacheRadius(pkt)
-	case packets.S2CChunkBatchFinishedID:
+	case packet_ids.S2CChunkBatchFinishedID:
 		w.handleChunkBatchFinished()
 	}
 }
@@ -186,7 +187,7 @@ func (w *WorldStore) handleSectionBlocksUpdate(pkt *jp.WirePacket) {
 
 	// Parse blocks from raw byte array - each entry is a VarLong
 	// Each block entry: block state ID << 12 | (x << 8 | z << 4 | y)
-	reader := newChunkReader(d.Blocks)
+	reader := newChunkReader(d.Blocks) // FIXME: cannot use d.Blocks (variable of slice type net_structures.PrefixedArray[net_structures.VarLong]) as []byte value in argument to newChunkReader
 	for reader.remaining() > 0 {
 		block, err := reader.readVarLong()
 		if err != nil {

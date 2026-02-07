@@ -7,7 +7,8 @@ import (
 	"strings"
 
 	mcclient "github.com/go-mclib/client/client"
-	"github.com/go-mclib/data/packets"
+	"github.com/go-mclib/data/pkg/data/packet_ids"
+	"github.com/go-mclib/data/pkg/packets"
 	jp "github.com/go-mclib/protocol/java_protocol"
 )
 
@@ -41,14 +42,14 @@ func main() {
 	// we are almost always guaranteed to drop the item when it appears in inv
 	// (only available container, unless server opens one for us)
 	mcClient.RegisterHandler(func(c *mcclient.Client, pkt *jp.WirePacket) {
-		if pkt.PacketID == packets.S2CContainerSetSlotID {
+		if pkt.PacketID == packet_ids.S2CContainerSetSlotID {
 			c.DropItem(true)
 		}
 	})
 
 	// in case we get kicked, abort
 	mcClient.RegisterHandler(func(c *mcclient.Client, pkt *jp.WirePacket) {
-		if pkt.PacketID == packets.S2CSystemChatID {
+		if pkt.PacketID == packet_ids.S2CSystemChatID {
 			var data packets.S2CSystemChat
 			if err := pkt.ReadInto(&data); err == nil {
 				if strings.Contains(data.Content.Text, "disconnect") {

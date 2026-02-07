@@ -3,7 +3,7 @@ package client
 import (
 	"bytes"
 
-	"github.com/go-mclib/data/packets"
+	"github.com/go-mclib/data/pkg/packets"
 	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
 )
 

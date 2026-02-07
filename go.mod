@@ -6,8 +6,8 @@ require (
 	github.com/charmbracelet/bubbles v0.21.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
-	github.com/go-mclib/data v0.0.0-20260131202347-8299357d4a80
-	github.com/go-mclib/protocol v0.0.0-20260131202152-ceaeb62760d5
+	github.com/go-mclib/data v0.0.0-20260207192400-0335ac984ef7
+	github.com/go-mclib/protocol v0.0.0-20260207175754-56f11c81db1d
 )
 
 require (
