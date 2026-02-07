@@ -115,7 +115,12 @@ func handleConfigurationPacket(c *Client, pkt *jp.WirePacket) {
 		c.SetState(jp.StatePlay)
 		c.Logger.Println("switched from configuration -> play state")
 		time.Sleep(100 * time.Millisecond)
-		c.sendChatSessionData()
+		// only send chat session if encryption was negotiated (server is online-mode);
+		// offline-mode servers assign a different UUID than Mojang, so the
+		// Mojang-signed profile key would fail validation
+		if c.Conn().Encryption().IsEnabled() {
+			c.sendChatSessionData()
+		}
 	case packet_ids.S2CKeepAliveConfigurationID:
 		var d packets.S2CKeepAliveConfiguration
 		if err := pkt.ReadInto(&d); err == nil {
@@ -131,6 +136,13 @@ func handleConfigurationPacket(c *Client, pkt *jp.WirePacket) {
 				Result: 0, // successfully downloaded
 			})
 		}
+	case packet_ids.S2CPingConfigurationID:
+		var d packets.S2CPingConfiguration
+		if err := pkt.ReadInto(&d); err == nil {
+			_ = c.WritePacket(&packets.C2SPongConfiguration{Id: d.Id})
+		}
+	case packet_ids.S2CCodeOfConductID:
+		_ = c.WritePacket(&packets.C2SAcceptCodeOfConduct{})
 	}
 }
 
@@ -227,7 +239,7 @@ func handlePlayPacket(c *Client, pkt *jp.WirePacket) {
 			return
 		}
 		if d.PlayerId == c.Self.EntityID {
-			c.Logger.Printf("died: %s", d.Message.Text)
+			c.Logger.Printf("died: %++v", d.Message)
 			if c.AutoRespawn {
 				c.Respawn()
 			}

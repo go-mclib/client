@@ -4,7 +4,10 @@ A higher-level framework for building Minecraft (chat)bots with Go.
 
 ## Dependency Chain
 
-[go-mclib/protocol](https://github.com/go-mclib/protocol) <–––(requires)––– [go-mclib/data](https://github.com/go-mclib/data) <–––(requires)––– **[go-mclib/client](https://github.com/go-mclib/client)**
+```markdown
+go-mclib/protocol <–––(requires)––– go-mclib/data <–––(requires)––– go-mclib/client
+              ^–––––––––––––––––––––––––(requires)––––––––––––––––––––––/
+```
 
 ## Capabilities / TODO
 
@@ -36,10 +39,10 @@ This project is a work in progress. It was made to learn more about the Minecraf
 
 See the [`examples`](./examples) directory for some sample bots/inspiration.
 
-For example, to run the [`paintball`](./examples/paintball) example:
+For example, to run the [`afkbot`](./examples/afkbot) example:
 
 ```bash
-go run examples/paintball/paintball.go -s <your_server_ip> -u "<username (omit this parameter for Microsoft auth)>"
+go run examples/afkbot/afkbot.go -s <your_server_ip> -u "<username (omit this parameter for Microsoft auth)>"
 ```
 
 ## License

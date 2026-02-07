@@ -3,8 +3,9 @@ package client
 import (
 	"sync"
 
-	"github.com/go-mclib/data/pkg/packets"
+	"github.com/go-mclib/data/pkg/data/chunks"
 	"github.com/go-mclib/data/pkg/data/packet_ids"
+	"github.com/go-mclib/data/pkg/packets"
 	jp "github.com/go-mclib/protocol/java_protocol"
 	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
 )
@@ -13,13 +14,13 @@ import (
 type WorldStore struct {
 	mu sync.RWMutex
 
-	// Chunk storage: map[chunkKey]*ChunkColumn
-	Chunks map[int64]*ChunkColumn
+	// Chunk storage: map[chunkKey]*chunks.ChunkColumn
+	Chunks map[int64]*chunks.ChunkColumn
 
 	// View distance settings
 	CenterChunkX int32
 	CenterChunkZ int32
-	ViewDistance int32
+	ViewDistance  int32
 
 	// Reference to client for sending packets
 	client *Client
@@ -28,7 +29,7 @@ type WorldStore struct {
 // NewWorldStore creates a new WorldStore
 func NewWorldStore(client *Client) *WorldStore {
 	return &WorldStore{
-		Chunks:       make(map[int64]*ChunkColumn),
+		Chunks:       make(map[int64]*chunks.ChunkColumn),
 		ViewDistance: 10, // default view distance
 		client:       client,
 	}
@@ -55,41 +56,24 @@ func (w *WorldStore) HandlePacket(c *Client, pkt *jp.WirePacket) {
 }
 
 func (w *WorldStore) handleChunkData(pkt *jp.WirePacket) {
-	// Parse the packet manually since the struct doesn't match the actual packet format
-	// Format: ChunkX (Int), ChunkZ (Int), Heightmaps (NBT), Size (VarInt), Data, BlockEntities, LightData...
-	reader := newChunkReader(pkt.Data)
-
-	// Read chunk coordinates
-	chunkX, err := reader.readInt()
-	if err != nil {
+	var d packets.S2CLevelChunkWithLight
+	if err := pkt.ReadInto(&d); err != nil {
 		if w.client != nil {
-			w.client.Logger.Printf("failed to read chunk X: %v", err)
+			w.client.Logger.Printf("failed to read chunk packet: %v", err)
 		}
 		return
 	}
 
-	chunkZ, err := reader.readInt()
+	column, err := chunks.ParseChunkColumn(int32(d.ChunkX), int32(d.ChunkZ), d.ChunkData, &d.LightData)
 	if err != nil {
 		if w.client != nil {
-			w.client.Logger.Printf("failed to read chunk Z: %v", err)
-		}
-		return
-	}
-
-	// The rest of the packet (heightmaps NBT + chunk data + block entities + light)
-	// is passed to parseChunkData which will handle it
-	remainingData := pkt.Data[reader.offset:]
-
-	column, err := parseChunkData(chunkX, chunkZ, remainingData)
-	if err != nil {
-		if w.client != nil {
-			w.client.Logger.Printf("failed to parse chunk column at (%d, %d): %v", chunkX, chunkZ, err)
+			w.client.Logger.Printf("failed to parse chunk column at (%d, %d): %v", d.ChunkX, d.ChunkZ, err)
 		}
 		return
 	}
 
 	w.mu.Lock()
-	w.Chunks[chunkKey(chunkX, chunkZ)] = column
+	w.Chunks[chunkKey(int32(d.ChunkX), int32(d.ChunkZ))] = column
 	w.mu.Unlock()
 }
 
@@ -110,9 +94,7 @@ func (w *WorldStore) handleBlockUpdate(pkt *jp.WirePacket) {
 		return
 	}
 
-	// Convert block position to chunk coordinates
-	chunkX := int32(d.Location.X >> 4)
-	chunkZ := int32(d.Location.Z >> 4)
+	chunkX, chunkZ := chunks.ChunkPos(int(d.Location.X), int(d.Location.Z))
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -122,24 +104,7 @@ func (w *WorldStore) handleBlockUpdate(pkt *jp.WirePacket) {
 		return
 	}
 
-	// Calculate section index and local coordinates
-	// Y ranges from -64 to 319, section 0 starts at Y -64
-	y := int(d.Location.Y)
-	sectionIndex := (y + 64) / 16
-	if sectionIndex < 0 || sectionIndex >= 24 {
-		return
-	}
-
-	section := chunk.Sections[sectionIndex]
-	if section == nil || section.BlockStates == nil {
-		return
-	}
-
-	localX := int(d.Location.X) & 0xF
-	localY := y & 0xF
-	localZ := int(d.Location.Z) & 0xF
-
-	section.BlockStates.SetBlockState(localX, localY, localZ, int32(d.BlockId))
+	chunk.SetBlockState(int(d.Location.X), int(d.Location.Y), int(d.Location.Z), int32(d.BlockId))
 }
 
 func (w *WorldStore) handleSectionBlocksUpdate(pkt *jp.WirePacket) {
@@ -148,23 +113,7 @@ func (w *WorldStore) handleSectionBlocksUpdate(pkt *jp.WirePacket) {
 		return
 	}
 
-	// Decode chunk section position
-	// X: 22 bits, Z: 22 bits, Y: 20 bits (from left to right in a 64-bit long)
-	pos := int64(d.ChunkSectionPosition)
-	sectionX := int32(pos >> 42)
-	sectionZ := int32(pos << 22 >> 42)
-	sectionY := int32(pos << 44 >> 44)
-
-	// Sign extend the coordinates
-	if sectionX >= 0x200000 {
-		sectionX -= 0x400000
-	}
-	if sectionZ >= 0x200000 {
-		sectionZ -= 0x400000
-	}
-	if sectionY >= 0x80000 {
-		sectionY -= 0x100000
-	}
+	sectionX, sectionY, sectionZ := chunks.DecodeSectionPosition(int64(d.ChunkSectionPosition))
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -174,32 +123,19 @@ func (w *WorldStore) handleSectionBlocksUpdate(pkt *jp.WirePacket) {
 		return
 	}
 
-	// Convert section Y to section index (Y -4 = section 0, Y 0 = section 4, etc.)
-	sectionIndex := int(sectionY) + 4
-	if sectionIndex < 0 || sectionIndex >= 24 {
+	sectionIndex := chunks.SectionIndex(int(sectionY) * 16)
+	if sectionIndex < 0 {
 		return
 	}
 
 	section := chunk.Sections[sectionIndex]
-	if section == nil || section.BlockStates == nil {
+	if section == nil {
 		return
 	}
 
-	// Parse blocks from raw byte array - each entry is a VarLong
-	// Each block entry: block state ID << 12 | (x << 8 | z << 4 | y)
-	reader := newChunkReader(d.Blocks) // FIXME: cannot use d.Blocks (variable of slice type net_structures.PrefixedArray[net_structures.VarLong]) as []byte value in argument to newChunkReader
-	for reader.remaining() > 0 {
-		block, err := reader.readVarLong()
-		if err != nil {
-			break
-		}
-		blockState := int32(block >> 12)
-		localPos := int(block & 0xFFF)
-		localX := (localPos >> 8) & 0xF
-		localZ := (localPos >> 4) & 0xF
-		localY := localPos & 0xF
-
-		section.BlockStates.SetBlockState(localX, localY, localZ, blockState)
+	for _, block := range d.Blocks {
+		stateID, localX, localY, localZ := chunks.DecodeBlockEntry(int64(block))
+		section.SetBlockState(localX, localY, localZ, stateID)
 	}
 }
 
@@ -240,8 +176,7 @@ func (w *WorldStore) handleChunkBatchFinished() {
 
 // GetBlock returns the block state ID at the given world coordinates
 func (w *WorldStore) GetBlock(x, y, z int) int32 {
-	chunkX := int32(x >> 4)
-	chunkZ := int32(z >> 4)
+	chunkX, chunkZ := chunks.ChunkPos(x, z)
 
 	w.mu.RLock()
 	chunk := w.Chunks[chunkKey(chunkX, chunkZ)]
@@ -251,28 +186,12 @@ func (w *WorldStore) GetBlock(x, y, z int) int32 {
 		return 0
 	}
 
-	// Calculate section index (Y -64 = section 0)
-	sectionIndex := (y + 64) / 16
-	if sectionIndex < 0 || sectionIndex >= 24 {
-		return 0
-	}
-
-	section := chunk.Sections[sectionIndex]
-	if section == nil || section.BlockStates == nil {
-		return 0
-	}
-
-	localX := x & 0xF
-	localY := y & 0xF
-	localZ := z & 0xF
-
-	return section.BlockStates.GetBlockState(localX, localY, localZ)
+	return chunk.GetBlockState(x, y, z)
 }
 
 // setBlock sets the block state ID at the given world coordinates (client-side only)
 func (w *WorldStore) setBlock(x, y, z int, blockState int32) {
-	chunkX := int32(x >> 4)
-	chunkZ := int32(z >> 4)
+	chunkX, chunkZ := chunks.ChunkPos(x, z)
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -282,35 +201,7 @@ func (w *WorldStore) setBlock(x, y, z int, blockState int32) {
 		return
 	}
 
-	sectionIndex := (y + 64) / 16
-	if sectionIndex < 0 || sectionIndex >= 24 {
-		return
-	}
-
-	section := chunk.Sections[sectionIndex]
-	if section == nil {
-		// Create section if it doesn't exist
-		section = &ChunkSection{
-			BlockStates: &PalettedContainer{
-				BitsPerEntry: 0,
-				SingleValue:  0, // air
-			},
-		}
-		chunk.Sections[sectionIndex] = section
-	}
-
-	if section.BlockStates == nil {
-		section.BlockStates = &PalettedContainer{
-			BitsPerEntry: 0,
-			SingleValue:  0,
-		}
-	}
-
-	localX := x & 0xF
-	localY := y & 0xF
-	localZ := z & 0xF
-
-	section.BlockStates.SetBlockState(localX, localY, localZ, blockState)
+	chunk.SetBlockState(x, y, z, blockState)
 }
 
 // IsChunkLoaded checks if a chunk is loaded at the given chunk coordinates
@@ -322,7 +213,7 @@ func (w *WorldStore) IsChunkLoaded(chunkX, chunkZ int32) bool {
 }
 
 // GetChunk returns the chunk column at the given chunk coordinates
-func (w *WorldStore) GetChunk(chunkX, chunkZ int32) *ChunkColumn {
+func (w *WorldStore) GetChunk(chunkX, chunkZ int32) *chunks.ChunkColumn {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return w.Chunks[chunkKey(chunkX, chunkZ)]
@@ -339,5 +230,5 @@ func (w *WorldStore) GetLoadedChunkCount() int {
 func (w *WorldStore) Clear() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.Chunks = make(map[int64]*ChunkColumn)
+	w.Chunks = make(map[int64]*chunks.ChunkColumn)
 }
