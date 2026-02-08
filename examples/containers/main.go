@@ -22,6 +22,46 @@ var containerBlockIDs = []int32{
 	blocks.BlockID("minecraft:trapped_chest"),
 	blocks.BlockID("minecraft:barrel"),
 	blocks.BlockID("minecraft:shulker_box"),
+	blocks.BlockID("minecraft:white_shulker_box"),
+	blocks.BlockID("minecraft:orange_shulker_box"),
+	blocks.BlockID("minecraft:magenta_shulker_box"),
+	blocks.BlockID("minecraft:light_blue_shulker_box"),
+	blocks.BlockID("minecraft:yellow_shulker_box"),
+	blocks.BlockID("minecraft:lime_shulker_box"),
+	blocks.BlockID("minecraft:pink_shulker_box"),
+	blocks.BlockID("minecraft:gray_shulker_box"),
+	blocks.BlockID("minecraft:light_gray_shulker_box"),
+	blocks.BlockID("minecraft:cyan_shulker_box"),
+	blocks.BlockID("minecraft:purple_shulker_box"),
+	blocks.BlockID("minecraft:blue_shulker_box"),
+	blocks.BlockID("minecraft:brown_shulker_box"),
+	blocks.BlockID("minecraft:green_shulker_box"),
+	blocks.BlockID("minecraft:red_shulker_box"),
+	blocks.BlockID("minecraft:black_shulker_box"),
+}
+
+// needsClearAbove lists container block IDs that require the block above to be
+// non-full in order to open. Barrels are excluded since they always open.
+var needsClearAbove = map[int32]bool{
+	blocks.BlockID("minecraft:chest"):                  true,
+	blocks.BlockID("minecraft:trapped_chest"):          true,
+	blocks.BlockID("minecraft:shulker_box"):            true,
+	blocks.BlockID("minecraft:white_shulker_box"):      true,
+	blocks.BlockID("minecraft:orange_shulker_box"):     true,
+	blocks.BlockID("minecraft:magenta_shulker_box"):    true,
+	blocks.BlockID("minecraft:light_blue_shulker_box"): true,
+	blocks.BlockID("minecraft:yellow_shulker_box"):     true,
+	blocks.BlockID("minecraft:lime_shulker_box"):       true,
+	blocks.BlockID("minecraft:pink_shulker_box"):       true,
+	blocks.BlockID("minecraft:gray_shulker_box"):       true,
+	blocks.BlockID("minecraft:light_gray_shulker_box"): true,
+	blocks.BlockID("minecraft:cyan_shulker_box"):       true,
+	blocks.BlockID("minecraft:purple_shulker_box"):     true,
+	blocks.BlockID("minecraft:blue_shulker_box"):       true,
+	blocks.BlockID("minecraft:brown_shulker_box"):      true,
+	blocks.BlockID("minecraft:green_shulker_box"):      true,
+	blocks.BlockID("minecraft:red_shulker_box"):        true,
+	blocks.BlockID("minecraft:black_shulker_box"):      true,
 }
 
 // findAdjacentWalkable returns a cardinal neighbor of (bx, by, bz) where the
@@ -65,6 +105,11 @@ func main() {
 		found := false
 
 		w.FindBlocks(containerBlockIDs, func(x, y, z int, _ int32) bool {
+			// skip containers that need clear space above but have a full block there
+			blockID, _ := blocks.StateProperties(int(w.GetBlock(x, y, z)))
+			if needsClearAbove[blockID] && blockHitboxes.IsFullBlock(w.GetBlock(x, y+1, z)) {
+				return true
+			}
 			dx, dy, dz := float64(x)-px, float64(y)-py, float64(z)-pz
 			dist := dx*dx + dy*dy + dz*dz
 			if dist < bestDist {

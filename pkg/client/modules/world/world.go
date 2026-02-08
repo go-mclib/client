@@ -9,6 +9,7 @@ import (
 	"github.com/go-mclib/data/pkg/packets"
 	jp "github.com/go-mclib/protocol/java_protocol"
 	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	"github.com/go-mclib/protocol/nbt"
 )
 
 const ModuleName = "world"
@@ -29,14 +30,21 @@ const (
 	HandOff  = 1
 )
 
+// BlockEntityData holds the type and NBT data for a block entity.
+type BlockEntityData struct {
+	Type int32
+	Data nbt.Compound
+}
+
 type Module struct {
 	client *client.Client
 
-	mu           sync.RWMutex
-	Chunks       map[int64]*chunks.ChunkColumn
-	CenterChunkX int32
-	CenterChunkZ int32
-	ViewDistance int32
+	mu            sync.RWMutex
+	Chunks        map[int64]*chunks.ChunkColumn
+	blockEntities map[[3]int]*BlockEntityData // [x,y,z] -> data
+	CenterChunkX  int32
+	CenterChunkZ  int32
+	ViewDistance  int32
 
 	onChunkLoad   []func(x, z int32)
 	onChunkUnload []func(x, z int32)
@@ -45,8 +53,9 @@ type Module struct {
 
 func New() *Module {
 	return &Module{
-		Chunks:       make(map[int64]*chunks.ChunkColumn),
-		ViewDistance: 10,
+		Chunks:        make(map[int64]*chunks.ChunkColumn),
+		blockEntities: make(map[[3]int]*BlockEntityData),
+		ViewDistance:  10,
 	}
 }
 
@@ -58,6 +67,7 @@ func (m *Module) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.Chunks = make(map[int64]*chunks.ChunkColumn)
+	m.blockEntities = make(map[[3]int]*BlockEntityData)
 }
 
 // From retrieves the world module from a client.
@@ -93,6 +103,8 @@ func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 		m.handleSetChunkCacheRadius(pkt)
 	case packet_ids.S2CChunkBatchFinishedID:
 		m.handleChunkBatchFinished()
+	case packet_ids.S2CBlockEntityDataID:
+		m.handleBlockEntityData(pkt)
 	}
 }
 
@@ -112,6 +124,18 @@ func (m *Module) handleChunkData(pkt *jp.WirePacket) {
 	cx, cz := int32(d.ChunkX), int32(d.ChunkZ)
 	m.mu.Lock()
 	m.Chunks[chunkKey(cx, cz)] = column
+	// store block entities from chunk data
+	for _, be := range column.BlockEntities {
+		x := int(cx)*16 + be.X()
+		y := int(be.Y)
+		z := int(cz)*16 + be.Z()
+		if c, ok := be.Data.(nbt.Compound); ok {
+			m.blockEntities[[3]int{x, y, z}] = &BlockEntityData{
+				Type: int32(be.Type),
+				Data: c,
+			}
+		}
+	}
 	m.mu.Unlock()
 
 	for _, cb := range m.onChunkLoad {
@@ -126,13 +150,38 @@ func (m *Module) handleUnloadChunk(pkt *jp.WirePacket) {
 	}
 
 	cx, cz := int32(d.ChunkX), int32(d.ChunkZ)
+	baseX, baseZ := int(cx)*16, int(cz)*16
 	m.mu.Lock()
 	delete(m.Chunks, chunkKey(cx, cz))
+	for key := range m.blockEntities {
+		if key[0] >= baseX && key[0] < baseX+16 && key[2] >= baseZ && key[2] < baseZ+16 {
+			delete(m.blockEntities, key)
+		}
+	}
 	m.mu.Unlock()
 
 	for _, cb := range m.onChunkUnload {
 		cb(cx, cz)
 	}
+}
+
+func (m *Module) handleBlockEntityData(pkt *jp.WirePacket) {
+	var d packets.S2CBlockEntityData
+	if err := pkt.ReadInto(&d); err != nil {
+		return
+	}
+
+	key := [3]int{d.Location.X, d.Location.Y, d.Location.Z}
+	m.mu.Lock()
+	if d.NbtData == nil {
+		delete(m.blockEntities, key)
+	} else if c, ok := d.NbtData.(nbt.Compound); ok {
+		m.blockEntities[key] = &BlockEntityData{
+			Type: int32(d.Type),
+			Data: c,
+		}
+	}
+	m.mu.Unlock()
 }
 
 func (m *Module) handleBlockUpdate(pkt *jp.WirePacket) {

@@ -41,6 +41,13 @@ func (m *Module) GetLoadedChunkCount() int {
 	return len(m.Chunks)
 }
 
+// GetBlockEntity returns the block entity data at the given position, or nil.
+func (m *Module) GetBlockEntity(x, y, z int) *BlockEntityData {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.blockEntities[[3]int{x, y, z}]
+}
+
 // FindBlocks calls fn for every block in loaded chunks whose block ID matches
 // one of the given IDs. fn receives the world coordinates and block state ID.
 // If fn returns false, iteration stops early.
