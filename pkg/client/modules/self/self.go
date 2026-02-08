@@ -159,14 +159,50 @@ func (m *Module) handlePlayerPosition(pkt *jp.WirePacket) {
 	if err := pkt.ReadInto(&d); err != nil {
 		return
 	}
-	m.X = d.X
-	m.Y = d.Y
-	m.Z = d.Z
-	m.Yaw = d.Yaw
-	m.Pitch = d.Pitch
+
+	flags := int32(d.Flags)
+
+	// apply position (absolute or relative based on flags)
+	if flags&0x01 != 0 {
+		m.X += d.X
+	} else {
+		m.X = d.X
+	}
+	if flags&0x02 != 0 {
+		m.Y += d.Y
+	} else {
+		m.Y = d.Y
+	}
+	if flags&0x04 != 0 {
+		m.Z += d.Z
+	} else {
+		m.Z = d.Z
+	}
+	if flags&0x08 != 0 {
+		m.Yaw += d.Yaw
+	} else {
+		m.Yaw = d.Yaw
+	}
+	if flags&0x10 != 0 {
+		m.Pitch += d.Pitch
+	} else {
+		m.Pitch = d.Pitch
+	}
+
+	// confirm teleport (required by protocol)
+	_ = m.client.WritePacket(&packets.C2SAcceptTeleportation{
+		TeleportId: d.TeleportId,
+	})
+
+	// send position confirmation (as vanilla client does)
+	_ = m.client.WritePacket(&packets.C2SMovePlayerPosRot{
+		X: m.X, FeetY: m.Y, Z: m.Z,
+		Yaw: ns.Float32(m.Yaw), Pitch: ns.Float32(m.Pitch),
+		Flags: 0,
+	})
 
 	for _, cb := range m.onPosition {
-		cb(float64(d.X), float64(d.Y), float64(d.Z))
+		cb(float64(m.X), float64(m.Y), float64(m.Z))
 	}
 }
 

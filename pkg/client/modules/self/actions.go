@@ -71,10 +71,12 @@ func (m *Module) Use(hand int8) error {
 }
 
 // WorldPosToYawPitch calculates yaw and pitch to look from (x,y,z) at (lookX,lookY,lookZ).
+// Matches MC convention: yaw 0=south(+Z), 90=west(-X), -90/270=east(+X), 180=north(-Z).
 func WorldPosToYawPitch(x, y, z, lookX, lookY, lookZ float64) (yaw, pitch float64) {
-	dx := x - lookX
-	dz := z - lookZ
-	yaw = math.Atan2(dz, dx) * 180 / math.Pi
-	pitch = -math.Atan2(y-lookY, math.Sqrt(dx*dx+dz*dz)) * 180 / math.Pi
+	dx := lookX - x
+	dy := lookY - y
+	dz := lookZ - z
+	yaw = math.Atan2(dz, dx)*180/math.Pi - 90
+	pitch = -math.Atan2(dy, math.Sqrt(dx*dx+dz*dz)) * 180 / math.Pi
 	return
 }

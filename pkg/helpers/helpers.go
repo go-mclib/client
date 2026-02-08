@@ -7,6 +7,8 @@ import (
 
 	"github.com/go-mclib/client/pkg/client"
 	"github.com/go-mclib/client/pkg/client/modules/chat"
+	"github.com/go-mclib/client/pkg/client/modules/collisions"
+	"github.com/go-mclib/client/pkg/client/modules/physics"
 	"github.com/go-mclib/client/pkg/client/modules/protocol"
 	"github.com/go-mclib/client/pkg/client/modules/self"
 	"github.com/go-mclib/client/pkg/client/modules/world"
@@ -49,6 +51,8 @@ func NewClient(f Flags) *client.Client {
 	c.Register(self.New())
 	c.Register(world.New())
 	c.Register(chat.New())
+	c.Register(collisions.New())
+	c.Register(physics.New())
 
 	return c
 }
