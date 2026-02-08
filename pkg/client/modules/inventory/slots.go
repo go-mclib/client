@@ -20,6 +20,7 @@ const (
 	SlotHotbarStart    = 36
 	SlotHotbarEnd      = 45
 	SlotOffhand        = 45
+	PlayerInvSlots     = 36 // main(27) + hotbar(9) appended to every container view
 )
 
 var crc32c = crc32.MakeTable(crc32.Castagnoli)

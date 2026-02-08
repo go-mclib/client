@@ -25,7 +25,7 @@ const (
 	PlayerWidth          = 0.6
 	PlayerHeight         = 1.8
 	PlayerSneakingHeight = 1.5
-	SneakingSpeedFactor  = 0.3 // Attributes.SNEAKING_SPEED default
+	SneakingSpeedFactor  = 0.3  // Attributes.SNEAKING_SPEED default
 	PositionThresholdSq  = 4e-8 // (2e-4)²
 	PositionReminderMax  = 20
 	TicksPerSecond       = 20
