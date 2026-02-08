@@ -39,6 +39,7 @@ type Module struct {
 	lastSentX, lastSentY, lastSentZ float64
 	lastSentYaw, lastSentPitch      float32
 	lastSentOnGround                bool
+	lastSentSneaking                bool
 	positionReminder                int
 
 	cancel context.CancelFunc
@@ -233,6 +234,20 @@ func (m *Module) tick() {
 	z := float64(s.Z)
 	yaw := float64(s.Yaw)
 
+	// apply sneaking input scaling (LocalPlayer.modifyInput)
+	forwardImpulse := m.ForwardImpulse
+	strafeImpulse := m.StrafeImpulse
+	if m.Sneaking {
+		forwardImpulse *= SneakingSpeedFactor
+		strafeImpulse *= SneakingSpeedFactor
+	}
+
+	// effective player height (1.5 when sneaking, 1.8 otherwise)
+	playerHeight := PlayerHeight
+	if m.Sneaking {
+		playerHeight = PlayerSneakingHeight
+	}
+
 	// jump
 	if m.Jumping && m.OnGround {
 		m.jump(yaw)
@@ -250,16 +265,16 @@ func (m *Module) tick() {
 	// vanilla order: moveRelative → move/collide → gravity + friction
 	var blockFriction float64
 	if inWater {
-		m.applyWaterInput(yaw)
+		m.applyWaterInputScaled(yaw, forwardImpulse, strafeImpulse)
 	} else if inLava {
-		m.applyLavaInput(yaw)
+		m.applyLavaInputScaled(yaw, forwardImpulse, strafeImpulse)
 	} else {
-		blockFriction = m.applyAirInput(x, y, z, yaw, w)
+		blockFriction = m.applyAirInputScaled(x, y, z, yaw, w, forwardImpulse, strafeImpulse)
 	}
 
 	// resolve collisions (this.move in vanilla)
 	origVelY := m.VelY
-	adjX, adjY, adjZ, hCol, vCol := col.CollideMovement(x, y, z, PlayerWidth, PlayerHeight, m.VelX, m.VelY, m.VelZ)
+	adjX, adjY, adjZ, hCol, vCol := col.CollideMovement(x, y, z, PlayerWidth, playerHeight, m.VelX, m.VelY, m.VelZ)
 
 	m.HorizontalCollision = hCol
 	if vCol {
@@ -294,7 +309,20 @@ func (m *Module) tick() {
 	}
 
 	// entity pushing
-	m.applyEntityPushing(newX, newY, newZ)
+	m.applyEntityPushing(newX, newY, newZ, playerHeight)
+
+	// send sneaking state change
+	if m.Sneaking != m.lastSentSneaking {
+		m.lastSentSneaking = m.Sneaking
+		actionID := ns.VarInt(1) // stop sneaking
+		if m.Sneaking {
+			actionID = 0 // start sneaking
+		}
+		m.client.SendPacket(&packets.C2SPlayerCommand{
+			EntityId: ns.VarInt(self.From(m.client).EntityID),
+			ActionId: actionID,
+		})
+	}
 
 	// send position
 	m.sendPosition(s)
@@ -305,9 +333,9 @@ func (m *Module) tick() {
 	}
 }
 
-// applyAirInput adds movement input to velocity (pre-collision).
+// applyAirInputScaled adds movement input to velocity (pre-collision) with pre-scaled impulses.
 // Returns the block friction for use in post-collision physics.
-func (m *Module) applyAirInput(x, y, z, yaw float64, w *world.Module) float64 {
+func (m *Module) applyAirInputScaled(x, y, z, yaw float64, w *world.Module, forward, strafe float64) float64 {
 	belowBlock := w.GetBlock(int(math.Floor(x)), int(math.Floor(y-0.5)), int(math.Floor(z)))
 	var blockFriction float64
 	if m.OnGround {
@@ -329,7 +357,7 @@ func (m *Module) applyAirInput(x, y, z, yaw float64, w *world.Module) float64 {
 		speed = FlyingSpeed
 	}
 
-	dx, _, dz := moveRelative(speed, m.ForwardImpulse, m.StrafeImpulse, yaw)
+	dx, _, dz := moveRelative(speed, forward, strafe, yaw)
 	m.VelX += dx
 	m.VelZ += dz
 
@@ -345,9 +373,9 @@ func (m *Module) applyAirPhysics(blockFriction float64) {
 	m.VelY *= VerticalAirFriction
 }
 
-// applyWaterInput adds movement input to velocity in water (pre-collision).
-func (m *Module) applyWaterInput(yaw float64) {
-	dx, _, dz := moveRelative(WaterAcceleration, m.ForwardImpulse, m.StrafeImpulse, yaw)
+// applyWaterInputScaled adds movement input to velocity in water (pre-collision).
+func (m *Module) applyWaterInputScaled(yaw, forward, strafe float64) {
+	dx, _, dz := moveRelative(WaterAcceleration, forward, strafe, yaw)
 	m.VelX += dx
 	m.VelZ += dz
 }
@@ -364,9 +392,9 @@ func (m *Module) applyWaterPhysics() {
 	m.VelY -= Gravity
 }
 
-// applyLavaInput adds movement input to velocity in lava (pre-collision).
-func (m *Module) applyLavaInput(yaw float64) {
-	dx, _, dz := moveRelative(WaterAcceleration, m.ForwardImpulse, m.StrafeImpulse, yaw)
+// applyLavaInputScaled adds movement input to velocity in lava (pre-collision).
+func (m *Module) applyLavaInputScaled(yaw, forward, strafe float64) {
+	dx, _, dz := moveRelative(WaterAcceleration, forward, strafe, yaw)
 	m.VelX += dx
 	m.VelZ += dz
 }
@@ -412,7 +440,7 @@ func moveRelative(speed, forward, strafe, yaw float64) (dx, dy, dz float64) {
 
 // applyEntityPushing applies pushing forces from nearby entities (Entity.push).
 // Vanilla: LivingEntity.pushEntities → getPushableEntities (AABB intersection) → Entity.push
-func (m *Module) applyEntityPushing(x, y, z float64) {
+func (m *Module) applyEntityPushing(x, y, z, height float64) {
 	ents := entities.From(m.client)
 	if ents == nil {
 		return
@@ -422,7 +450,7 @@ func (m *Module) applyEntityPushing(x, y, z float64) {
 	hw := PlayerWidth / 2
 	overlapping := ents.GetEntitiesInAABB(
 		x-hw, y, z-hw,
-		x+hw, y+PlayerHeight, z+hw,
+		x+hw, y+height, z+hw,
 	)
 	for _, e := range overlapping {
 		dx := e.X - x

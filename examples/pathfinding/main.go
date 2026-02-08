@@ -3,7 +3,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"math"
 	"strings"
 
 	"github.com/go-mclib/client/pkg/client"
@@ -73,17 +72,13 @@ func main() {
 			return
 		}
 
-		goalX := int(math.Floor(e.X))
-		goalY := int(math.Floor(e.Y))
-		goalZ := int(math.Floor(e.Z))
-
 		s := self.From(c)
 		w := world.From(c)
-		c.Logger.Printf("%s said 'come' — entity at (%.2f, %.2f, %.2f) goal (%d, %d, %d)", senderName, e.X, e.Y, e.Z, goalX, goalY, goalZ)
+		c.Logger.Printf("%s said 'come' — entity at (%.2f, %.2f, %.2f)", senderName, e.X, e.Y, e.Z)
 		c.Logger.Printf("bot at (%.2f, %.2f, %.2f), chunks loaded: %d", float64(s.X), float64(s.Y), float64(s.Z), len(w.Chunks))
 		ch.SendMessage(fmt.Sprintf("Coming to you, %s!", senderName))
 
-		if err := pf.NavigateTo(goalX, goalY, goalZ); err != nil {
+		if err := pf.NavigateTo(e.X, e.Y, e.Z); err != nil {
 			c.Logger.Printf("pathfinding error: %v", err)
 			ch.SendMessage(fmt.Sprintf("Can't find a path to you, %s!", senderName))
 		}

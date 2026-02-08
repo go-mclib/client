@@ -71,8 +71,23 @@ func findPath(w *world.Module, col *collisions.Module, ents *entities.Module, st
 					continue
 				}
 
+				isGoal := nx == goalX && ny == goalY && nz == goalZ
+
 				cost, sneaking := moveCost(w, col, ents, nx, ny, nz)
+				if cost < 0 && !isGoal {
+					continue
+				}
 				if cost < 0 {
+					cost = 1.0 // goal is always reachable
+				}
+
+				// check that the player can physically pass between the blocks
+				// at the destination height (catches doors, fence gates, etc.)
+				height := playerHeight
+				if sneaking {
+					height = playerSneakingHeight
+				}
+				if !isGoal && !canPassBetween(col, cx, cz, nx, ny, nz, height) {
 					continue
 				}
 

@@ -27,6 +27,9 @@ type Module struct {
 	stuckTicks int
 	lastNavX   float64
 	lastNavZ   float64
+	goalX      float64
+	goalY      float64
+	goalZ      float64
 
 	onPathFound          []func(path []PathNode)
 	onNavigationComplete []func(reached bool)
@@ -81,7 +84,7 @@ func (m *Module) OnNavigationComplete(cb func(reached bool)) {
 }
 
 // FindPath computes a path from the player's current position to the goal.
-func (m *Module) FindPath(goalX, goalY, goalZ int) ([]PathNode, error) {
+func (m *Module) FindPath(goalX, goalY, goalZ float64) ([]PathNode, error) {
 	s := self.From(m.client)
 	w := world.From(m.client)
 	col := collisions.From(m.client)
@@ -94,12 +97,16 @@ func (m *Module) FindPath(goalX, goalY, goalZ int) ([]PathNode, error) {
 	startY := int(math.Floor(float64(s.Y)))
 	startZ := int(math.Floor(float64(s.Z)))
 
+	gx := int(math.Floor(goalX))
+	gy := int(math.Floor(goalY))
+	gz := int(math.Floor(goalZ))
+
 	maxNodes := m.MaxNodes
 	if maxNodes <= 0 {
 		maxNodes = DefaultMaxNodes
 	}
 
-	path, err := findPath(w, col, ents, startX, startY, startZ, goalX, goalY, goalZ, maxNodes)
+	path, err := findPath(w, col, ents, startX, startY, startZ, gx, gy, gz, maxNodes)
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +120,7 @@ func (m *Module) FindPath(goalX, goalY, goalZ int) ([]PathNode, error) {
 
 // NavigateTo computes a path and begins navigating to the goal.
 // Navigation is driven by physics tick callbacks.
-func (m *Module) NavigateTo(goalX, goalY, goalZ int) error {
+func (m *Module) NavigateTo(goalX, goalY, goalZ float64) error {
 	path, err := m.FindPath(goalX, goalY, goalZ)
 	if err != nil {
 		return err
@@ -124,6 +131,9 @@ func (m *Module) NavigateTo(goalX, goalY, goalZ int) error {
 	m.pathIndex = 0
 	m.navigating = true
 	m.stuckTicks = 0
+	m.goalX = goalX
+	m.goalY = goalY
+	m.goalZ = goalZ
 	m.mu.Unlock()
 
 	return nil
@@ -179,9 +189,17 @@ func (m *Module) navigationTick() {
 	}
 
 	wp := m.path[m.pathIndex]
-	wpX := float64(wp.X) + 0.5
-	wpY := float64(wp.Y)
-	wpZ := float64(wp.Z) + 0.5
+	isLastWaypoint := m.pathIndex == len(m.path)-1
+
+	// use exact float goal for the final waypoint
+	var wpX, wpY, wpZ float64
+	if isLastWaypoint {
+		wpX, wpY, wpZ = m.goalX, m.goalY, m.goalZ
+	} else {
+		wpX = float64(wp.X) + 0.5
+		wpY = float64(wp.Y)
+		wpZ = float64(wp.Z) + 0.5
+	}
 
 	dx := wpX - x
 	dy := wpY - y
@@ -189,7 +207,11 @@ func (m *Module) navigationTick() {
 	horizDist := math.Sqrt(dx*dx + dz*dz)
 
 	// reached waypoint?
-	if horizDist < 0.5 && math.Abs(dy) < 1.0 {
+	threshold := 0.5
+	if isLastWaypoint {
+		threshold = 0.3
+	}
+	if horizDist < threshold && math.Abs(dy) < 1.0 {
 		m.pathIndex++
 		if m.pathIndex >= len(m.path) {
 			m.completeNavigation(true)
@@ -198,9 +220,14 @@ func (m *Module) navigationTick() {
 		m.stuckTicks = 0
 		// update waypoint
 		wp = m.path[m.pathIndex]
-		wpX = float64(wp.X) + 0.5
-		wpY = float64(wp.Y)
-		wpZ = float64(wp.Z) + 0.5
+		isLastWaypoint = m.pathIndex == len(m.path)-1
+		if isLastWaypoint {
+			wpX, wpY, wpZ = m.goalX, m.goalY, m.goalZ
+		} else {
+			wpX = float64(wp.X) + 0.5
+			wpY = float64(wp.Y)
+			wpZ = float64(wp.Z) + 0.5
+		}
 		dx = wpX - x
 		dy = wpY - y
 		dz = wpZ - z

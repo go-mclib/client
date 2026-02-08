@@ -24,7 +24,9 @@ const (
 	EntityPushMinDist    = 0.01
 	PlayerWidth          = 0.6
 	PlayerHeight         = 1.8
+	PlayerSneakingHeight = 1.5
 	PlayerEyeHeight      = 1.62
+	SneakingSpeedFactor  = 0.3  // Attributes.SNEAKING_SPEED default
 	PositionThresholdSq  = 4e-8 // (2e-4)²
 	PositionReminderMax  = 20
 	TicksPerSecond       = 20

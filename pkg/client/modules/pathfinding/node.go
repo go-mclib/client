@@ -115,6 +115,15 @@ func moveCostInner(w *world.Module, ents *entities.Module, x, y, z int, sneaking
 	return cost
 }
 
+// canPassBetween checks if the player can physically move between two adjacent blocks.
+// This catches thin blocks at block edges (doors, fence gates, etc.) that don't
+// intersect the player at block center but block traversal at the boundary.
+func canPassBetween(col *collisions.Module, cx, cz, nx, ny, nz int, height float64) bool {
+	midX := float64(cx+nx)/2.0 + 0.5
+	midZ := float64(cz+nz)/2.0 + 0.5
+	return col.CanFitAt(midX, float64(ny), midZ, playerWidth, height)
+}
+
 func blockDangerCost(stateID int32) float64 {
 	if stateID == 0 {
 		return 0
