@@ -10,10 +10,11 @@ import (
 
 // PathNode represents a node in the A* search.
 type PathNode struct {
-	X, Y, Z int
-	G, H, F float64
-	Parent  *PathNode
-	index   int // for heap
+	X, Y, Z  int
+	G, H, F  float64
+	Sneaking bool // whether the player must crouch at this node
+	Parent   *PathNode
+	index    int // for heap
 }
 
 // danger block names and their cost modifiers
@@ -33,13 +34,22 @@ var dangerCosts = map[string]float64{
 }
 
 const (
-	playerWidth  = 0.6
-	playerHeight = 1.8
+	playerWidth          = 0.6
+	playerHeight         = 1.8
+	playerSneakingHeight = 1.5
 )
 
 // canStandAt checks if the player can stand at the given block position.
-// The position (x, y, z) is the feet position — the player occupies y and y+1.
 func canStandAt(w *world.Module, col *collisions.Module, x, y, z int) bool {
+	return canStandAtHeight(w, col, x, y, z, playerHeight)
+}
+
+// canStandAtSneaking checks if the player can stand at the position while crouching.
+func canStandAtSneaking(w *world.Module, col *collisions.Module, x, y, z int) bool {
+	return canStandAtHeight(w, col, x, y, z, playerSneakingHeight)
+}
+
+func canStandAtHeight(w *world.Module, col *collisions.Module, x, y, z int, height float64) bool {
 	// need solid ground below
 	belowState := w.GetBlock(x, y-1, z)
 	if !block_shapes.HasCollision(belowState) {
@@ -55,18 +65,28 @@ func canStandAt(w *world.Module, col *collisions.Module, x, y, z int) bool {
 		return true
 	}
 
-	// either has collision — check with AABB
-	return col.CanFitAt(float64(x)+0.5, float64(y), float64(z)+0.5, playerWidth, playerHeight)
+	// either has collision — check with AABB at the given height
+	return col.CanFitAt(float64(x)+0.5, float64(y), float64(z)+0.5, playerWidth, height)
 }
 
 // moveCost returns the cost of moving to the given position.
-// Returns -1 if the position is impassable.
-func moveCost(w *world.Module, col *collisions.Module, ents *entities.Module, x, y, z int) float64 {
-	if !canStandAt(w, col, x, y, z) {
-		return -1
+// Returns -1 if impassable. Sets sneaking to true if crouching is required.
+func moveCost(w *world.Module, col *collisions.Module, ents *entities.Module, x, y, z int) (float64, bool) {
+	if canStandAt(w, col, x, y, z) {
+		return moveCostInner(w, ents, x, y, z, false), false
 	}
+	// try sneaking (lower hitbox)
+	if canStandAtSneaking(w, col, x, y, z) {
+		return moveCostInner(w, ents, x, y, z, true), true
+	}
+	return -1, false
+}
 
+func moveCostInner(w *world.Module, ents *entities.Module, x, y, z int, sneaking bool) float64 {
 	cost := 1.0
+	if sneaking {
+		cost += 1.0 // slight penalty for crouching paths
+	}
 
 	// danger costs from the block at feet
 	feetState := w.GetBlock(x, y, z)

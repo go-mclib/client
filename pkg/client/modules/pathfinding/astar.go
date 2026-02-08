@@ -71,7 +71,7 @@ func findPath(w *world.Module, col *collisions.Module, ents *entities.Module, st
 					continue
 				}
 
-				cost := moveCost(w, col, ents, nx, ny, nz)
+				cost, sneaking := moveCost(w, col, ents, nx, ny, nz)
 				if cost < 0 {
 					continue
 				}
@@ -91,7 +91,8 @@ func findPath(w *world.Module, col *collisions.Module, ents *entities.Module, st
 				node := &PathNode{
 					X: nx, Y: ny, Z: nz,
 					G: g, H: h, F: g + h,
-					Parent: current,
+					Sneaking: sneaking,
+					Parent:   current,
 				}
 				heap.Push(openSet, node)
 			}

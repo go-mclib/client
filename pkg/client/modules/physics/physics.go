@@ -218,16 +218,18 @@ func (m *Module) tick() {
 	inWater := IsWater(feetBlock)
 	inLava := IsLava(feetBlock)
 
-	// travel
+	// pre-collision: apply movement input to velocity
+	// vanilla order: moveRelative → move/collide → gravity + friction
+	var blockFriction float64
 	if inWater {
-		m.travelInWater(yaw)
+		m.applyWaterInput(yaw)
 	} else if inLava {
-		m.travelInLava(yaw)
+		m.applyLavaInput(yaw)
 	} else {
-		m.travelInAir(x, y, z, yaw, w)
+		blockFriction = m.applyAirInput(x, y, z, yaw, w)
 	}
 
-	// resolve collisions
+	// resolve collisions (this.move in vanilla)
 	origVelY := m.VelY
 	adjX, adjY, adjZ, hCol, vCol := col.CollideMovement(x, y, z, PlayerWidth, PlayerHeight, m.VelX, m.VelY, m.VelZ)
 
@@ -254,6 +256,15 @@ func (m *Module) tick() {
 
 	m.OnGround = vCol && origVelY < 0
 
+	// post-collision: apply gravity and friction (after move, matching vanilla)
+	if inWater {
+		m.applyWaterPhysics()
+	} else if inLava {
+		m.applyLavaPhysics()
+	} else {
+		m.applyAirPhysics(blockFriction)
+	}
+
 	// entity pushing
 	m.applyEntityPushing(newX, newY, newZ)
 
@@ -266,8 +277,9 @@ func (m *Module) tick() {
 	}
 }
 
-func (m *Module) travelInAir(x, y, z, yaw float64, w *world.Module) {
-	// look up block friction from block below feet
+// applyAirInput adds movement input to velocity (pre-collision).
+// Returns the block friction for use in post-collision physics.
+func (m *Module) applyAirInput(x, y, z, yaw float64, w *world.Module) float64 {
 	belowBlock := w.GetBlock(int(math.Floor(x)), int(math.Floor(y-0.5)), int(math.Floor(z)))
 	var blockFriction float64
 	if m.OnGround {
@@ -277,7 +289,6 @@ func (m *Module) travelInAir(x, y, z, yaw float64, w *world.Module) {
 	}
 	friction := blockFriction * AirFrictionMul
 
-	// calculate movement speed
 	var speed float64
 	if m.OnGround {
 		baseSpeed := PlayerSpeed
@@ -285,56 +296,58 @@ func (m *Module) travelInAir(x, y, z, yaw float64, w *world.Module) {
 			baseSpeed *= (1.0 + SprintModifier)
 		}
 		speed = baseSpeed * (FrictionSpeedFactor / (friction * friction * friction))
-		// apply block speed factor
 		speed *= GetBlockSpeedFactor(belowBlock)
 	} else {
 		speed = FlyingSpeed
 	}
 
-	// apply input
 	dx, _, dz := moveRelative(speed, m.ForwardImpulse, m.StrafeImpulse, yaw)
 	m.VelX += dx
 	m.VelZ += dz
 
-	// gravity
-	m.VelY -= Gravity
+	return blockFriction
+}
 
-	// friction
+// applyAirPhysics applies gravity and friction after collision (post-move).
+func (m *Module) applyAirPhysics(blockFriction float64) {
+	friction := blockFriction * AirFrictionMul
+	m.VelY -= Gravity
 	m.VelX *= friction
 	m.VelZ *= friction
 	m.VelY *= VerticalAirFriction
 }
 
-func (m *Module) travelInWater(yaw float64) {
+// applyWaterInput adds movement input to velocity in water (pre-collision).
+func (m *Module) applyWaterInput(yaw float64) {
+	dx, _, dz := moveRelative(WaterAcceleration, m.ForwardImpulse, m.StrafeImpulse, yaw)
+	m.VelX += dx
+	m.VelZ += dz
+}
+
+// applyWaterPhysics applies water drag and gravity after collision (post-move).
+func (m *Module) applyWaterPhysics() {
 	slowDown := WaterSlowdown
 	if m.Sprinting {
 		slowDown = WaterSprintSlowdown
 	}
-
-	dx, _, dz := moveRelative(WaterAcceleration, m.ForwardImpulse, m.StrafeImpulse, yaw)
-	m.VelX += dx
-	m.VelZ += dz
-
-	// apply friction
 	m.VelX *= slowDown
 	m.VelY *= WaterVerticalDrag
 	m.VelZ *= slowDown
-
-	// gravity in water
 	m.VelY -= Gravity
 }
 
-func (m *Module) travelInLava(yaw float64) {
+// applyLavaInput adds movement input to velocity in lava (pre-collision).
+func (m *Module) applyLavaInput(yaw float64) {
 	dx, _, dz := moveRelative(WaterAcceleration, m.ForwardImpulse, m.StrafeImpulse, yaw)
 	m.VelX += dx
 	m.VelZ += dz
+}
 
-	// lava friction
+// applyLavaPhysics applies lava drag and gravity after collision (post-move).
+func (m *Module) applyLavaPhysics() {
 	m.VelX *= LavaSlowdown
 	m.VelY *= LavaVerticalDrag
 	m.VelZ *= LavaSlowdown
-
-	// reduced gravity in lava
 	m.VelY -= Gravity * LavaGravityFactor
 }
 

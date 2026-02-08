@@ -211,10 +211,11 @@ func (m *Module) navigationTick() {
 	_ = s.LookAt(wpX, wpY+playerHeight*0.5, wpZ)
 
 	// set movement input
-	jumping := dy > 0.5 // jump if waypoint is above
-	sprinting := horizDist > 5.0 && !jumping
+	jumping := dy > 0.5 && p.OnGround // only jump when on ground and waypoint is above
+	sneaking := wp.Sneaking
+	sprinting := horizDist > 5.0 && !jumping && !sneaking
 
-	p.SetInput(1.0, 0, jumping, false)
+	p.SetInput(1.0, 0, jumping, sneaking)
 	p.SetSprinting(sprinting)
 
 	// stuck detection
