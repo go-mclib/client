@@ -256,7 +256,7 @@ func (m *Module) navigationTick() {
 	}
 
 	// face waypoint
-	_ = s.LookAt(wpX, wpY+playerHeight*0.5, wpZ)
+	_ = s.LookAt(wpX, wpY+playerHeight, wpZ)
 
 	// set movement input
 	jumping := dy > 0.5 && p.OnGround // only jump when on ground and waypoint is above

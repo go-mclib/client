@@ -8,7 +8,10 @@ import (
 	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
 )
 
-const ModuleName = "self"
+const (
+	ModuleName = "self"
+	EyeHeight  = 1.62
+)
 
 type Module struct {
 	client *client.Client

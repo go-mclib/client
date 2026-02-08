@@ -21,7 +21,7 @@ func (m *Module) MoveRelative(dx, dy, dz float64) error {
 }
 
 func (m *Module) LookAt(x, y, z float64) error {
-	yaw, pitch := WorldPosToYawPitch(float64(m.X), float64(m.Y), float64(m.Z), x, y, z)
+	yaw, pitch := WorldPosToYawPitch(float64(m.X), float64(m.Y)+EyeHeight, float64(m.Z), x, y, z)
 	return m.SetRotation(yaw, pitch)
 }
 

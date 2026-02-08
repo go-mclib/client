@@ -155,8 +155,7 @@ func (m *Module) performAttack(e *entities.Entity) error {
 		return fmt.Errorf("self module not registered")
 	}
 
-	// look at entity center
-	_ = s.LookAt(e.X, e.Y+e.Height/2, e.Z)
+	_ = s.LookAt(e.X, e.Y+e.EyeHeight, e.Z)
 
 	// send attack packet
 	sneaking := false
@@ -190,7 +189,7 @@ func (m *Module) isWithinReach(e *entities.Entity) bool {
 	}
 
 	eyeX := float64(s.X)
-	eyeY := float64(s.Y) + physics.PlayerEyeHeight
+	eyeY := float64(s.Y) + self.EyeHeight
 	eyeZ := float64(s.Z)
 
 	aabb := collisions.EntityAABB(e.X, e.Y, e.Z, e.Width, e.Height)
