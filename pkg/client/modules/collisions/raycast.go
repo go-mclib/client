@@ -90,6 +90,11 @@ func (m *Module) RaycastBlocks(fromX, fromY, fromZ, toX, toY, toZ float64) (hit 
 	// traverse blocks along the ray
 	maxSteps := int(dist*2) + 3
 	for range maxSteps {
+		// skip the target block — we only care about obstructions between start and target
+		if bx == endBX && by == endBY && bz == endBZ {
+			break
+		}
+
 		// check current block for collision shapes
 		stateID := w.GetBlock(bx, by, bz)
 		if stateID != 0 {
@@ -104,11 +109,6 @@ func (m *Module) RaycastBlocks(fromX, fromY, fromZ, toX, toY, toZ float64) (hit 
 					return true, fromX + dirX*t, fromY + dirY*t, fromZ + dirZ*t
 				}
 			}
-		}
-
-		// reached target block
-		if bx == endBX && by == endBY && bz == endBZ {
-			break
 		}
 
 		// advance to next block boundary

@@ -291,7 +291,11 @@ func (m *Module) handleSetEntityData(pkt *jp.WirePacket) {
 	m.mu.Lock()
 	e := m.entities[int32(d.EntityId)]
 	if e != nil {
-		e.Metadata = d.Metadata
+		// merge entries instead of replacing — S2CSetEntityData only sends
+		// dirty entries, so replacing would lose previously set values
+		for _, entry := range d.Metadata {
+			e.Metadata.Set(entry.Index, entry.Serializer, entry.Data)
+		}
 	}
 	m.mu.Unlock()
 }

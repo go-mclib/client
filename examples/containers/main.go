@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-mclib/client/pkg/client/modules/collisions"
 	"github.com/go-mclib/client/pkg/client/modules/entities"
 	"github.com/go-mclib/client/pkg/client/modules/inventory"
 	"github.com/go-mclib/client/pkg/client/modules/pathfinding"
@@ -40,44 +41,59 @@ var containerBlockIDs = []int32{
 	blocks.BlockID("minecraft:black_shulker_box"),
 }
 
-// needsClearAbove lists container block IDs that require the block above to be
-// non-full in order to open. Barrels are excluded since they always open.
-var needsClearAbove = map[int32]bool{
-	blocks.BlockID("minecraft:chest"):                  true,
-	blocks.BlockID("minecraft:trapped_chest"):          true,
-	blocks.BlockID("minecraft:shulker_box"):            true,
-	blocks.BlockID("minecraft:white_shulker_box"):      true,
-	blocks.BlockID("minecraft:orange_shulker_box"):     true,
-	blocks.BlockID("minecraft:magenta_shulker_box"):    true,
-	blocks.BlockID("minecraft:light_blue_shulker_box"): true,
-	blocks.BlockID("minecraft:yellow_shulker_box"):     true,
-	blocks.BlockID("minecraft:lime_shulker_box"):       true,
-	blocks.BlockID("minecraft:pink_shulker_box"):       true,
-	blocks.BlockID("minecraft:gray_shulker_box"):       true,
-	blocks.BlockID("minecraft:light_gray_shulker_box"): true,
-	blocks.BlockID("minecraft:cyan_shulker_box"):       true,
-	blocks.BlockID("minecraft:purple_shulker_box"):     true,
-	blocks.BlockID("minecraft:blue_shulker_box"):       true,
-	blocks.BlockID("minecraft:brown_shulker_box"):      true,
-	blocks.BlockID("minecraft:green_shulker_box"):      true,
-	blocks.BlockID("minecraft:red_shulker_box"):        true,
-	blocks.BlockID("minecraft:black_shulker_box"):      true,
-}
+// barrels can always be opened regardless of blocks above
+var barrelBlockID = blocks.BlockID("minecraft:barrel")
 
-// findAdjacentWalkable returns a cardinal neighbor of (bx, by, bz) where the
-// player can stand: solid ground below, no collision at feet and head level.
-func findAdjacentWalkable(w *world.Module, bx, by, bz int) (int, int, bool) {
-	offsets := [][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}
-	for _, off := range offsets {
-		nx, nz := bx+off[0], bz+off[1]
-		below := w.GetBlock(nx, by-1, nz)
-		feet := w.GetBlock(nx, by, nz)
-		head := w.GetBlock(nx, by+1, nz)
-		if blockHitboxes.HasCollision(below) && !blockHitboxes.HasCollision(feet) && !blockHitboxes.HasCollision(head) {
-			return nx, nz, true
+const blockReach = 4.5
+
+// findReachableWithLOS searches for a standable position within reach of (bx, by, bz)
+// that has line-of-sight to the target block center. Returns the closest one.
+func findReachableWithLOS(w *world.Module, col *collisions.Module, bx, by, bz int) (int, int, int, bool) {
+	targetX := float64(bx) + 0.5
+	targetY := float64(by) + 0.5
+	targetZ := float64(bz) + 0.5
+
+	r := int(math.Ceil(blockReach))
+	bestDist := math.MaxFloat64
+	var bestX, bestY, bestZ int
+	found := false
+
+	for dx := -r; dx <= r; dx++ {
+		for dz := -r; dz <= r; dz++ {
+			for dy := -r; dy <= r; dy++ {
+				nx, ny, nz := bx+dx, by+dy, bz+dz
+				below := w.GetBlock(nx, ny-1, nz)
+				feet := w.GetBlock(nx, ny, nz)
+				head := w.GetBlock(nx, ny+1, nz)
+				if !blockHitboxes.HasCollision(below) || blockHitboxes.HasCollision(feet) || blockHitboxes.HasCollision(head) {
+					continue
+				}
+				eyeX := float64(nx) + 0.5
+				eyeY := float64(ny) + self.EyeHeight
+				eyeZ := float64(nz) + 0.5
+				ddx := eyeX - targetX
+				ddy := eyeY - targetY
+				ddz := eyeZ - targetZ
+				dist := math.Sqrt(ddx*ddx + ddy*ddy + ddz*ddz)
+				if dist > blockReach {
+					continue
+				}
+				if dist >= bestDist {
+					continue
+				}
+				if col != nil {
+					hit, _, _, _ := col.RaycastBlocks(eyeX, eyeY, eyeZ, targetX, targetY, targetZ)
+					if hit {
+						continue
+					}
+				}
+				bestDist = dist
+				bestX, bestY, bestZ = nx, ny, nz
+				found = true
+			}
 		}
 	}
-	return 0, 0, false
+	return bestX, bestY, bestZ, found
 }
 
 func main() {
@@ -94,6 +110,7 @@ func main() {
 	s := self.From(c)
 	w := world.From(c)
 	pf := pathfinding.From(c)
+	col := collisions.From(c)
 
 	var mu sync.Mutex
 	var storing bool
@@ -104,10 +121,10 @@ func main() {
 		var bx, by, bz int
 		found := false
 
-		w.FindBlocks(containerBlockIDs, func(x, y, z int, _ int32) bool {
-			// skip containers that need clear space above but have a full block there
-			blockID, _ := blocks.StateProperties(int(w.GetBlock(x, y, z)))
-			if needsClearAbove[blockID] && blockHitboxes.IsFullBlock(w.GetBlock(x, y+1, z)) {
+		w.FindBlocks(containerBlockIDs, func(x, y, z int, stateID int32) bool {
+			// chests and shulker boxes can't open with a full block above; barrels are fine
+			blockID, _ := blocks.StateProperties(int(stateID))
+			if blockID != barrelBlockID && blockHitboxes.IsFullBlock(w.GetBlock(x, y+1, z)) {
 				return true
 			}
 			dx, dy, dz := float64(x)-px, float64(y)-py, float64(z)-pz
@@ -166,22 +183,22 @@ func main() {
 		}
 		c.Logger.Printf("nearest container at %d, %d, %d", cx, cy, cz)
 
-		// navigate to an adjacent walkable block if too far to interact
-		dx := float64(cx) + 0.5 - float64(s.X)
-		dz := float64(cz) + 0.5 - float64(s.Z)
-		if math.Sqrt(dx*dx+dz*dz) > 4.0 {
-			// pick a cardinal neighbor that's walkable (no collision at feet+head, solid below)
-			adjX, adjZ, adjFound := findAdjacentWalkable(w, cx, cy, cz)
-			if !adjFound {
-				c.Logger.Println("no walkable block adjacent to container")
-				return
-			}
+		// find a reachable position with LOS to the container
+		adjX, adjY, adjZ, adjFound := findReachableWithLOS(w, col, cx, cy, cz)
+		if !adjFound {
+			c.Logger.Println("no reachable block with line-of-sight to container")
+			return
+		}
 
+		// navigate there if too far
+		dx := float64(adjX) + 0.5 - float64(s.X)
+		dz := float64(adjZ) + 0.5 - float64(s.Z)
+		if math.Sqrt(dx*dx+dz*dz) > 1.0 {
 			done := make(chan bool, 1)
 			pf.OnNavigationComplete(func(reached bool) {
 				done <- reached
 			})
-			if err := pf.NavigateTo(float64(adjX)+0.5, float64(cy), float64(adjZ)+0.5); err != nil {
+			if err := pf.NavigateTo(float64(adjX)+0.5, float64(adjY), float64(adjZ)+0.5); err != nil {
 				c.Logger.Printf("pathfinding failed: %v", err)
 				return
 			}

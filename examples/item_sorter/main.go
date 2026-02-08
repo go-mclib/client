@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-mclib/client/pkg/client/modules/collisions"
 	"github.com/go-mclib/client/pkg/client/modules/entities"
 	"github.com/go-mclib/client/pkg/client/modules/inventory"
 	"github.com/go-mclib/client/pkg/client/modules/pathfinding"
@@ -54,20 +55,56 @@ type labelEntry struct {
 	chestX, chestY, chestZ int
 }
 
-// findAdjacentWalkable returns a cardinal neighbor of (bx, by, bz) where the
-// player can stand: solid ground below, no collision at feet and head level.
-func findAdjacentWalkable(w *world.Module, bx, by, bz int) (int, int, bool) {
-	offsets := [][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}
-	for _, off := range offsets {
-		nx, nz := bx+off[0], bz+off[1]
-		below := w.GetBlock(nx, by-1, nz)
-		feet := w.GetBlock(nx, by, nz)
-		head := w.GetBlock(nx, by+1, nz)
-		if blockHitboxes.HasCollision(below) && !blockHitboxes.HasCollision(feet) && !blockHitboxes.HasCollision(head) {
-			return nx, nz, true
+const blockReach = 4.5
+
+// findReachableWithLOS searches for a standable position within reach of (bx, by, bz)
+// that has line-of-sight to the target block center. Returns the closest one.
+func findReachableWithLOS(w *world.Module, col *collisions.Module, bx, by, bz int) (int, int, int, bool) {
+	targetX := float64(bx) + 0.5
+	targetY := float64(by) + 0.5
+	targetZ := float64(bz) + 0.5
+
+	r := int(math.Ceil(blockReach))
+	bestDist := math.MaxFloat64
+	var bestX, bestY, bestZ int
+	found := false
+
+	for dx := -r; dx <= r; dx++ {
+		for dz := -r; dz <= r; dz++ {
+			for dy := -r; dy <= r; dy++ {
+				nx, ny, nz := bx+dx, by+dy, bz+dz
+				below := w.GetBlock(nx, ny-1, nz)
+				feet := w.GetBlock(nx, ny, nz)
+				head := w.GetBlock(nx, ny+1, nz)
+				if !blockHitboxes.HasCollision(below) || blockHitboxes.HasCollision(feet) || blockHitboxes.HasCollision(head) {
+					continue
+				}
+				eyeX := float64(nx) + 0.5
+				eyeY := float64(ny) + self.EyeHeight
+				eyeZ := float64(nz) + 0.5
+				ddx := eyeX - targetX
+				ddy := eyeY - targetY
+				ddz := eyeZ - targetZ
+				dist := math.Sqrt(ddx*ddx + ddy*ddy + ddz*ddz)
+				if dist > blockReach {
+					continue
+				}
+				if dist >= bestDist {
+					continue
+				}
+				if col != nil {
+					hit, _, _, _ := col.RaycastBlocks(eyeX, eyeY, eyeZ, targetX, targetY, targetZ)
+					if hit {
+						continue
+					}
+				}
+				bestDist = dist
+				bestX, bestY, bestZ = nx, ny, nz
+				found = true
+			}
 		}
 	}
-	return 0, 0, false
+	return bestX, bestY, bestZ, found
 }
 
 // isContainer checks if a block ID is a container
@@ -166,6 +203,7 @@ func main() {
 	s := self.From(c)
 	w := world.From(c)
 	pf := pathfinding.From(c)
+	col := collisions.From(c)
 	ents := entities.From(c)
 
 	var mu sync.Mutex
@@ -198,12 +236,15 @@ func main() {
 				by := int(math.Floor(e.Y))
 				bz := int(math.Floor(e.Z))
 
-				// check if this block is a container
+				// check if this block or an adjacent block is a container
 				stateID := w.GetBlock(bx, by, bz)
 				blockID, _ := blocks.StateProperties(int(stateID))
 				if isContainer(blockID) {
 					labelMap[stack.ID] = &labelEntry{bx, by, bz}
 					c.Logger.Printf("label: %s -> chest at %d,%d,%d (item frame)", items.ItemName(stack.ID), bx, by, bz)
+				} else if cx, cy, cz, found := findAdjacentContainer(w, bx, by, bz); found {
+					labelMap[stack.ID] = &labelEntry{cx, cy, cz}
+					c.Logger.Printf("label: %s -> chest at %d,%d,%d (item frame adjacent)", items.ItemName(stack.ID), cx, cy, cz)
 				}
 			}
 		}
@@ -282,20 +323,22 @@ func main() {
 		cx, cy, cz := entry.chestX, entry.chestY, entry.chestZ
 		c.Logger.Printf("storing %s at chest %d,%d,%d", items.ItemName(targetItemID), cx, cy, cz)
 
-		// navigate if too far
-		dx := float64(cx) + 0.5 - float64(s.X)
-		dz := float64(cz) + 0.5 - float64(s.Z)
-		if math.Sqrt(dx*dx+dz*dz) > 4.0 {
-			adjX, adjZ, adjFound := findAdjacentWalkable(w, cx, cy, cz)
-			if !adjFound {
-				c.Logger.Println("no walkable block adjacent to chest")
-				return
-			}
+		// find a reachable position with LOS to the chest
+		adjX, adjY, adjZ, adjFound := findReachableWithLOS(w, col, cx, cy, cz)
+		if !adjFound {
+			c.Logger.Println("no reachable block with line-of-sight to chest")
+			return
+		}
+
+		// navigate there if too far
+		dx := float64(adjX) + 0.5 - float64(s.X)
+		dz := float64(adjZ) + 0.5 - float64(s.Z)
+		if math.Sqrt(dx*dx+dz*dz) > 1.0 {
 			done := make(chan bool, 1)
 			pf.OnNavigationComplete(func(reached bool) {
 				done <- reached
 			})
-			if err := pf.NavigateTo(float64(adjX)+0.5, float64(cy), float64(adjZ)+0.5); err != nil {
+			if err := pf.NavigateTo(float64(adjX)+0.5, float64(adjY), float64(adjZ)+0.5); err != nil {
 				c.Logger.Printf("pathfinding failed: %v", err)
 				return
 			}
