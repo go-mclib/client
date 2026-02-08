@@ -6,16 +6,15 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/go-mclib/client/chat"
+	"github.com/go-mclib/client/pkg/chat"
 	auth "github.com/go-mclib/protocol/auth"
 	mc_crypto "github.com/go-mclib/protocol/crypto"
 	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
 	session_server "github.com/go-mclib/protocol/java_protocol/session_server"
 )
 
-// initializeAuth performs online or offline auth and prepares chat/session structures
 func (c *Client) initializeAuth(ctx context.Context) error {
-	if !c.OnlineMode { // offline mode
+	if !c.OnlineMode {
 		if c.Username == "" {
 			c.Username = "GoMclibPlayer"
 			c.Logger.Println("Warning: no username provided for offline mode, defaulting to 'GoMclibPlayer'")
@@ -25,10 +24,9 @@ func (c *Client) initializeAuth(ctx context.Context) error {
 		return nil
 	}
 
-	// online mode - use Microsoft auth with credential caching
 	authClient := auth.NewClient(auth.AuthClientConfig{
 		ClientID: c.ClientID,
-		Username: c.Username, // pass username for cache lookup (empty string means new account)
+		Username: c.Username,
 	})
 	loginCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
@@ -38,11 +36,10 @@ func (c *Client) initializeAuth(ctx context.Context) error {
 	}
 	c.LoginData = ld
 
-	// Warn if authenticated username differs from requested username
 	if c.Username != "" && c.Username != ld.Username {
 		c.Logger.Printf("Warning: authenticated as '%s' but requested username was '%s' (credentials may have changed)", ld.Username, c.Username)
 	}
-	c.Username = ld.Username // update to canonical (authenticated) username
+	c.Username = ld.Username
 
 	cert, err := auth.FetchMojangCertificate(ld.AccessToken)
 	if err != nil {
@@ -59,7 +56,6 @@ func (c *Client) initializeAuth(ctx context.Context) error {
 	c.ChatSigner.PlayerUUID = playerUUID
 	c.ChatSigner.AddPlayerPublicKey(playerUUID, cert.PublicKey)
 
-	// use SPKI DER
 	c.ChatSigner.X509PublicKey = cert.PublicKeyBytes
 
 	mojangSig, err := base64.StdEncoding.DecodeString(cert.Certificate.PublicKeySignatureV2)
