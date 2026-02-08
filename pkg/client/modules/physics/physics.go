@@ -43,6 +43,10 @@ type Module struct {
 
 	cancel context.CancelFunc
 
+	// damage tracking for knockback filtering
+	hasPendingDamage      bool
+	lastDamageEntityCause bool // true if the last damage had an entity source
+
 	onTick []func()
 }
 
@@ -103,15 +107,32 @@ func (m *Module) SetInput(forward, strafe float64, jumping, sneaking bool) {
 	m.Sneaking = sneaking
 }
 
-// HandlePacket handles S2CSetEntityMotion for the player's own entity (server knockback)
-// and S2CPlayerPosition for teleport velocity.
+// HandlePacket handles velocity-related packets for the player's own entity.
 func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 	switch pkt.PacketID {
+	case packet_ids.S2CDamageEventID:
+		m.handleDamageEvent(pkt)
 	case packet_ids.S2CSetEntityMotionID:
 		m.handleEntityMotion(pkt)
 	case packet_ids.S2CPlayerPositionID:
 		m.handleTeleport(pkt)
 	}
+}
+
+func (m *Module) handleDamageEvent(pkt *jp.WirePacket) {
+	var d packets.S2CDamageEvent
+	if err := pkt.ReadInto(&d); err != nil {
+		return
+	}
+
+	s := self.From(m.client)
+	if s == nil || int32(d.EntityId) != int32(s.EntityID) {
+		return
+	}
+
+	// SourceCauseId and SourceDirectId are entity_id + 1, or 0 if no entity
+	m.hasPendingDamage = true
+	m.lastDamageEntityCause = int32(d.SourceCauseId) > 0 || int32(d.SourceDirectId) > 0
 }
 
 func (m *Module) handleEntityMotion(pkt *jp.WirePacket) {
@@ -125,7 +146,14 @@ func (m *Module) handleEntityMotion(pkt *jp.WirePacket) {
 		return
 	}
 
-	// server sends velocity directly (e.g. knockback, explosions)
+	// if preceded by a damage event, only apply velocity for entity-caused damage
+	if m.hasPendingDamage {
+		m.hasPendingDamage = false
+		if !m.lastDamageEntityCause {
+			return // environmental damage — ignore knockback
+		}
+	}
+
 	m.VelX = d.Velocity.X
 	m.VelY = d.Velocity.Y
 	m.VelZ = d.Velocity.Z
