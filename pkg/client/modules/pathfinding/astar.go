@@ -81,14 +81,34 @@ func findPath(w *world.Module, col *collisions.Module, ents *entities.Module, st
 					cost = 1.0 // goal is always reachable
 				}
 
-				// check that the player can physically pass between the blocks
-				// at the destination height (catches doors, fence gates, etc.)
 				height := playerHeight
 				if sneaking {
 					height = playerSneakingHeight
 				}
-				if !isGoal && !canPassBetween(col, cx, cz, nx, ny, nz, height) {
-					continue
+
+				if !isGoal {
+					// check traversal between blocks
+					switch {
+					case dy == 0:
+						// same level: check boundary at destination height
+						if !canPassBetween(col, cx, cz, nx, ny, nz, height) {
+							continue
+						}
+					case dy == -1:
+						// step down: player approaches at SOURCE height, then drops
+						if !canPassBetween(col, cx, cz, nx, cy, nz, height) {
+							continue
+						}
+					case dy == 1:
+						// step up: check that obstacle is passable
+						if !canStepUp(w, nx, cy, nz) {
+							continue
+						}
+						// also check boundary at destination height
+						if !canPassBetween(col, cx, cz, nx, ny, nz, height) {
+							continue
+						}
+					}
 				}
 
 				// diagonal costs √2, vertical step costs extra

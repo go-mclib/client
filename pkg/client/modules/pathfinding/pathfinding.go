@@ -174,6 +174,8 @@ func (m *Module) navigationTick() {
 
 	s := self.From(m.client)
 	p := physics.From(m.client)
+	w := world.From(m.client)
+	col := collisions.From(m.client)
 	if s == nil || p == nil {
 		return
 	}
@@ -186,6 +188,25 @@ func (m *Module) navigationTick() {
 	if m.pathIndex >= len(m.path) {
 		m.completeNavigation(true)
 		return
+	}
+
+	// proactive obstruction check: verify upcoming waypoints are still passable
+	if w != nil && col != nil {
+		for i := m.pathIndex; i < len(m.path) && i < m.pathIndex+3; i++ {
+			node := m.path[i]
+			if i == len(m.path)-1 {
+				break // don't check the goal node
+			}
+			cost, _ := moveCost(w, col, nil, node.X, node.Y, node.Z)
+			if cost < 0 {
+				// path is obstructed, attempt re-path
+				if m.tryRepath() {
+					return
+				}
+				m.completeNavigation(false)
+				return
+			}
+		}
 	}
 
 	wp := m.path[m.pathIndex]
@@ -257,14 +278,46 @@ func (m *Module) navigationTick() {
 
 	// repath after being stuck for 40 ticks (2 seconds)
 	if m.stuckTicks > 40 {
-		m.navigating = false
-		p.SetInput(0, 0, false, false)
-		p.SetSprinting(false)
-
-		for _, cb := range m.onNavigationComplete {
-			cb(false)
+		if m.tryRepath() {
+			return
 		}
+		m.completeNavigation(false)
 	}
+}
+
+// tryRepath attempts to recompute a path to the current goal.
+// Must be called with m.mu held. Returns true if a new path was found.
+func (m *Module) tryRepath() bool {
+	s := self.From(m.client)
+	w := world.From(m.client)
+	col := collisions.From(m.client)
+	ents := entities.From(m.client)
+	if s == nil || w == nil || col == nil {
+		return false
+	}
+
+	startX := int(math.Floor(float64(s.X)))
+	startY := int(math.Floor(float64(s.Y)))
+	startZ := int(math.Floor(float64(s.Z)))
+
+	gx := int(math.Floor(m.goalX))
+	gy := int(math.Floor(m.goalY))
+	gz := int(math.Floor(m.goalZ))
+
+	maxNodes := m.MaxNodes
+	if maxNodes <= 0 {
+		maxNodes = DefaultMaxNodes
+	}
+
+	path, err := findPath(w, col, ents, startX, startY, startZ, gx, gy, gz, maxNodes)
+	if err != nil {
+		return false
+	}
+
+	m.path = path
+	m.pathIndex = 0
+	m.stuckTicks = 0
+	return true
 }
 
 func (m *Module) completeNavigation(reached bool) {

@@ -124,6 +124,37 @@ func canPassBetween(col *collisions.Module, cx, cz, nx, ny, nz int, height float
 	return col.CanFitAt(midX, float64(ny), midZ, playerWidth, height)
 }
 
+// canStepUp checks if the player can step up from cy to cy+1 at block (nx, nz).
+// The block at (nx, cy, nz) is the obstacle. For a valid step-up/jump:
+//   - If no collision at ground level: always OK (just walking up onto empty space)
+//   - If collision ≤ step-up height (0.6): step-up mechanic handles it
+//   - If collision > step-up (full block): it's a jump — the block above (nx, cy+1, nz)
+//     must NOT also have collision (otherwise it's a 2+ block wall like a door)
+func canStepUp(w *world.Module, nx, cy, nz int) bool {
+	stepState := w.GetBlock(nx, cy, nz)
+	if !block_shapes.HasCollision(stepState) {
+		return true
+	}
+
+	// check max collision height of the step block
+	shapes := block_shapes.CollisionShape(stepState)
+	maxY := 0.0
+	for _, s := range shapes {
+		if s.MaxY > maxY {
+			maxY = s.MaxY
+		}
+	}
+
+	if maxY <= collisions.StepUpHeight {
+		return true // short enough to step over
+	}
+
+	// too tall for step-up — needs a jump
+	// reject if the block above also has collision (2-block obstacle like a door)
+	aboveState := w.GetBlock(nx, cy+1, nz)
+	return !block_shapes.HasCollision(aboveState)
+}
+
 func blockDangerCost(stateID int32) float64 {
 	if stateID == 0 {
 		return 0

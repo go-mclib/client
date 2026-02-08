@@ -229,6 +229,12 @@ func (m *Module) tick() {
 		return
 	}
 
+	// fire tick callbacks FIRST so navigation can set input for this tick
+	// (matches vanilla: applyInput runs before travel)
+	for _, cb := range m.onTick {
+		cb()
+	}
+
 	x := float64(s.X)
 	y := float64(s.Y)
 	z := float64(s.Z)
@@ -326,11 +332,6 @@ func (m *Module) tick() {
 
 	// send position
 	m.sendPosition(s)
-
-	// fire tick callbacks
-	for _, cb := range m.onTick {
-		cb()
-	}
 }
 
 // applyAirInputScaled adds movement input to velocity (pre-collision) with pre-scaled impulses.
