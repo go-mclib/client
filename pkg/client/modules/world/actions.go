@@ -1,6 +1,9 @@
 package world
 
-import "github.com/go-mclib/data/pkg/data/chunks"
+import (
+	"github.com/go-mclib/data/pkg/data/blocks"
+	"github.com/go-mclib/data/pkg/data/chunks"
+)
 
 // GetBlock returns the block state ID at the given world coordinates.
 func (m *Module) GetBlock(x, y, z int) int32 {
@@ -36,4 +39,45 @@ func (m *Module) GetLoadedChunkCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.Chunks)
+}
+
+// FindBlocks calls fn for every block in loaded chunks whose block ID matches
+// one of the given IDs. fn receives the world coordinates and block state ID.
+// If fn returns false, iteration stops early.
+func (m *Module) FindBlocks(blockIDs []int32, fn func(x, y, z int, stateID int32) bool) {
+	idSet := make(map[int32]bool, len(blockIDs))
+	for _, id := range blockIDs {
+		idSet[id] = true
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, chunk := range m.Chunks {
+		for secIdx, sec := range chunk.Sections {
+			if sec == nil {
+				continue
+			}
+			baseX := int(chunk.X) * 16
+			baseY := chunks.MinY + secIdx*16
+			baseZ := int(chunk.Z) * 16
+			for lx := range 16 {
+				for ly := range 16 {
+					for lz := range 16 {
+						stateID := sec.GetBlockState(lx, ly, lz)
+						if stateID == 0 {
+							continue
+						}
+						blockID, _ := blocks.StateProperties(int(stateID))
+						if !idSet[blockID] {
+							continue
+						}
+						if !fn(baseX+lx, baseY+ly, baseZ+lz, stateID) {
+							return
+						}
+					}
+				}
+			}
+		}
+	}
 }
