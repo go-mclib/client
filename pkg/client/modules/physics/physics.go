@@ -410,15 +410,21 @@ func moveRelative(speed, forward, strafe, yaw float64) (dx, dy, dz float64) {
 	return dx, 0, dz
 }
 
-// applyEntityPushing applies pushing forces from nearby entities (Entity.push)
+// applyEntityPushing applies pushing forces from nearby entities (Entity.push).
+// Vanilla: LivingEntity.pushEntities → getPushableEntities (AABB intersection) → Entity.push
 func (m *Module) applyEntityPushing(x, y, z float64) {
 	ents := entities.From(m.client)
 	if ents == nil {
 		return
 	}
 
-	nearby := ents.GetNearbyEntities(x, y, z, 1.0)
-	for _, e := range nearby {
+	// find entities whose AABB intersects with the player's AABB
+	hw := PlayerWidth / 2
+	overlapping := ents.GetEntitiesInAABB(
+		x-hw, y, z-hw,
+		x+hw, y+PlayerHeight, z+hw,
+	)
+	for _, e := range overlapping {
 		dx := e.X - x
 		dz := e.Z - z
 		dist := math.Max(math.Abs(dx), math.Abs(dz))

@@ -58,6 +58,28 @@ func (m *Module) GetNearbyEntities(x, y, z, radius float64) []*Entity {
 	return result
 }
 
+// GetEntitiesInAABB returns all entities whose bounding box intersects the given box.
+func (m *Module) GetEntitiesInAABB(minX, minY, minZ, maxX, maxY, maxZ float64) []*Entity {
+	ownID := m.ownEntityID()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var result []*Entity
+	for _, e := range m.entities {
+		if e.ID == ownID {
+			continue
+		}
+		hw := e.Width / 2
+		eMinX, eMinY, eMinZ := e.X-hw, e.Y, e.Z-hw
+		eMaxX, eMaxY, eMaxZ := e.X+hw, e.Y+e.Height, e.Z+hw
+		if eMinX < maxX && eMaxX > minX &&
+			eMinY < maxY && eMaxY > minY &&
+			eMinZ < maxZ && eMaxZ > minZ {
+			result = append(result, e)
+		}
+	}
+	return result
+}
+
 // GetClosestEntity returns the closest entity matching the filter, or nil.
 func (m *Module) GetClosestEntity(x, y, z float64, filter func(*Entity) bool) *Entity {
 	ownID := m.ownEntityID()

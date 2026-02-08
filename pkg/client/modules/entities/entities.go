@@ -138,38 +138,32 @@ func (m *Module) handleAddEntity(pkt *jp.WirePacket) {
 }
 
 func (m *Module) handleRemoveEntities(pkt *jp.WirePacket) {
-	var d packets.S2CRemoveEntities
-	if err := pkt.ReadInto(&d); err != nil {
-		return
-	}
-
-	// EntityIds is a ByteArray containing a VarInt count followed by VarInt entity IDs
-	buf := ns.NewReader(d.EntityIds)
+	// parse manually: S2CRemoveEntities is a VarInt array (count + elements),
+	// but the packet struct treats it as ByteArray which misreads the format
+	buf := ns.NewReader(pkt.Data)
 	count, err := buf.ReadVarInt()
 	if err != nil {
 		return
 	}
 
-	m.mu.Lock()
+	ids := make([]int32, 0, int(count))
 	for range int(count) {
 		id, err := buf.ReadVarInt()
 		if err != nil {
 			break
 		}
-		delete(m.entities, int32(id))
+		ids = append(ids, int32(id))
+	}
+
+	m.mu.Lock()
+	for _, id := range ids {
+		delete(m.entities, id)
 	}
 	m.mu.Unlock()
 
-	// re-read for callbacks
-	buf = ns.NewReader(d.EntityIds)
-	count, _ = buf.ReadVarInt()
-	for range int(count) {
-		id, err := buf.ReadVarInt()
-		if err != nil {
-			break
-		}
+	for _, id := range ids {
 		for _, cb := range m.onEntityRemove {
-			cb(int32(id))
+			cb(id)
 		}
 	}
 }
