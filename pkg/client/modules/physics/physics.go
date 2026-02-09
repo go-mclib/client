@@ -131,7 +131,7 @@ func (m *Module) handleDamageEvent(pkt *jp.WirePacket) {
 		return
 	}
 
-	// SourceCauseId and SourceDirectId are entity_id + 1, or 0 if no entity
+	// SourceCauseId and SourceDirectId are >1, or 0 if no entity (e.g. environmental damage)
 	m.hasPendingDamage = true
 	m.lastDamageEntityCause = int32(d.SourceCauseId) > 0 || int32(d.SourceDirectId) > 0
 }

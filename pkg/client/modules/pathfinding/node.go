@@ -19,20 +19,21 @@ type PathNode struct {
 
 // danger block names and their cost modifiers
 var dangerCosts = map[string]float64{
-	"minecraft:magma_block":      100,
-	"minecraft:cactus":           100,
-	"minecraft:lava":             50,
+	"minecraft:magma_block":      50,
+	"minecraft:cactus":           50,
+	"minecraft:lava":             100,
 	"minecraft:sweet_berry_bush": 5,
 	"minecraft:powder_snow":      20,
-	"minecraft:soul_sand":        3,
+	"minecraft:soul_sand":        2,
 	"minecraft:water":            2,
 	"minecraft:campfire":         50,
-	"minecraft:soul_campfire":    50,
+	"minecraft:soul_campfire":    75,
 	"minecraft:fire":             100,
 	"minecraft:soul_fire":        100,
-	"minecraft:wither_rose":      50,
+	"minecraft:wither_rose":      100,
 }
 
+// TODO: do not hardcode, fetch from go-mclib/data
 const (
 	playerWidth          = 0.6
 	playerHeight         = 1.8

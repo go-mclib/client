@@ -7,17 +7,25 @@ import (
 	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
 )
 
-func (m *Module) Move(x, y, z float64) error {
+func (m *Module) Move(x, y, z float64, onGround, pushingAgainstWall bool) error {
+	var flags ns.Int8
+	if onGround {
+		flags |= 0x01
+	}
+	if pushingAgainstWall {
+		flags |= 0x02
+	}
+
 	return m.client.WritePacket(&packets.C2SMovePlayerPos{
 		X:     ns.Float64(x),
 		FeetY: ns.Float64(y),
 		Z:     ns.Float64(z),
-		Flags: 0x01, // on ground
+		Flags: flags,
 	})
 }
 
-func (m *Module) MoveRelative(dx, dy, dz float64) error {
-	return m.Move(float64(m.X)+dx, float64(m.Y)+dy, float64(m.Z)+dz)
+func (m *Module) MoveRelative(dx, dy, dz float64, onGround, pushingAgainstWall bool) error {
+	return m.Move(float64(m.X)+dx, float64(m.Y)+dy, float64(m.Z)+dz, onGround, pushingAgainstWall)
 }
 
 func (m *Module) LookAt(x, y, z float64) error {

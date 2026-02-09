@@ -88,18 +88,18 @@ func findPath(w *world.Module, col *collisions.Module, ents *entities.Module, st
 
 				if !isGoal {
 					// check traversal between blocks
-					switch {
-					case dy == 0:
+					switch dy {
+					case 0:
 						// same level: check boundary at destination height
 						if !canPassBetween(col, cx, cz, nx, ny, nz, height) {
 							continue
 						}
-					case dy == -1:
+					case -1:
 						// step down: player approaches at SOURCE height, then drops
 						if !canPassBetween(col, cx, cz, nx, cy, nz, height) {
 							continue
 						}
-					case dy == 1:
+					case 1:
 						// step up: check that obstacle is passable
 						if !canStepUp(w, nx, cy, nz) {
 							continue
