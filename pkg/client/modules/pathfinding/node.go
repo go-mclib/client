@@ -13,6 +13,7 @@ type PathNode struct {
 	X, Y, Z  int
 	G, H, F  float64
 	Sneaking bool // whether the player must crouch at this node
+	Jump     bool // whether the player must sprint-jump to reach this node
 	Parent   *PathNode
 	index    int // for heap
 }
@@ -38,6 +39,9 @@ const (
 	playerWidth          = 0.6
 	playerHeight         = 1.8
 	playerSneakingHeight = 1.5
+	jumpArcPeak          = 1.2522 // peak height of a jump
+	safeFallDistance     = 4      // max fall distance without damage (MC safe_fall_distance)
+	maxDiagonalGapDepth  = 2      // max gap depth at cardinal positions for diagonal traversal
 )
 
 // canStandAt checks if the player can stand at the given block position.
@@ -166,4 +170,95 @@ func blockDangerCost(stateID int32) float64 {
 		return c
 	}
 	return 0
+}
+
+// canJumpTo checks if the player can sprint-jump from (sx, sy, sz) to (dx, dy, dz)
+// across a gap. The jump path must be along a single cardinal axis.
+func canJumpTo(w *world.Module, col *collisions.Module, sx, sy, sz, dx, dy, dz int) bool {
+	// source must have solid ground
+	if !block_shapes.HasCollision(w.GetBlock(sx, sy-1, sz)) {
+		return false
+	}
+
+	// destination must be standable
+	if !canStandAt(w, col, dx, dy, dz) {
+		return false
+	}
+
+	stepX := sign(dx - sx)
+	stepZ := sign(dz - sz)
+	dist := iabs(dx-sx) + iabs(dz-sz)
+
+	// clearance height: playerHeight + jumpArcPeak (~3.05 blocks)
+	clearHeight := playerHeight + jumpArcPeak
+	minY := min(sy, dy)
+
+	// source column must have clearance for the full jump arc
+	if !col.CanFitAt(float64(sx)+0.5, float64(minY), float64(sz)+0.5, playerWidth, clearHeight) {
+		return false
+	}
+
+	// each intermediate column must be clear
+	for i := 1; i < dist; i++ {
+		ix := sx + stepX*i
+		iz := sz + stepZ*i
+		if !col.CanFitAt(float64(ix)+0.5, float64(minY), float64(iz)+0.5, playerWidth, clearHeight) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// canDiagonalTraverse checks if diagonal movement is safe when one or both
+// cardinal components are not standable. The player's width (0.6) means they
+// maintain partial overlap with solid blocks during diagonal movement.
+// Allows the diagonal if the gaps at cardinal positions are shallow enough
+// to recover from (player can jump out).
+func canDiagonalTraverse(w *world.Module, col *collisions.Module, cx, cy, cz, ox, oz int) bool {
+	// fast path: both cardinal components standable (original behavior)
+	if canStandAt(w, col, cx+ox, cy, cz) && canStandAt(w, col, cx, cy, cz+oz) {
+		return true
+	}
+
+	// for each non-standable cardinal position, check the gap is recoverable
+	for _, pos := range [2][2]int{{cx + ox, cz}, {cx, cz + oz}} {
+		bx, bz := pos[0], pos[1]
+		if canStandAt(w, col, bx, cy, bz) {
+			continue
+		}
+		// check if the player can stand within maxDiagonalGapDepth blocks below
+		recoverable := false
+		for d := 1; d <= maxDiagonalGapDepth; d++ {
+			if canStandAt(w, col, bx, cy-d, bz) {
+				recoverable = true
+				break
+			}
+		}
+		if !recoverable {
+			return false
+		}
+	}
+
+	// verify AABB fits at the diagonal midpoint (no head collisions from blocks)
+	midX := float64(cx) + float64(ox)*0.5 + 0.5
+	midZ := float64(cz) + float64(oz)*0.5 + 0.5
+	return col.CanFitAt(midX, float64(cy), midZ, playerWidth, playerHeight)
+}
+
+func sign(x int) int {
+	if x > 0 {
+		return 1
+	}
+	if x < 0 {
+		return -1
+	}
+	return 0
+}
+
+func iabs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
 }

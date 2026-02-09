@@ -229,10 +229,15 @@ func (m *Module) navigationTick() {
 
 	// reached waypoint?
 	threshold := 0.5
+	vertThreshold := 1.0
 	if isLastWaypoint {
 		threshold = 0.3
 	}
-	if horizDist < threshold && math.Abs(dy) < 1.0 {
+	if wp.Jump {
+		threshold = 0.8 // more forgiving for high-velocity jump landings
+		vertThreshold = 1.5
+	}
+	if horizDist < threshold && math.Abs(dy) < vertThreshold {
 		m.pathIndex++
 		if m.pathIndex >= len(m.path) {
 			m.completeNavigation(true)
@@ -259,9 +264,17 @@ func (m *Module) navigationTick() {
 	_ = s.LookAt(wpX, wpY+playerHeight, wpZ)
 
 	// set movement input
-	jumping := dy > 0.5 && p.OnGround // only jump when on ground and waypoint is above
 	sneaking := wp.Sneaking
-	sprinting := horizDist > 5.0 && !jumping && !sneaking
+	var jumping, sprinting bool
+	if wp.Jump {
+		// sprint-jump: sprint and jump as soon as on ground
+		sprinting = true
+		jumping = p.OnGround
+		sneaking = false
+	} else {
+		jumping = dy > 0.5 && p.OnGround
+		sprinting = horizDist > 5.0 && !sneaking
+	}
 
 	p.SetInput(1.0, 0, jumping, sneaking)
 	p.SetSprinting(sprinting)
