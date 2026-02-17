@@ -143,7 +143,7 @@ func (m *Module) tryAttack() {
 		m.StopAttacking()
 		return
 	}
-	if !m.isWithinReach(e) || !m.CanSee(m.targetID) {
+	if !m.isWithinReach(e) || !ents.CanSee(m.targetID) {
 		return
 	}
 	_ = m.performAttack(e)
@@ -179,27 +179,6 @@ func (m *Module) performAttack(e *entities.Entity) error {
 	}
 
 	return nil
-}
-
-// CanSee returns true if the line of sight from the player's eyes to the
-// entity center is not blocked by any block collision shape.
-func (m *Module) CanSee(entityID int32) bool {
-	s := self.From(m.client)
-	ents := entities.From(m.client)
-	col := collisions.From(m.client)
-	if s == nil || ents == nil || col == nil {
-		return false
-	}
-	e := ents.GetEntity(entityID)
-	if e == nil {
-		return false
-	}
-
-	eyeX := float64(s.X)
-	eyeY := float64(s.Y) + self.EyeHeight
-	eyeZ := float64(s.Z)
-	hit, _, _, _ := col.RaycastBlocks(eyeX, eyeY, eyeZ, e.X, e.Y+e.EyeHeight, e.Z)
-	return !hit
 }
 
 // isWithinReach checks distance from player eye position to the closest point on entity AABB.

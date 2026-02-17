@@ -51,15 +51,23 @@ func (m *Module) GetBlockEntity(x, y, z int) *BlockEntityData {
 // FindBlocks calls fn for every block in loaded chunks whose block ID matches
 // one of the given IDs. fn receives the world coordinates and block state ID.
 // If fn returns false, iteration stops early.
+//
+// The callback is invoked without holding the world lock, so it is safe
+// to call other world methods (e.g. GetBlockEntity) from within fn.
 func (m *Module) FindBlocks(blockIDs []int32, fn func(x, y, z int, stateID int32) bool) {
 	idSet := make(map[int32]bool, len(blockIDs))
 	for _, id := range blockIDs {
 		idSet[id] = true
 	}
 
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	type match struct {
+		x, y, z int
+		stateID int32
+	}
 
+	// collect matches under the lock
+	var matches []match
+	m.mu.RLock()
 	for _, chunk := range m.Chunks {
 		for secIdx, sec := range chunk.Sections {
 			if sec == nil {
@@ -79,12 +87,18 @@ func (m *Module) FindBlocks(blockIDs []int32, fn func(x, y, z int, stateID int32
 						if !idSet[blockID] {
 							continue
 						}
-						if !fn(baseX+lx, baseY+ly, baseZ+lz, stateID) {
-							return
-						}
+						matches = append(matches, match{baseX + lx, baseY + ly, baseZ + lz, stateID})
 					}
 				}
 			}
+		}
+	}
+	m.mu.RUnlock()
+
+	// invoke callback without holding the lock
+	for _, hit := range matches {
+		if !fn(hit.x, hit.y, hit.z, hit.stateID) {
+			return
 		}
 	}
 }

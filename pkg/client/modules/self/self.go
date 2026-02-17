@@ -36,6 +36,7 @@ type Module struct {
 	onSpawn     []func()
 	onHealthSet []func(health, food float32)
 	onPosition  []func(x, y, z float64)
+	onGameEvent []func(event uint8, value float32)
 }
 
 func New() *Module {
@@ -84,6 +85,9 @@ func (m *Module) OnHealthSet(cb func(health, food float32)) {
 	m.onHealthSet = append(m.onHealthSet, cb)
 }
 func (m *Module) OnPosition(cb func(x, y, z float64)) { m.onPosition = append(m.onPosition, cb) }
+func (m *Module) OnGameEvent(cb func(event uint8, value float32)) {
+	m.onGameEvent = append(m.onGameEvent, cb)
+}
 
 func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 	switch pkt.PacketID {
@@ -97,6 +101,8 @@ func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 		m.handlePlayerPosition(pkt)
 	case packet_ids.S2CPlayerCombatKillID:
 		m.handleCombatKill(pkt)
+	case packet_ids.S2CGameEventID:
+		m.handleGameEvent(pkt)
 	}
 }
 
@@ -206,6 +212,17 @@ func (m *Module) handlePlayerPosition(pkt *jp.WirePacket) {
 
 	for _, cb := range m.onPosition {
 		cb(float64(m.X), float64(m.Y), float64(m.Z))
+	}
+}
+
+func (m *Module) handleGameEvent(pkt *jp.WirePacket) {
+	var d packets.S2CGameEvent
+	if err := pkt.ReadInto(&d); err != nil {
+		return
+	}
+
+	for _, cb := range m.onGameEvent {
+		cb(uint8(d.Event), float32(d.Value))
 	}
 }
 

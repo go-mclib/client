@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -109,12 +111,7 @@ func findReachableWithLOS(w *world.Module, col *collisions.Module, bx, by, bz in
 
 // isContainer checks if a block ID is a container
 func isContainer(blockID int32) bool {
-	for _, id := range containerBlockIDs {
-		if id == blockID {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(containerBlockIDs, blockID)
 }
 
 // findAdjacentContainer looks for a container block adjacent to (x, y, z).
@@ -167,6 +164,12 @@ func extractSignText(data nbt.Compound) []string {
 		case nbt.Compound:
 			text = v.GetString("text")
 		}
+
+		// sign text is stored as JSON text components — parse and flatten
+		var tc ns.TextComponent
+		if json.Unmarshal([]byte(text), &tc) == nil {
+			text = tc.String()
+		}
 		text = strings.TrimSpace(text)
 		if text != "" {
 			lines = append(lines, text)
@@ -209,6 +212,36 @@ func main() {
 	var mu sync.Mutex
 	var sorting bool
 	labelMap := make(map[int32]*labelEntry) // item ID -> chest position
+
+	// shared signaling channels (set by storeItem, used by callbacks)
+	var navDone chan bool
+	var containerOpened chan struct{}
+
+	// register navigation callback ONCE
+	pf.OnNavigationComplete(func(reached bool) {
+		mu.Lock()
+		ch := navDone
+		mu.Unlock()
+		if ch != nil {
+			select {
+			case ch <- reached:
+			default:
+			}
+		}
+	})
+
+	// register container open callback ONCE
+	inv.OnContainerOpen(func(_ int32, _ inventory.MenuType, _ string) {
+		mu.Lock()
+		ch := containerOpened
+		mu.Unlock()
+		if ch != nil {
+			select {
+			case ch <- struct{}{}:
+			default:
+			}
+		}
+	})
 
 	// buildLabelMap scans item frames and signs to map items to chests.
 	buildLabelMap := func() {
@@ -304,6 +337,9 @@ func main() {
 		c.Logger.Printf("label map built: %d items mapped to chests", len(labelMap))
 	}
 
+	// forward-declared so storeItem can call it after finishing
+	var storeExistingItems func()
+
 	// storeItem navigates to the labeled chest and stores all matching items.
 	storeItem := func(targetItemID int32, entry *labelEntry) {
 		mu.Lock()
@@ -316,6 +352,8 @@ func main() {
 
 		defer func() {
 			mu.Lock()
+			navDone = nil
+			containerOpened = nil
 			sorting = false
 			mu.Unlock()
 		}()
@@ -335,40 +373,56 @@ func main() {
 		dz := float64(adjZ) + 0.5 - float64(s.Z)
 		if math.Sqrt(dx*dx+dz*dz) > 1.0 {
 			done := make(chan bool, 1)
-			pf.OnNavigationComplete(func(reached bool) {
-				done <- reached
-			})
+			mu.Lock()
+			navDone = done
+			mu.Unlock()
+
 			if err := pf.NavigateTo(float64(adjX)+0.5, float64(adjY), float64(adjZ)+0.5); err != nil {
 				c.Logger.Printf("pathfinding failed: %v", err)
 				return
 			}
-			if !<-done {
-				c.Logger.Println("could not reach chest")
+			select {
+			case reached := <-done:
+				if !reached {
+					c.Logger.Println("could not reach chest")
+					return
+				}
+			case <-time.After(30 * time.Second):
+				pf.Stop()
+				c.Logger.Println("navigation timed out")
 				return
 			}
 			time.Sleep(200 * time.Millisecond)
 		}
 
-		_ = s.LookAt(float64(cx)+0.5, float64(cy)+0.5, float64(cz)+0.5)
-		time.Sleep(50 * time.Millisecond)
+		// try opening the chest (retry once if it fails)
+		chestOpen := false
+		for attempt := range 2 {
+			_ = s.LookAt(float64(cx)+0.5, float64(cy)+0.5, float64(cz)+0.5)
+			time.Sleep(50 * time.Millisecond)
 
-		if err := c.InteractBlock(cx, cy, cz, 1, 0, 0.5, 0.5, 0.5); err != nil {
-			c.Logger.Printf("failed to interact with chest: %v", err)
-			return
-		}
+			opened := make(chan struct{}, 1)
+			mu.Lock()
+			containerOpened = opened
+			mu.Unlock()
 
-		// wait for container to open
-		opened := make(chan struct{}, 1)
-		inv.OnContainerOpen(func(_ int32, _ inventory.MenuType, _ string) {
-			select {
-			case opened <- struct{}{}:
-			default:
+			if err := c.InteractBlock(cx, cy, cz, 1, 0, 0.5, 0.5, 0.5); err != nil {
+				c.Logger.Printf("failed to interact with chest: %v", err)
+				return
 			}
-		})
-		select {
-		case <-opened:
-		case <-time.After(2 * time.Second):
-			c.Logger.Println("timed out waiting for chest to open")
+
+			select {
+			case <-opened:
+				chestOpen = true
+			case <-time.After(2 * time.Second):
+				c.Logger.Printf("timed out waiting for chest to open (attempt %d)", attempt+1)
+				_ = inv.CloseContainer()
+			}
+			if chestOpen {
+				break
+			}
+		}
+		if !chestOpen {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -383,11 +437,15 @@ func main() {
 			if item == nil || item.IsEmpty() || item.ID != targetItemID {
 				continue
 			}
-			// check container has space
+			// check container has space (empty slot or partial stack of same item)
 			hasSpace := false
 			for j := range slotCount {
 				cs := inv.ContainerSlot(j)
 				if cs == nil || cs.IsEmpty() {
+					hasSpace = true
+					break
+				}
+				if cs.ID == targetItemID && cs.Components != nil && cs.Count < cs.Components.MaxStackSize {
 					hasSpace = true
 					break
 				}
@@ -413,6 +471,41 @@ func main() {
 		}
 	}
 
+	// storeExistingItems checks the player inventory for items that have
+	// a label mapping and stores them one by one, chaining until done.
+	storeExistingItems = func() {
+		for {
+			mu.Lock()
+			if sorting || len(labelMap) == 0 {
+				mu.Unlock()
+				return
+			}
+			mu.Unlock()
+
+			var foundID int32
+			var foundEntry *labelEntry
+			for i := range 36 {
+				item := inv.GetSlot(inventory.SlotMainStart + i)
+				if item == nil || item.IsEmpty() {
+					continue
+				}
+				mu.Lock()
+				entry := labelMap[item.ID]
+				mu.Unlock()
+				if entry != nil {
+					foundID = item.ID
+					foundEntry = entry
+					break
+				}
+			}
+			if foundEntry == nil {
+				return
+			}
+			storeItem(foundID, foundEntry)
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+
 	// trigger sorting when items appear in player inventory
 	inv.OnSlotUpdate(func(index int, item *items.ItemStack) {
 		if index < inventory.SlotMainStart || index >= inventory.SlotHotbarEnd {
@@ -429,15 +522,62 @@ func main() {
 		if entry == nil {
 			return
 		}
-		go storeItem(item.ID, entry)
+		go storeExistingItems()
 	})
 
-	// on spawn, wait for chunks then build label map
+	// debounced label map rebuild
+	var rebuildTimer *time.Timer
+	scheduleRebuild := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if rebuildTimer != nil {
+			rebuildTimer.Stop()
+		}
+		rebuildTimer = time.AfterFunc(2*time.Second, func() {
+			buildLabelMap()
+			storeExistingItems()
+		})
+	}
+
+	// re-map when containers, signs, or item frames change
+	w.OnBlockUpdate(func(x, y, z int, stateID int32) {
+		blockID, _ := blocks.StateProperties(int(stateID))
+		if isContainer(blockID) || wallSignBlockIDs[blockID] {
+			scheduleRebuild()
+			return
+		}
+		// also rebuild when a block that was a container/sign is broken (stateID=0 means air)
+		if stateID == 0 {
+			scheduleRebuild()
+		}
+	})
+	// track item frame entity IDs so we can detect their removal
+	itemFrameIDs := make(map[int32]bool)
+	ents.OnEntitySpawn(func(e *entities.Entity) {
+		if e.TypeID == dataEntities.ItemFrame || e.TypeID == dataEntities.GlowItemFrame {
+			mu.Lock()
+			itemFrameIDs[e.ID] = true
+			mu.Unlock()
+			scheduleRebuild()
+		}
+	})
+	ents.OnEntityRemove(func(entityID int32) {
+		mu.Lock()
+		wasFrame := itemFrameIDs[entityID]
+		delete(itemFrameIDs, entityID)
+		mu.Unlock()
+		if wasFrame {
+			scheduleRebuild()
+		}
+	})
+
+	// on spawn, wait for chunks then build label map and store existing items
 	s.OnSpawn(func() {
 		c.Logger.Println("spawned, waiting for chunks to load...")
 		go func() {
 			time.Sleep(5 * time.Second)
 			buildLabelMap()
+			storeExistingItems()
 		}()
 	})
 

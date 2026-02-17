@@ -37,10 +37,13 @@ type Module struct {
 	mu       sync.RWMutex
 	entities map[int32]*Entity
 
-	onEntitySpawn    []func(e *Entity)
-	onEntityRemove   []func(entityID int32)
-	onEntityMove     []func(e *Entity)
-	onEntityVelocity []func(e *Entity)
+	onEntitySpawn     []func(e *Entity)
+	onEntityRemove    []func(entityID int32)
+	onEntityMove      []func(e *Entity)
+	onEntityVelocity  []func(e *Entity)
+	onEntityDamage    []func(entityID, sourceTypeID, sourceCauseID, sourceDirectID int32)
+	onEntityAnimation []func(entityID int32, animation uint8)
+	onHurtAnimation   []func(entityID int32, yaw float32)
 }
 
 func New() *Module {
@@ -76,6 +79,15 @@ func (m *Module) OnEntityMove(cb func(e *Entity)) { m.onEntityMove = append(m.on
 func (m *Module) OnEntityVelocity(cb func(e *Entity)) {
 	m.onEntityVelocity = append(m.onEntityVelocity, cb)
 }
+func (m *Module) OnEntityDamage(cb func(entityID, sourceTypeID, sourceCauseID, sourceDirectID int32)) {
+	m.onEntityDamage = append(m.onEntityDamage, cb)
+}
+func (m *Module) OnEntityAnimation(cb func(entityID int32, animation uint8)) {
+	m.onEntityAnimation = append(m.onEntityAnimation, cb)
+}
+func (m *Module) OnHurtAnimation(cb func(entityID int32, yaw float32)) {
+	m.onHurtAnimation = append(m.onHurtAnimation, cb)
+}
 
 func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 	switch pkt.PacketID {
@@ -95,8 +107,12 @@ func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 		m.handleEntityPositionSync(pkt)
 	case packet_ids.S2CSetEntityDataID:
 		m.handleSetEntityData(pkt)
-	case packet_ids.S2CEntityEventID:
-		// fire event if needed in the future
+	case packet_ids.S2CDamageEventID:
+		m.handleDamageEvent(pkt)
+	case packet_ids.S2CAnimateID:
+		m.handleAnimate(pkt)
+	case packet_ids.S2CHurtAnimationID:
+		m.handleHurtAnimation(pkt)
 	}
 }
 
@@ -298,6 +314,39 @@ func (m *Module) handleSetEntityData(pkt *jp.WirePacket) {
 		}
 	}
 	m.mu.Unlock()
+}
+
+func (m *Module) handleDamageEvent(pkt *jp.WirePacket) {
+	var d packets.S2CDamageEvent
+	if err := pkt.ReadInto(&d); err != nil {
+		return
+	}
+
+	for _, cb := range m.onEntityDamage {
+		cb(int32(d.EntityId), int32(d.SourceTypeId), int32(d.SourceCauseId), int32(d.SourceDirectId))
+	}
+}
+
+func (m *Module) handleAnimate(pkt *jp.WirePacket) {
+	var d packets.S2CAnimate
+	if err := pkt.ReadInto(&d); err != nil {
+		return
+	}
+
+	for _, cb := range m.onEntityAnimation {
+		cb(int32(d.EntityId), uint8(d.Animation))
+	}
+}
+
+func (m *Module) handleHurtAnimation(pkt *jp.WirePacket) {
+	var d packets.S2CHurtAnimation
+	if err := pkt.ReadInto(&d); err != nil {
+		return
+	}
+
+	for _, cb := range m.onHurtAnimation {
+		cb(int32(d.EntityId), float32(d.Yaw))
+	}
 }
 
 // ownEntityID returns the player's own entity ID, or -1 if self module is not registered.

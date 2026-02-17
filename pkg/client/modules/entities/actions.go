@@ -1,6 +1,11 @@
 package entities
 
-import "math"
+import (
+	"math"
+
+	"github.com/go-mclib/client/pkg/client/modules/collisions"
+	"github.com/go-mclib/client/pkg/client/modules/self"
+)
 
 // GetEntity returns an entity by ID, or nil if not found.
 func (m *Module) GetEntity(id int32) *Entity {
@@ -123,4 +128,24 @@ func (m *Module) GetEntityCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.entities)
+}
+
+// CanSee returns true if the line of sight from the player's eyes to the
+// entity center is not blocked by any block collision shape.
+func (m *Module) CanSee(entityID int32) bool {
+	s := self.From(m.client)
+	col := collisions.From(m.client)
+	if s == nil || col == nil {
+		return false
+	}
+	e := m.GetEntity(entityID)
+	if e == nil {
+		return false
+	}
+
+	eyeX := float64(s.X)
+	eyeY := float64(s.Y) + self.EyeHeight
+	eyeZ := float64(s.Z)
+	hit, _, _, _ := col.RaycastBlocks(eyeX, eyeY, eyeZ, e.X, e.Y+e.EyeHeight, e.Z)
+	return !hit
 }
