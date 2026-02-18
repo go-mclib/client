@@ -42,6 +42,7 @@ const (
 	trashSignText         = "trash"
 	filterDebounce        = 3 * time.Second
 	itemPollInterval      = 200 * time.Millisecond
+	rebuildInterval       = 10 * time.Second
 )
 
 func init() {
@@ -213,10 +214,13 @@ func (sr *sorter) sleepOrClose(d time.Duration) bool {
 }
 
 // waitForItems blocks until the open container has items, or it's closed by the server.
+// Periodically rebuilds the label map so runtime sign changes are picked up.
 func (sr *sorter) waitForItems() bool {
 	sr.drainCloseCh()
-	ticker := time.NewTicker(itemPollInterval)
-	defer ticker.Stop()
+	pollTicker := time.NewTicker(itemPollInterval)
+	defer pollTicker.Stop()
+	rebuildTicker := time.NewTicker(rebuildInterval)
+	defer rebuildTicker.Stop()
 
 	for {
 		if !sr.inv.ContainerOpen() {
@@ -226,7 +230,9 @@ func (sr *sorter) waitForItems() bool {
 			return true
 		}
 		select {
-		case <-ticker.C:
+		case <-pollTicker.C:
+		case <-rebuildTicker.C:
+			sr.buildLabelMap()
 		case <-sr.closeCh:
 			return false
 		}
