@@ -374,6 +374,9 @@ func (sr *sorter) processFilterChest(pos blockPos) {
 		sr.c.Logger.Printf("collected %d stacks from filter chest at %d,%d,%d", taken, pos.x, pos.y, pos.z)
 	}
 	sr.closeContainer()
+
+	// rebuild labels so new/changed/removed signs are picked up before depositing
+	sr.buildLabelMap()
 }
 
 // depositAll groups inventory items by destination chest and deposits each
@@ -518,7 +521,7 @@ func (sr *sorter) processSignAt(x, y, z int, stateID int32, labelMap map[int32]b
 	}
 
 	for _, line := range lines {
-		if itemID := resolveItemName(line); itemID >= 0 {
+		for _, itemID := range resolveLabel(line) {
 			labelMap[itemID] = pos
 			sr.c.Logger.Printf("label: %s -> %d,%d,%d (sign)", items.ItemName(itemID), pos.x, pos.y, pos.z)
 		}
@@ -580,48 +583,6 @@ func (sr *sorter) setup() {
 		sr.mu.Unlock()
 		if labeled || hasTrash {
 			sr.requestSort()
-		}
-	})
-
-	// debounced label map rebuild on world changes
-	var rebuildTimer *time.Timer
-	var rebuildMu sync.Mutex
-	scheduleRebuild := func() {
-		rebuildMu.Lock()
-		defer rebuildMu.Unlock()
-		if rebuildTimer != nil {
-			rebuildTimer.Stop()
-		}
-		rebuildTimer = time.AfterFunc(2*time.Second, func() {
-			sr.buildLabelMap()
-			sr.requestSort()
-		})
-	}
-
-	sr.w.OnBlockUpdate(func(x, y, z int, stateID int32) {
-		blockID, _ := blocks.StateProperties(int(stateID))
-		if isContainer(blockID) || wallSignBlockIDs[blockID] || stateID == 0 {
-			scheduleRebuild()
-		}
-	})
-
-	itemFrameIDs := make(map[int32]bool)
-	var frameMu sync.Mutex
-	sr.ents.OnEntitySpawn(func(e *entities.Entity) {
-		if e.TypeID == dataEntities.ItemFrame || e.TypeID == dataEntities.GlowItemFrame {
-			frameMu.Lock()
-			itemFrameIDs[e.ID] = true
-			frameMu.Unlock()
-			scheduleRebuild()
-		}
-	})
-	sr.ents.OnEntityRemove(func(entityID int32) {
-		frameMu.Lock()
-		wasFrame := itemFrameIDs[entityID]
-		delete(itemFrameIDs, entityID)
-		frameMu.Unlock()
-		if wasFrame {
-			scheduleRebuild()
 		}
 	})
 
@@ -761,15 +722,31 @@ func extractSignText(data nbt.Compound) []string {
 	return lines
 }
 
-func resolveItemName(name string) int32 {
-	name = strings.ToLower(strings.TrimSpace(name))
-	if name == "" {
-		return -1
+// resolveLabel resolves a sign line to item IDs.
+// Lines starting with # are treated as item tags (e.g. "#bundles", "#minecraft:swords").
+// Other lines are treated as individual item names.
+func resolveLabel(line string) []int32 {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return nil
 	}
+
+	if strings.HasPrefix(line, "#") {
+		tag := strings.ToLower(line[1:])
+		if !strings.Contains(tag, ":") {
+			tag = "minecraft:" + tag
+		}
+		return items.ItemTag(tag)
+	}
+
+	name := strings.ToLower(line)
 	if !strings.Contains(name, ":") {
 		name = "minecraft:" + name
 	}
-	return items.ItemID(name)
+	if id := items.ItemID(name); id >= 0 {
+		return []int32{id}
+	}
+	return nil
 }
 
 func intAbs(x int) int {
