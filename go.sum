@@ -28,8 +28,12 @@ github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f h1:Y/CXytFA4m6
 github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f/go.mod h1:vw97MGsxSvLiUE2X8qFplwetxpGLQrlU1Q9AUEIzCaM=
 github.com/go-mclib/data v0.0.0-20260208115908-bd39f8938b96 h1:87CMrBDAmAnkm9HdF2JTpOe3kNMasW6ShWjqOaAyji8=
 github.com/go-mclib/data v0.0.0-20260208115908-bd39f8938b96/go.mod h1:SXeJ7sTip1jdQzMhH88cploIpcRq63ZzjbxqxUxh9r4=
+github.com/go-mclib/data v0.0.0-20260218113545-d408a096e1dd h1:+0PfBX6OO9iSd0PinHJypj8qaVkP7apIGB4ZCKukwts=
+github.com/go-mclib/data v0.0.0-20260218113545-d408a096e1dd/go.mod h1:xeq5mf7GLGa3DI+iUIAXh7k4+DY2wQuePIvVgWg4yJE=
 github.com/go-mclib/protocol v0.0.0-20260208115823-45b7238b9a64 h1:MDtQ6MS5YLT5qwYcojHtX//BELFX0afx2lqqG33k7Tg=
 github.com/go-mclib/protocol v0.0.0-20260208115823-45b7238b9a64/go.mod h1:aVfH1TFVFv7ksiVmFKyWctJTws2MvXjnAJprdx9/5gw=
+github.com/go-mclib/protocol v0.0.0-20260217192914-6a30f7dd3c93 h1:rXiHZ3SRU/DDnGQHIwI6kOHBaZwOKmfn6GolvCDjOEk=
+github.com/go-mclib/protocol v0.0.0-20260217192914-6a30f7dd3c93/go.mod h1:aVfH1TFVFv7ksiVmFKyWctJTws2MvXjnAJprdx9/5gw=
 github.com/lucasb-eyer/go-colorful v1.3.0 h1:2/yBRLdWBZKrf7gB40FoiKfAWYQ0lqNcbuQwVHXptag=
 github.com/lucasb-eyer/go-colorful v1.3.0/go.mod h1:R4dSotOR9KMtayYi1e77YzuveK+i7ruzyGqttikkLy0=
 github.com/mattn/go-isatty v0.0.20 h1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWEY=
