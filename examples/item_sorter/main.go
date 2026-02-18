@@ -334,6 +334,7 @@ func (sr *sorter) run() {
 		if len(filters) > 0 {
 			for _, pos := range filters {
 				sr.processFilterChest(pos)
+				sr.buildLabelMap()
 				sr.depositAll()
 			}
 		} else {
@@ -374,9 +375,6 @@ func (sr *sorter) processFilterChest(pos blockPos) {
 		sr.c.Logger.Printf("collected %d stacks from filter chest at %d,%d,%d", taken, pos.x, pos.y, pos.z)
 	}
 	sr.closeContainer()
-
-	// rebuild labels so new/changed/removed signs are picked up before depositing
-	sr.buildLabelMap()
 }
 
 // depositAll groups inventory items by destination chest and deposits each
