@@ -46,6 +46,24 @@ var customCategories = map[string][]string{
 		"minecraft:golden_carrot",
 		"minecraft:apple",
 	},
+	"valuables": {
+		"minecraft:diamond",
+		"minecraft:diamond_block",
+		"minecraft:emerald_block",
+		"minecraft:spawner",
+		"minecraft:trial_spawner",
+		"minecraft:beacon",
+		"minecraft:netherite_ingot",
+		"minecraft:netherite_block",
+		"minecraft:elytra",
+		"minecraft:heavy_core",
+		"minecraft:elytra",
+		"minecraft:vault",
+		"minecraft:reinforced_deepslate",
+		"minecraft:ender_chest",
+		"minecraft:golden_apple",
+		"minecraft:enchanted_golden_apple",
+	},
 }
 
 // foodItemNames lists items the bot may eat, ordered by preference (best first).
