@@ -65,7 +65,7 @@ const (
 	signBlockEntityType   = 7
 	hangingSignEntityType = 8
 	blockReach            = 4.5
-	scanRadius            = 32
+	scanRadius            = 128
 	filterSignText        = "filter me"
 	trashSignText         = "trash"
 	filterDebounce        = 3 * time.Second
