@@ -849,6 +849,7 @@ func main() {
 	flag.Parse()
 
 	c := helpers.NewClient(f)
+	c.MaxReconnectAttempts = -1
 	c.Register(entities.New())
 	c.Register(pathfinding.New())
 	c.Register(inventory.New())
