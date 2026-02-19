@@ -31,6 +31,23 @@ var containerBlockIDs = []int32{
 	blocks.BlockID("minecraft:barrel"),
 }
 
+// customCategories maps category names to item lists for use on signs.
+// Reference these with a : prefix (e.g. ":food", ":valuables").
+var customCategories = map[string][]string{
+	"food": {
+		"minecraft:cooked_beef",
+		"minecraft:cooked_porkchop",
+		"minecraft:cooked_chicken",
+		"minecraft:cooked_mutton",
+		"minecraft:cooked_salmon",
+		"minecraft:cooked_cod",
+		"minecraft:bread",
+		"minecraft:baked_potato",
+		"minecraft:golden_carrot",
+		"minecraft:apple",
+	},
+}
+
 // foodItemNames lists items the bot may eat, ordered by preference (best first).
 // Food items are never deposited into chests — they stay in the bot's inventory.
 var foodItemNames = []string{
@@ -39,8 +56,9 @@ var foodItemNames = []string{
 }
 
 var (
-	foodItemIDs      []int32
-	wallSignBlockIDs = map[int32]bool{}
+	foodItemIDs        []int32
+	resolvedCategories map[string][]int32
+	wallSignBlockIDs   = map[int32]bool{}
 )
 
 const (
@@ -68,6 +86,14 @@ func init() {
 	for _, name := range foodItemNames {
 		if id := items.ItemID(name); id >= 0 {
 			foodItemIDs = append(foodItemIDs, id)
+		}
+	}
+	resolvedCategories = make(map[string][]int32, len(customCategories))
+	for cat, names := range customCategories {
+		for _, name := range names {
+			if id := items.ItemID(name); id >= 0 {
+				resolvedCategories[cat] = append(resolvedCategories[cat], id)
+			}
 		}
 	}
 }
@@ -776,6 +802,10 @@ func resolveLabel(line string) []int32 {
 			tag = "minecraft:" + tag
 		}
 		return items.ItemTag(tag)
+	}
+
+	if strings.HasPrefix(line, ":") {
+		return resolvedCategories[strings.ToLower(line[1:])]
 	}
 
 	name := strings.ToLower(line)
