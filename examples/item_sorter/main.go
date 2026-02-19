@@ -31,7 +31,17 @@ var containerBlockIDs = []int32{
 	blocks.BlockID("minecraft:barrel"),
 }
 
-var wallSignBlockIDs = map[int32]bool{}
+// foodItemNames lists items the bot may eat, ordered by preference (best first).
+// Food items are never deposited into chests — they stay in the bot's inventory.
+var foodItemNames = []string{
+	"minecraft:cooked_porkchop",
+	"minecraft:golden_carrot",
+}
+
+var (
+	foodItemIDs      []int32
+	wallSignBlockIDs = map[int32]bool{}
+)
 
 const (
 	signBlockEntityType   = 7
@@ -43,6 +53,7 @@ const (
 	filterDebounce        = 3 * time.Second
 	itemPollInterval      = 200 * time.Millisecond
 	rebuildInterval       = 10 * time.Second
+	hungerThreshold       = 18 // food level (0-20) below which the bot pauses to eat
 )
 
 func init() {
@@ -53,6 +64,11 @@ func init() {
 	for _, wood := range woodTypes {
 		wallSignBlockIDs[blocks.BlockID("minecraft:"+wood+"_wall_sign")] = true
 		wallSignBlockIDs[blocks.BlockID("minecraft:"+wood+"_wall_hanging_sign")] = true
+	}
+	for _, name := range foodItemNames {
+		if id := items.ItemID(name); id >= 0 {
+			foodItemIDs = append(foodItemIDs, id)
+		}
 	}
 }
 
@@ -323,6 +339,20 @@ func (sr *sorter) containerItemCount() int {
 	return count
 }
 
+func (sr *sorter) eatIfHungry() {
+	if len(foodItemIDs) == 0 {
+		return
+	}
+	for int32(sr.s.Food) < hungerThreshold {
+		sr.c.Logger.Printf("hungry (food=%d), eating...", sr.s.Food)
+		if err := sr.s.Eat(foodItemIDs); err != nil {
+			sr.c.Logger.Printf("failed to eat: %v", err)
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
 // --- main loop ---
 
 // run is the main sorter loop. It deposits any sortable inventory items,
@@ -331,6 +361,7 @@ func (sr *sorter) containerItemCount() int {
 // If no filter chests exist, it waits for inventory triggers.
 func (sr *sorter) run() {
 	for {
+		sr.eatIfHungry()
 		sr.depositAll()
 
 		sr.mu.Lock()
@@ -341,6 +372,7 @@ func (sr *sorter) run() {
 			for _, pos := range filters {
 				sr.processFilterChest(pos)
 				sr.buildLabelMap()
+				sr.eatIfHungry()
 				sr.depositAll()
 			}
 		} else {
@@ -417,6 +449,9 @@ func (sr *sorter) groupSortableItems() map[blockPos][]int32 {
 	for i := range 36 {
 		item := sr.inv.GetSlot(inventory.SlotMainStart + i)
 		if item == nil || item.IsEmpty() || seen[item.ID] {
+			continue
+		}
+		if slices.Contains(foodItemIDs, item.ID) {
 			continue
 		}
 		seen[item.ID] = true
