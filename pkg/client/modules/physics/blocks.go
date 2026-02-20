@@ -7,12 +7,13 @@ import (
 	"github.com/go-mclib/data/pkg/data/blocks"
 )
 
-// block friction values from Minecraft source (BlockBehaviour.friction)
+// block friction values from Minecraft source (BlockBehaviour.friction).
+// Block.getFriction() returns float in vanilla.
 var blockFriction = map[string]float64{
-	"minecraft:ice":         0.98,
-	"minecraft:packed_ice":  0.98,
-	"minecraft:blue_ice":    0.989,
-	"minecraft:slime_block": 0.8,
+	"minecraft:ice":         float64(float32(0.98)),
+	"minecraft:packed_ice":  float64(float32(0.98)),
+	"minecraft:blue_ice":    float64(float32(0.989)),
+	"minecraft:slime_block": float64(float32(0.8)),
 }
 
 // block speed factors from Minecraft source (BlockBehaviour.speedFactor)

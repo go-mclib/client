@@ -367,14 +367,17 @@ func (m *Module) applyAirInputScaled(s *self.Module, x, y, z, yaw float64, w *wo
 		blockFriction = 1.0
 	}
 
-	// getFrictionInfluencedSpeed uses raw blockFriction, not blockFriction * 0.91
+	// vanilla getFrictionInfluencedSpeed: entire calculation in float32
 	var speed float64
 	if m.OnGround {
 		baseSpeed := m.getEffectiveSpeed(s)
 		if s.Sprinting {
 			baseSpeed *= (1.0 + SprintModifier)
 		}
-		speed = baseSpeed * (FrictionSpeedFactor / (blockFriction * blockFriction * blockFriction))
+		// vanilla: this.getSpeed() * (0.21600002F / (blockFriction * blockFriction * blockFriction))
+		// getSpeed() returns float, all arithmetic is float32
+		bf := float32(blockFriction)
+		speed = float64(float32(baseSpeed) * (float32(FrictionSpeedFactor) / (bf * bf * bf)))
 	} else {
 		speed = FlyingSpeed
 	}
@@ -389,7 +392,8 @@ func (m *Module) applyAirInputScaled(s *self.Module, x, y, z, yaw float64, w *wo
 // applyAirPhysics applies gravity/levitation and friction after collision (post-move).
 // Matches LivingEntity.travelInAir: levitation replaces gravity, slow falling caps it.
 func (m *Module) applyAirPhysics(s *self.Module, blockFriction float64) {
-	friction := blockFriction * AirFrictionMul
+	// vanilla: float friction = blockFriction * 0.91F (float32 arithmetic)
+	friction := float64(float32(blockFriction) * float32(AirFrictionMul))
 
 	levAmp := s.EffectAmplifier(effectLevitation)
 	if levAmp >= 0 {
