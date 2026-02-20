@@ -20,16 +20,18 @@ type Module struct {
 
 	MaxNodes int // maximum A* nodes to explore (default: 10000)
 
-	mu         sync.Mutex
-	navigating bool
-	path       []PathNode
-	pathIndex  int
-	stuckTicks int
-	lastNavX   float64
-	lastNavZ   float64
-	goalX      float64
-	goalY      float64
-	goalZ      float64
+	mu            sync.Mutex
+	navigating    bool
+	path          []PathNode
+	pathIndex     int
+	stuckTicks    int
+	retreatTicks  int // countdown for corner retreat phase
+	retreatCycles int // number of retreat cycles since last progress
+	lastNavX      float64
+	lastNavZ      float64
+	goalX         float64
+	goalY         float64
+	goalZ         float64
 
 	// saved sprint/sneak state to restore after navigation
 	savedSprinting bool
@@ -67,6 +69,8 @@ func (m *Module) Reset() {
 	m.path = nil
 	m.pathIndex = 0
 	m.stuckTicks = 0
+	m.retreatTicks = 0
+	m.retreatCycles = 0
 }
 
 func From(c *client.Client) *Module {
@@ -137,6 +141,8 @@ func (m *Module) NavigateTo(goalX, goalY, goalZ float64) error {
 	m.pathIndex = 0
 	m.navigating = true
 	m.stuckTicks = 0
+	m.retreatTicks = 0
+	m.retreatCycles = 0
 	m.goalX = goalX
 	m.goalY = goalY
 	m.goalZ = goalZ
@@ -258,6 +264,8 @@ func (m *Module) navigationTick() {
 			return
 		}
 		m.stuckTicks = 0
+		m.retreatTicks = 0
+		m.retreatCycles = 0
 		// update waypoint
 		wp = m.path[m.pathIndex]
 		isLastWaypoint = m.pathIndex == len(m.path)-1
@@ -274,8 +282,39 @@ func (m *Module) navigationTick() {
 		horizDist = math.Sqrt(dx*dx + dz*dz)
 	}
 
-	// face waypoint
-	s.LookAt(wpX, wpY+playerHeight, wpZ)
+	// wall-slide: when hitting a wall, adjust facing to slide along
+	// the unblocked axis. When stuck for several ticks with wall contact,
+	// enter retreat mode to escape corners. After multiple retreat cycles,
+	// trigger repath.
+	lookX, lookZ := wpX, wpZ
+	if m.retreatTicks > 0 {
+		// persisted retreat: face away from waypoint
+		lookX = x - dx
+		lookZ = z - dz
+		m.retreatTicks--
+	} else if p.HorizontalCollision && m.stuckTicks > 3 {
+		// stuck for several ticks with wall contact — escalate to retreat
+		// (catches both simultaneous corner AND alternating single-axis blocks)
+		m.retreatTicks = 8
+		m.retreatCycles++
+		lookX = x - dx
+		lookZ = z - dz
+	} else if p.HorizontalCollision {
+		if p.XCollision && p.ZCollision {
+			// immediate corner: both axes blocked
+			m.retreatTicks = 8
+			m.retreatCycles++
+			lookX = x - dx
+			lookZ = z - dz
+		} else if p.XCollision {
+			lookX = x
+			lookZ = z + dz
+		} else {
+			lookX = x + dx
+			lookZ = z
+		}
+	}
+	s.LookAt(lookX, wpY+playerHeight, lookZ)
 
 	// set movement input
 	sneaking := s.Sneaking || wp.Sneaking
@@ -295,17 +334,19 @@ func (m *Module) navigationTick() {
 	p.SetInput(1.0, 0, jumping)
 
 	// stuck detection
-	moveDist := math.Sqrt((x-m.lastNavX)*(x-m.lastNavX) + (z-m.lastNavZ)*(z-m.lastNavZ))
-	if moveDist < 0.01 {
-		m.stuckTicks++
-	} else {
-		m.stuckTicks = 0
+	if m.retreatTicks <= 0 {
+		moveDist := math.Sqrt((x-m.lastNavX)*(x-m.lastNavX) + (z-m.lastNavZ)*(z-m.lastNavZ))
+		if moveDist < 0.01 {
+			m.stuckTicks++
+		} else {
+			m.stuckTicks = 0
+		}
 	}
 	m.lastNavX = x
 	m.lastNavZ = z
 
-	// repath after being stuck for 40 ticks (2 seconds)
-	if m.stuckTicks > 40 {
+	// repath after being stuck for 40 ticks or 3 retreat cycles
+	if m.stuckTicks > 40 || m.retreatCycles > 3 {
 		if m.tryRepath() {
 			return
 		}
@@ -345,6 +386,8 @@ func (m *Module) tryRepath() bool {
 	m.path = path
 	m.pathIndex = 0
 	m.stuckTicks = 0
+	m.retreatTicks = 0
+	m.retreatCycles = 0
 	return true
 }
 

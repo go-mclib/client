@@ -27,6 +27,8 @@ type Module struct {
 	// state
 	OnGround            bool
 	HorizontalCollision bool
+	XCollision          bool
+	ZCollision          bool
 
 	// input
 	ForwardImpulse float64 // -1.0 to 1.0
@@ -302,6 +304,8 @@ func (m *Module) tick() {
 	xCollided := notEqual(m.VelX, adjX)
 	zCollided := notEqual(m.VelZ, adjZ)
 	m.HorizontalCollision = xCollided || zCollided
+	m.XCollision = xCollided
+	m.ZCollision = zCollided
 	if vCol {
 		m.VelY = 0
 	}

@@ -53,13 +53,13 @@ const (
 
 	// double in vanilla (scale(0.5) uses double)
 	LavaSlowdown      = 0.5
-	LavaVerticalDrag   = 0.8
-	LavaGravityFactor  = 0.25
+	LavaVerticalDrag  = 0.8
+	LavaGravityFactor = 0.25
 
-	EntityPushStrength = 0.05
-	EntityPushMinDist  = 0.01
-	PlayerWidth        = 0.6
-	PlayerHeight       = 1.8
+	EntityPushStrength   = 0.05
+	EntityPushMinDist    = 0.01
+	PlayerWidth          = 0.6
+	PlayerHeight         = 1.8
 	PlayerSneakingHeight = 1.5
 
 	// double: Attributes.SNEAKING_SPEED default is 0.3 (double in attribute system)

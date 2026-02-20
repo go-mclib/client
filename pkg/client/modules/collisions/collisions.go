@@ -79,12 +79,17 @@ func (m *Module) CollideMovement(x, y, z, width, height float64, dx, dy, dz floa
 	verticalCollision = dy != adjY
 
 	// step-up: if horizontal collision while on ground (or about to land), try stepping up
+	// vanilla Entity.collide: only uses step-up if it gives strictly more horizontal distance
 	onGroundAfterCollision := verticalCollision && dy < 0
 	if StepUpHeight > 0 && horizontalCollision && (onGroundAfterCollision || m.IsOnGround(x, y, z, width)) {
 		stepResult := m.tryStepUp(x, y+float64(adjY), z, width, height, dx, dz, shapes)
 		if stepResult != nil {
-			adjX, adjY, adjZ = stepResult[0], float64(adjY)+stepResult[1], stepResult[2]
-			horizontalCollision = dx != adjX || dz != adjZ
+			stepHorizSq := stepResult[0]*stepResult[0] + stepResult[2]*stepResult[2]
+			currHorizSq := adjX*adjX + adjZ*adjZ
+			if stepHorizSq > currHorizSq {
+				adjX, adjY, adjZ = stepResult[0], float64(adjY)+stepResult[1], stepResult[2]
+				horizontalCollision = dx != adjX || dz != adjZ
+			}
 		}
 	}
 
@@ -92,9 +97,9 @@ func (m *Module) CollideMovement(x, y, z, width, height float64, dx, dy, dz floa
 }
 
 // tryStepUp attempts to step up over an obstacle.
-// Returns [dx, dy, dz] if stepping up allows more horizontal progress, nil otherwise.
+// Returns [dx, dy, dz] adjusted movement, or nil if no upward movement was possible.
+// The caller compares horizontal distance to decide whether to use the step-up result.
 func (m *Module) tryStepUp(x, y, z, width, height, dx, dz float64, existingShapes []AABB) []float64 {
-	// try moving up by StepUpHeight, then forward, then back down
 	stepBox := EntityAABB(x, y, z, width, height)
 	expanded := stepBox.ExpandTowards(dx, StepUpHeight, dz).Inflate(Epsilon, Epsilon, Epsilon)
 	shapes := m.getBlockCollisions(expanded)
@@ -107,6 +112,9 @@ func (m *Module) tryStepUp(x, y, z, width, height, dx, dz float64, existingShape
 	stepDY := StepUpHeight
 	for _, s := range shapes {
 		stepDY = stepBox.clipYCollide(s, stepDY)
+	}
+	if stepDY < Epsilon {
+		return nil // couldn't step up at all
 	}
 	stepBox = stepBox.Move(0, stepDY, 0)
 
@@ -139,16 +147,7 @@ func (m *Module) tryStepUp(x, y, z, width, height, dx, dz float64, existingShape
 		downDY = stepBox.clipYCollide(s, downDY)
 	}
 
-	// check if stepping up gained more horizontal distance
-	origHorizSq := dx*dx + dz*dz
-	_ = origHorizSq
-	stepHorizSq := stepDX*stepDX + stepDZ*stepDZ
-
-	// only use step-up if it improved horizontal movement
-	if stepHorizSq > Epsilon {
-		return []float64{stepDX, stepDY + downDY, stepDZ}
-	}
-	return nil
+	return []float64{stepDX, stepDY + downDY, stepDZ}
 }
 
 // getBlockCollisions returns all block collision AABBs within the given region.
