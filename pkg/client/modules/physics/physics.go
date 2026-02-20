@@ -298,7 +298,7 @@ func (m *Module) tick() {
 	origVelY := m.VelY
 	adjX, adjY, adjZ, _, vCol := col.CollideMovement(x, y, z, PlayerWidth, playerHeight, m.VelX, m.VelY, m.VelZ)
 
-	// horizontal collision detection with tolerance (1.18.2+: GrimMath.equal uses 1e-7)
+	// horizontal collision detection with tolerance (vanilla Mth.equal: 1e-5)
 	xCollided := notEqual(m.VelX, adjX)
 	zCollided := notEqual(m.VelZ, adjZ)
 	m.HorizontalCollision = xCollided || zCollided
@@ -502,10 +502,10 @@ func (m *Module) GetEffectiveSpeed() float64 {
 	return m.getEffectiveSpeed(s)
 }
 
-// notEqual returns true if two float64 values differ by more than 1e-7.
-// Matches GrimMath.equal tolerance for horizontal collision detection (1.18.2+).
+// notEqual returns true if two float64 values differ by more than 1e-5.
+// Matches vanilla Mth.equal (Math.abs(b - a) < 1.0E-5F).
 func notEqual(a, b float64) bool {
-	return math.Abs(a-b) > 1e-7
+	return math.Abs(a-b) >= 1e-5
 }
 
 // modifyInput processes raw movement input matching vanilla LocalPlayer.modifyInput:

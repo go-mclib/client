@@ -91,19 +91,24 @@ func (a AABB) Size() (x, y, z float64) {
 }
 
 // clipXCollide clips movement on the X axis against another AABB.
-// Returns adjusted dx after collision.
+// Matches VoxelShape.collideX: epsilon tolerance on perpendicular overlap and clip distance.
 func (a AABB) clipXCollide(other AABB, dx float64) float64 {
-	if other.MaxY <= a.MinY || other.MinY >= a.MaxY || other.MaxZ <= a.MinZ || other.MinZ >= a.MaxZ {
+	if math.Abs(dx) < Epsilon {
+		return 0
+	}
+	// perpendicular overlap with epsilon shrink (vanilla: entity bounds ± 1e-7)
+	if other.MaxY <= a.MinY+Epsilon || other.MinY >= a.MaxY-Epsilon ||
+		other.MaxZ <= a.MinZ+Epsilon || other.MinZ >= a.MaxZ-Epsilon {
 		return dx
 	}
-	if dx > 0 && other.MinX >= a.MaxX {
+	if dx > 0 {
 		d := other.MinX - a.MaxX
-		if d < dx {
+		if d >= -Epsilon && d < dx {
 			dx = d
 		}
-	} else if dx < 0 && other.MaxX <= a.MinX {
+	} else {
 		d := other.MaxX - a.MinX
-		if d > dx {
+		if d <= Epsilon && d > dx {
 			dx = d
 		}
 	}
@@ -112,17 +117,21 @@ func (a AABB) clipXCollide(other AABB, dx float64) float64 {
 
 // clipYCollide clips movement on the Y axis against another AABB.
 func (a AABB) clipYCollide(other AABB, dy float64) float64 {
-	if other.MaxX <= a.MinX || other.MinX >= a.MaxX || other.MaxZ <= a.MinZ || other.MinZ >= a.MaxZ {
+	if math.Abs(dy) < Epsilon {
+		return 0
+	}
+	if other.MaxX <= a.MinX+Epsilon || other.MinX >= a.MaxX-Epsilon ||
+		other.MaxZ <= a.MinZ+Epsilon || other.MinZ >= a.MaxZ-Epsilon {
 		return dy
 	}
-	if dy > 0 && other.MinY >= a.MaxY {
+	if dy > 0 {
 		d := other.MinY - a.MaxY
-		if d < dy {
+		if d >= -Epsilon && d < dy {
 			dy = d
 		}
-	} else if dy < 0 && other.MaxY <= a.MinY {
+	} else {
 		d := other.MaxY - a.MinY
-		if d > dy {
+		if d <= Epsilon && d > dy {
 			dy = d
 		}
 	}
@@ -131,17 +140,21 @@ func (a AABB) clipYCollide(other AABB, dy float64) float64 {
 
 // clipZCollide clips movement on the Z axis against another AABB.
 func (a AABB) clipZCollide(other AABB, dz float64) float64 {
-	if other.MaxX <= a.MinX || other.MinX >= a.MaxX || other.MaxY <= a.MinY || other.MinY >= a.MaxY {
+	if math.Abs(dz) < Epsilon {
+		return 0
+	}
+	if other.MaxX <= a.MinX+Epsilon || other.MinX >= a.MaxX-Epsilon ||
+		other.MaxY <= a.MinY+Epsilon || other.MinY >= a.MaxY-Epsilon {
 		return dz
 	}
-	if dz > 0 && other.MinZ >= a.MaxZ {
+	if dz > 0 {
 		d := other.MinZ - a.MaxZ
-		if d < dz {
+		if d >= -Epsilon && d < dz {
 			dz = d
 		}
-	} else if dz < 0 && other.MaxZ <= a.MinZ {
+	} else {
 		d := other.MaxZ - a.MinZ
-		if d > dz {
+		if d <= Epsilon && d > dz {
 			dz = d
 		}
 	}

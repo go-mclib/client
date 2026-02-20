@@ -2,6 +2,7 @@ package collisions
 
 import (
 	"math"
+	"slices"
 
 	"github.com/go-mclib/client/pkg/client"
 	"github.com/go-mclib/client/pkg/client/modules/world"
@@ -44,24 +45,34 @@ func (m *Module) CollideMovement(x, y, z, width, height float64, dx, dy, dz floa
 		return dx, dy, dz, false, false
 	}
 
-	// resolve Y first (gravity dominates), then X, then Z
 	adjX, adjY, adjZ = dx, dy, dz
 
-	// Y axis
+	// vanilla axis order (Direction.axisStepOrder): Y always first,
+	// then resolve the dominant horizontal axis before the minor one.
+	// if |dx| < |dz|: Y → Z → X; else Y → X → Z
 	for _, s := range shapes {
 		adjY = entityBox.clipYCollide(s, adjY)
 	}
 	entityBox = entityBox.Move(0, adjY, 0)
 
-	// X axis
-	for _, s := range shapes {
-		adjX = entityBox.clipXCollide(s, adjX)
-	}
-	entityBox = entityBox.Move(adjX, 0, 0)
-
-	// Z axis
-	for _, s := range shapes {
-		adjZ = entityBox.clipZCollide(s, adjZ)
+	if math.Abs(dx) < math.Abs(dz) {
+		// Y → Z → X
+		for _, s := range shapes {
+			adjZ = entityBox.clipZCollide(s, adjZ)
+		}
+		entityBox = entityBox.Move(0, 0, adjZ)
+		for _, s := range shapes {
+			adjX = entityBox.clipXCollide(s, adjX)
+		}
+	} else {
+		// Y → X → Z
+		for _, s := range shapes {
+			adjX = entityBox.clipXCollide(s, adjX)
+		}
+		entityBox = entityBox.Move(adjX, 0, 0)
+		for _, s := range shapes {
+			adjZ = entityBox.clipZCollide(s, adjZ)
+		}
 	}
 
 	horizontalCollision = dx != adjX || dz != adjZ
@@ -99,22 +110,31 @@ func (m *Module) tryStepUp(x, y, z, width, height, dx, dz float64, existingShape
 	}
 	stepBox = stepBox.Move(0, stepDY, 0)
 
-	// move forward X
+	// horizontal axes in vanilla axis order
 	stepDX := dx
-	for _, s := range shapes {
-		stepDX = stepBox.clipXCollide(s, stepDX)
-	}
-	stepBox = stepBox.Move(stepDX, 0, 0)
-
-	// move forward Z
 	stepDZ := dz
-	for _, s := range shapes {
-		stepDZ = stepBox.clipZCollide(s, stepDZ)
+	if math.Abs(dx) < math.Abs(dz) {
+		for _, s := range shapes {
+			stepDZ = stepBox.clipZCollide(s, stepDZ)
+		}
+		stepBox = stepBox.Move(0, 0, stepDZ)
+		for _, s := range shapes {
+			stepDX = stepBox.clipXCollide(s, stepDX)
+		}
+		stepBox = stepBox.Move(stepDX, 0, 0)
+	} else {
+		for _, s := range shapes {
+			stepDX = stepBox.clipXCollide(s, stepDX)
+		}
+		stepBox = stepBox.Move(stepDX, 0, 0)
+		for _, s := range shapes {
+			stepDZ = stepBox.clipZCollide(s, stepDZ)
+		}
+		stepBox = stepBox.Move(0, 0, stepDZ)
 	}
 
 	// move back down
 	downDY := -stepDY
-	stepBox = stepBox.Move(0, 0, stepDZ)
 	for _, s := range shapes {
 		downDY = stepBox.clipYCollide(s, downDY)
 	}
@@ -179,24 +199,14 @@ func (m *Module) IsOnGround(x, y, z, width float64) bool {
 		MaxX: x + hw, MaxY: y, MaxZ: z + hw,
 	}
 	shapes := m.getBlockCollisions(feetBox)
-	for _, s := range shapes {
-		if feetBox.Intersects(s) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(shapes, feetBox.Intersects)
 }
 
 // CanFitAt checks if an entity of the given size can exist at the position without colliding.
 func (m *Module) CanFitAt(x, y, z, width, height float64) bool {
 	entityBox := EntityAABB(x, y, z, width, height)
 	shapes := m.getBlockCollisions(entityBox)
-	for _, s := range shapes {
-		if entityBox.Intersects(s) {
-			return false
-		}
-	}
-	return true
+	return !slices.ContainsFunc(shapes, entityBox.Intersects)
 }
 
 // GetBlockCollisions returns all block collision AABBs within the given region (public).
