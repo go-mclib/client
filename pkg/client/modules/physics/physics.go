@@ -439,7 +439,10 @@ func (m *Module) applyLavaPhysics() {
 	m.VelY -= Gravity * LavaGravityFactor
 }
 
-// jump applies jump velocity (LivingEntity.jumpFromGround)
+// jump applies jump velocity (LivingEntity.jumpFromGround).
+// Does NOT set OnGround = false — vanilla sets it later inside Entity.move()
+// after collision resolution. Keeping OnGround = true ensures the jump tick
+// uses ground friction/speed for input, matching vanilla behavior.
 func (m *Module) jump(s *self.Module, yaw float64) {
 	jp := m.getJumpPower(s)
 	m.VelY = max(jp, m.VelY)
@@ -448,7 +451,6 @@ func (m *Module) jump(s *self.Module, yaw float64) {
 		m.VelX += -math.Sin(angle) * SprintJumpBoost
 		m.VelZ += math.Cos(angle) * SprintJumpBoost
 	}
-	m.OnGround = false
 }
 
 // getJumpPower returns jump velocity accounting for Jump Boost effect.
