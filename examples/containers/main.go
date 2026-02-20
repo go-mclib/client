@@ -209,7 +209,7 @@ func main() {
 			time.Sleep(200 * time.Millisecond)
 		}
 
-		_ = s.LookAt(float64(cx)+0.5, float64(cy)+0.5, float64(cz)+0.5)
+		s.LookAt(float64(cx)+0.5, float64(cy)+0.5, float64(cz)+0.5)
 		time.Sleep(50 * time.Millisecond)
 
 		if err := c.InteractBlock(cx, cy, cz, 1, 0, 0.5, 0.5, 0.5); err != nil {

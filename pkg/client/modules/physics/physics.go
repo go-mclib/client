@@ -27,18 +27,18 @@ type Module struct {
 	// state
 	OnGround            bool
 	HorizontalCollision bool
-	Sprinting           bool
 
 	// input
 	ForwardImpulse float64 // -1.0 to 1.0
 	StrafeImpulse  float64 // -1.0 to 1.0
 	Jumping        bool
-	Sneaking       bool
 
 	// position packet tracking (LocalPlayer.sendPosition)
 	lastSentX, lastSentY, lastSentZ float64
 	lastSentYaw, lastSentPitch      float32
 	lastSentOnGround                bool
+	lastSentHorizontalCollision     bool
+	lastSentSprinting               bool
 	lastSentSneaking                bool
 	positionReminder                int
 
@@ -58,11 +58,23 @@ func (m *Module) Name() string { return ModuleName }
 func (m *Module) Init(c *client.Client) {
 	m.client = c
 
-	// start tick loop when player spawns
 	s := self.From(c)
 	if s != nil {
+		// start tick loop when player spawns
 		s.OnSpawn(func() {
 			m.startTickLoop()
+		})
+
+		// sync last-sent tracking after server teleport so sendPosition
+		// doesn't re-send a flying packet for the same position
+		s.OnPosition(func(x, y, z float64) {
+			m.lastSentX = x
+			m.lastSentY = y
+			m.lastSentZ = z
+			m.lastSentYaw = float32(s.Yaw)
+			m.lastSentPitch = float32(s.Pitch)
+			m.lastSentOnGround = m.OnGround
+			m.positionReminder = 0
 		})
 	}
 }
@@ -77,11 +89,9 @@ func (m *Module) Reset() {
 	m.VelZ = 0
 	m.OnGround = false
 	m.HorizontalCollision = false
-	m.Sprinting = false
 	m.ForwardImpulse = 0
 	m.StrafeImpulse = 0
 	m.Jumping = false
-	m.Sneaking = false
 	m.positionReminder = 0
 }
 
@@ -99,13 +109,10 @@ func (m *Module) OnTick(cb func()) { m.onTick = append(m.onTick, cb) }
 
 // actions
 
-func (m *Module) SetSprinting(sprinting bool) { m.Sprinting = sprinting }
-
-func (m *Module) SetInput(forward, strafe float64, jumping, sneaking bool) {
+func (m *Module) SetInput(forward, strafe float64, jumping bool) {
 	m.ForwardImpulse = forward
 	m.StrafeImpulse = strafe
 	m.Jumping = jumping
-	m.Sneaking = sneaking
 }
 
 // HandlePacket handles velocity-related packets for the player's own entity.
@@ -243,27 +250,32 @@ func (m *Module) tick() {
 	z := float64(s.Z)
 	yaw := float64(s.Yaw)
 
-	// apply sneaking input scaling (LocalPlayer.modifyInput)
-	forwardImpulse := m.ForwardImpulse
-	strafeImpulse := m.StrafeImpulse
-	if m.Sneaking {
-		forwardImpulse *= SneakingSpeedFactor
-		strafeImpulse *= SneakingSpeedFactor
-	}
+	// apply fluid flow pushing (Entity.baseTick in vanilla, before aiStep)
+	m.applyFluidPushing(x, y, z, w)
+
+	// process inputs (LocalPlayer.modifyInput: 0.98 friction + sneaking + square normalization)
+	forwardImpulse, strafeImpulse := modifyInput(m.ForwardImpulse, m.StrafeImpulse, s.Sneaking)
 
 	// effective player height (1.5 when sneaking, 1.8 otherwise)
 	playerHeight := PlayerHeight
-	if m.Sneaking {
+	if s.Sneaking {
 		playerHeight = PlayerSneakingHeight
 	}
 
-	// jump
+	// movement threshold zeroing (LivingEntity.aiStep lines 2917-2940)
+	// for players: zero horizontal velocity if magnitude² < 9e-6
+	if m.VelX*m.VelX+m.VelZ*m.VelZ < 9.0e-6 {
+		m.VelX = 0
+		m.VelZ = 0
+	}
+	if math.Abs(m.VelY) < 0.003 {
+		m.VelY = 0
+	}
+
+	// jump (after threshold zeroing, before travel)
 	if m.Jumping && m.OnGround {
 		m.jump(s, yaw)
 	}
-
-	// apply fluid flow pushing (Entity.baseTick in vanilla, before travel)
-	m.applyFluidPushing(x, y, z, w)
 
 	// determine environment
 	feetBlock := w.GetBlock(int(math.Floor(x)), int(math.Floor(y)), int(math.Floor(z)))
@@ -283,19 +295,20 @@ func (m *Module) tick() {
 
 	// resolve collisions (this.move in vanilla)
 	origVelY := m.VelY
-	adjX, adjY, adjZ, hCol, vCol := col.CollideMovement(x, y, z, PlayerWidth, playerHeight, m.VelX, m.VelY, m.VelZ)
+	adjX, adjY, adjZ, _, vCol := col.CollideMovement(x, y, z, PlayerWidth, playerHeight, m.VelX, m.VelY, m.VelZ)
 
-	m.HorizontalCollision = hCol
+	// horizontal collision detection with tolerance (1.18.2+: GrimMath.equal uses 1e-7)
+	xCollided := notEqual(m.VelX, adjX)
+	zCollided := notEqual(m.VelZ, adjZ)
+	m.HorizontalCollision = xCollided || zCollided
 	if vCol {
 		m.VelY = 0
 	}
-	if hCol {
-		if m.VelX != adjX {
-			m.VelX = 0
-		}
-		if m.VelZ != adjZ {
-			m.VelZ = 0
-		}
+	if xCollided {
+		m.VelX = 0
+	}
+	if zCollided {
+		m.VelZ = 0
 	}
 
 	// update position
@@ -308,9 +321,18 @@ func (m *Module) tick() {
 
 	m.OnGround = vCol && origVelY < 0
 
+	// block speed factor (Entity.move: applied after collision, before friction)
+	if !inWater && !inLava {
+		speedFactor := GetBlockSpeedFactorAt(w, newX, newY, newZ)
+		if speedFactor != 1.0 {
+			m.VelX *= speedFactor
+			m.VelZ *= speedFactor
+		}
+	}
+
 	// post-collision: apply gravity and friction (after move, matching vanilla)
 	if inWater {
-		m.applyWaterPhysics()
+		m.applyWaterPhysics(s)
 	} else if inLava {
 		m.applyLavaPhysics()
 	} else {
@@ -320,21 +342,35 @@ func (m *Module) tick() {
 	// entity pushing
 	m.applyEntityPushing(newX, newY, newZ, playerHeight)
 
-	// send sneaking state change
-	if m.Sneaking != m.lastSentSneaking {
-		m.lastSentSneaking = m.Sneaking
-		actionID := ns.VarInt(1) // stop sneaking
-		if m.Sneaking {
-			actionID = 0 // start sneaking
+	// send sprinting state change (vanilla: sendIsSprintingIfNeeded, before sendPosition)
+	if s.Sprinting != m.lastSentSprinting {
+		m.lastSentSprinting = s.Sprinting
+		actionID := ns.VarInt(4) // stop sprinting
+		if s.Sprinting {
+			actionID = 3 // start sprinting
 		}
 		m.client.SendPacket(&packets.C2SPlayerCommand{
-			EntityId: ns.VarInt(self.From(m.client).EntityID),
+			EntityId: ns.VarInt(s.EntityID),
 			ActionId: actionID,
 		})
 	}
 
-	// send position
+	// send sneaking state change
+	if s.Sneaking != m.lastSentSneaking {
+		m.lastSentSneaking = s.Sneaking
+		actionID := ns.VarInt(1) // stop sneaking
+		if s.Sneaking {
+			actionID = 0 // start sneaking
+		}
+		m.client.SendPacket(&packets.C2SPlayerCommand{
+			EntityId: ns.VarInt(s.EntityID),
+			ActionId: actionID,
+		})
+	}
+
+	// send position then tick end (vanilla: Minecraft.tick sends ClientTickEnd after all tick logic)
 	m.sendPosition(s)
+	m.client.SendPacket(&packets.C2SClientTickEnd{})
 }
 
 // applyAirInputScaled adds movement input to velocity (pre-collision) with pre-scaled impulses.
@@ -352,11 +388,10 @@ func (m *Module) applyAirInputScaled(s *self.Module, x, y, z, yaw float64, w *wo
 	var speed float64
 	if m.OnGround {
 		baseSpeed := m.getEffectiveSpeed(s)
-		if m.Sprinting {
+		if s.Sprinting {
 			baseSpeed *= (1.0 + SprintModifier)
 		}
 		speed = baseSpeed * (FrictionSpeedFactor / (friction * friction * friction))
-		speed *= GetBlockSpeedFactor(belowBlock)
 	} else {
 		speed = FlyingSpeed
 	}
@@ -395,9 +430,9 @@ func (m *Module) applyWaterInputScaled(yaw, forward, strafe float64) {
 }
 
 // applyWaterPhysics applies water drag and gravity after collision (post-move).
-func (m *Module) applyWaterPhysics() {
+func (m *Module) applyWaterPhysics(s *self.Module) {
 	slowDown := WaterSlowdown
-	if m.Sprinting {
+	if s.Sprinting {
 		slowDown = WaterSprintSlowdown
 	}
 	m.VelX *= slowDown
@@ -425,7 +460,7 @@ func (m *Module) applyLavaPhysics() {
 func (m *Module) jump(s *self.Module, yaw float64) {
 	jp := m.getJumpPower(s)
 	m.VelY = max(jp, m.VelY)
-	if m.Sprinting {
+	if s.Sprinting {
 		angle := yaw * math.Pi / 180.0
 		m.VelX += -math.Sin(angle) * SprintJumpBoost
 		m.VelZ += math.Cos(angle) * SprintJumpBoost
@@ -482,6 +517,52 @@ func (m *Module) GetEffectiveSpeed() float64 {
 		return PlayerSpeed
 	}
 	return m.getEffectiveSpeed(s)
+}
+
+// notEqual returns true if two float64 values differ by more than 1e-7.
+// Matches GrimMath.equal tolerance for horizontal collision detection (1.18.2+).
+func notEqual(a, b float64) bool {
+	return math.Abs(a-b) > 1e-7
+}
+
+// modifyInput processes raw movement input matching vanilla LocalPlayer.modifyInput:
+// 1. scale by InputFriction (0.98)
+// 2. scale by SneakingSpeedFactor if sneaking
+// 3. normalize diagonal to unit square distance (modifyInputSpeedForSquareMovement)
+func modifyInput(forward, strafe float64, sneaking bool) (float64, float64) {
+	if forward == 0 && strafe == 0 {
+		return 0, 0
+	}
+
+	forward *= InputFriction
+	strafe *= InputFriction
+
+	if sneaking {
+		forward *= SneakingSpeedFactor
+		strafe *= SneakingSpeedFactor
+	}
+
+	// modifyInputSpeedForSquareMovement: clamp magnitude to distance-to-unit-square
+	length := math.Sqrt(forward*forward + strafe*strafe)
+	if length > 0 {
+		dirF := forward / length
+		dirS := strafe / length
+		absF := math.Abs(dirF)
+		absS := math.Abs(dirS)
+		// distanceToUnitSquare: 1 / cos(atan(min/max))
+		var tan float64
+		if absS > absF {
+			tan = absF / absS
+		} else {
+			tan = absS / absF
+		}
+		distToSquare := math.Sqrt(1 + tan*tan)
+		modifiedLength := min(length*distToSquare, 1.0)
+		forward = dirF * modifiedLength
+		strafe = dirS * modifiedLength
+	}
+
+	return forward, strafe
 }
 
 // moveRelative computes input vector rotated by yaw (Entity.getInputVector)
@@ -597,7 +678,7 @@ func (m *Module) sendPosition(s *self.Module) {
 			Yaw: ns.Float32(yaw), Pitch: ns.Float32(pitch),
 			Flags: flags,
 		})
-	} else if m.OnGround != m.lastSentOnGround {
+	} else if m.OnGround != m.lastSentOnGround || m.HorizontalCollision != m.lastSentHorizontalCollision {
 		m.client.SendPacket(&packets.C2SMovePlayerStatusOnly{
 			Flags: flags,
 		})
@@ -614,4 +695,5 @@ func (m *Module) sendPosition(s *self.Module) {
 		m.lastSentPitch = pitch
 	}
 	m.lastSentOnGround = m.OnGround
+	m.lastSentHorizontalCollision = m.HorizontalCollision
 }

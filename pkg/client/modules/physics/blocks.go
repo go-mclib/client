@@ -1,6 +1,9 @@
 package physics
 
 import (
+	"math"
+
+	"github.com/go-mclib/client/pkg/client/modules/world"
 	"github.com/go-mclib/data/pkg/data/blocks"
 )
 
@@ -20,13 +23,15 @@ var blockSpeedFactor = map[string]float64{
 
 // precomputed block IDs for fluid detection
 var (
-	waterBlockID int32
-	lavaBlockID  int32
+	waterBlockID        int32
+	lavaBlockID         int32
+	bubbleColumnBlockID int32
 )
 
 func init() {
 	waterBlockID = blocks.BlockID("minecraft:water")
 	lavaBlockID = blocks.BlockID("minecraft:lava")
+	bubbleColumnBlockID = blocks.BlockID("minecraft:bubble_column")
 }
 
 // GetBlockFriction returns the friction value for a block state.
@@ -39,14 +44,38 @@ func GetBlockFriction(stateID int32) float64 {
 	return DefaultBlockFriction
 }
 
-// GetBlockSpeedFactor returns the speed factor for a block state.
-func GetBlockSpeedFactor(stateID int32) float64 {
-	blockID, _ := blocks.StateProperties(int(stateID))
+func blockSpeedFactorByID(blockID int32) float64 {
 	name := blocks.BlockName(blockID)
 	if f, ok := blockSpeedFactor[name]; ok {
 		return f
 	}
 	return 1.0
+}
+
+// GetBlockSpeedFactorAt returns the speed factor at a world position.
+// Matches vanilla Entity.getBlockSpeedFactor():
+// 1. check block at feet; if water/bubble_column return its factor
+// 2. if feet block factor != 1.0, return it
+// 3. otherwise return factor of the block below (y - 0.5)
+func GetBlockSpeedFactorAt(w *world.Module, x, y, z float64) float64 {
+	bx, by, bz := int(math.Floor(x)), int(math.Floor(y)), int(math.Floor(z))
+	feetState := w.GetBlock(bx, by, bz)
+	feetBlockID, _ := blocks.StateProperties(int(feetState))
+
+	// water and bubble columns return their own speed factor (1.0)
+	if feetBlockID == waterBlockID || feetBlockID == bubbleColumnBlockID {
+		return blockSpeedFactorByID(feetBlockID)
+	}
+
+	feetFactor := blockSpeedFactorByID(feetBlockID)
+	if feetFactor != 1.0 {
+		return feetFactor
+	}
+
+	// check block below (getBlockPosBelowThatAffectsMyMovement = y - 0.5)
+	belowState := w.GetBlock(int(math.Floor(x)), int(math.Floor(y-0.5)), int(math.Floor(z)))
+	belowBlockID, _ := blocks.StateProperties(int(belowState))
+	return blockSpeedFactorByID(belowBlockID)
 }
 
 // IsWater returns true if the block state is water.

@@ -35,6 +35,7 @@ const (
 	TicksPerSecond       = 20
 	TickDuration         = 50 * time.Millisecond
 	FrictionSpeedFactor  = 0.21600002 // 0.216 = (0.6^3 * 0.91^3) normalization factor
+	InputFriction        = 0.98       // LivingEntity.INPUT_FRICTION, applied to xxa/zza in applyInput
 
 	// effect modifiers (MobEffects.java + LivingEntity.java)
 	JumpBoostPerLevel    = 0.1  // added to jump velocity per amplifier+1

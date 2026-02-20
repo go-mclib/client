@@ -155,18 +155,13 @@ func (m *Module) performAttack(e *entities.Entity) error {
 		return fmt.Errorf("self module not registered")
 	}
 
-	_ = s.LookAt(e.X, e.Y+e.EyeHeight, e.Z)
+	s.LookAt(e.X, e.Y+e.EyeHeight, e.Z)
 
 	// send attack packet
-	sneaking := false
-	p := physics.From(m.client)
-	if p != nil {
-		sneaking = p.Sneaking
-	}
 	m.client.SendPacket(&packets.C2SInteract{
 		EntityId:        ns.VarInt(e.ID),
 		Type:            1, // attack
-		SneakKeyPressed: ns.Boolean(sneaking),
+		SneakKeyPressed: ns.Boolean(s.Sneaking),
 	})
 
 	// swing arm

@@ -217,7 +217,7 @@ func (sr *sorter) openChest(pos blockPos) bool {
 	}
 
 	// look at the chest and interact
-	_ = sr.s.LookAt(float64(pos.x)+0.5, float64(pos.y)+0.5, float64(pos.z)+0.5)
+	sr.s.LookAt(float64(pos.x)+0.5, float64(pos.y)+0.5, float64(pos.z)+0.5)
 	time.Sleep(50 * time.Millisecond)
 
 	ch := make(chan struct{}, 1)

@@ -31,6 +31,10 @@ type Module struct {
 	goalY      float64
 	goalZ      float64
 
+	// saved sprint/sneak state to restore after navigation
+	savedSprinting bool
+	savedSneaking  bool
+
 	onPathFound          []func(path []PathNode)
 	onNavigationComplete []func(reached bool)
 }
@@ -126,6 +130,8 @@ func (m *Module) NavigateTo(goalX, goalY, goalZ float64) error {
 		return err
 	}
 
+	s := self.From(m.client)
+
 	m.mu.Lock()
 	m.path = path
 	m.pathIndex = 0
@@ -134,6 +140,10 @@ func (m *Module) NavigateTo(goalX, goalY, goalZ float64) error {
 	m.goalX = goalX
 	m.goalY = goalY
 	m.goalZ = goalZ
+	if s != nil {
+		m.savedSprinting = s.Sprinting
+		m.savedSneaking = s.Sneaking
+	}
 	m.mu.Unlock()
 
 	return nil
@@ -148,11 +158,15 @@ func (m *Module) Stop() {
 		m.navigating = false
 		m.path = nil
 
-		// clear physics input
+		// clear physics input, restore sprint/sneak state
 		p := physics.From(m.client)
 		if p != nil {
-			p.SetInput(0, 0, false, false)
-			p.SetSprinting(false)
+			p.SetInput(0, 0, false)
+		}
+		s := self.From(m.client)
+		if s != nil {
+			s.Sprinting = m.savedSprinting
+			s.Sneaking = m.savedSneaking
 		}
 	}
 }
@@ -261,23 +275,24 @@ func (m *Module) navigationTick() {
 	}
 
 	// face waypoint
-	_ = s.LookAt(wpX, wpY+playerHeight, wpZ)
+	s.LookAt(wpX, wpY+playerHeight, wpZ)
 
 	// set movement input
-	sneaking := wp.Sneaking
+	sneaking := s.Sneaking || wp.Sneaking
 	var jumping, sprinting bool
 	if wp.Jump {
-		// sprint-jump: sprint and jump as soon as on ground
+		// sprint-jump: always sprint (required for distance)
 		sprinting = true
 		jumping = p.OnGround
 		sneaking = false
 	} else {
 		jumping = dy > 0.5 && p.OnGround
-		sprinting = horizDist > 5.0 && !sneaking
+		sprinting = s.Sprinting && horizDist > 5.0 && !sneaking
 	}
 
-	p.SetInput(1.0, 0, jumping, sneaking)
-	p.SetSprinting(sprinting)
+	s.Sneaking = sneaking
+	s.Sprinting = sprinting
+	p.SetInput(1.0, 0, jumping)
 
 	// stuck detection
 	moveDist := math.Sqrt((x-m.lastNavX)*(x-m.lastNavX) + (z-m.lastNavZ)*(z-m.lastNavZ))
@@ -339,8 +354,12 @@ func (m *Module) completeNavigation(reached bool) {
 
 	p := physics.From(m.client)
 	if p != nil {
-		p.SetInput(0, 0, false, false)
-		p.SetSprinting(false)
+		p.SetInput(0, 0, false)
+	}
+	s := self.From(m.client)
+	if s != nil {
+		s.Sprinting = m.savedSprinting
+		s.Sneaking = m.savedSneaking
 	}
 
 	for _, cb := range m.onNavigationComplete {

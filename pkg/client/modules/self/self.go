@@ -32,6 +32,10 @@ type Module struct {
 	DeathLocation   ns.PrefixedOptional[ns.GlobalPos]
 	Gamemode        ns.Uint8
 
+	// movement state flags (readable/settable by any module or user code)
+	Sprinting bool
+	Sneaking  bool
+
 	activeEffects map[int32]*EffectInstance
 
 	onDeath     []func()
@@ -67,6 +71,8 @@ func (m *Module) Reset() {
 	m.Z = 0
 	m.Yaw = 0
 	m.Pitch = 0
+	m.Sprinting = false
+	m.Sneaking = false
 	clear(m.activeEffects)
 }
 

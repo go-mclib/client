@@ -63,13 +63,13 @@ func main() {
 		}
 
 		if *rotate {
-			_ = s.LookAt(closest.X, closest.Y+closest.EyeHeight, closest.Z)
+			s.LookAt(closest.X, closest.Y+closest.EyeHeight, closest.Z)
 		}
 
 		c.SendPacket(&packets.C2SInteract{
 			EntityId:        ns.VarInt(closest.ID),
 			Type:            1,
-			SneakKeyPressed: ns.Boolean(p.Sneaking),
+			SneakKeyPressed: ns.Boolean(s.Sneaking),
 		})
 		c.SendPacket(&packets.C2SSwing{Hand: 0})
 		ticksSinceAttack = 0

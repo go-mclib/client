@@ -32,22 +32,21 @@ func (m *Module) MoveRelative(dx, dy, dz float64, onGround, pushingAgainstWall b
 	return m.Move(float64(m.X)+dx, float64(m.Y)+dy, float64(m.Z)+dz, onGround, pushingAgainstWall)
 }
 
-func (m *Module) LookAt(x, y, z float64) error {
+// LookAt sets yaw/pitch to face the given world position.
+// The rotation is sent to the server by the physics module's sendPosition.
+func (m *Module) LookAt(x, y, z float64) {
 	yaw, pitch := WorldPosToYawPitch(float64(m.X), float64(m.Y)+EyeHeight, float64(m.Z), x, y, z)
-	return m.SetRotation(yaw, pitch)
+	m.SetRotation(yaw, pitch)
 }
 
-func (m *Module) SetRotation(yaw, pitch float64) error {
+// SetRotation sets yaw and pitch.
+// The rotation is sent to the server by the physics module's sendPosition.
+func (m *Module) SetRotation(yaw, pitch float64) {
 	m.Yaw = ns.Float32(yaw)
 	m.Pitch = ns.Float32(pitch)
-	return m.client.WritePacket(&packets.C2SMovePlayerRot{
-		Yaw:   ns.Float32(yaw),
-		Pitch: ns.Float32(pitch),
-		Flags: 0x01, // on ground
-	})
 }
 
-func (m *Module) Rotate(deltaYaw, deltaPitch float64) error {
+func (m *Module) Rotate(deltaYaw, deltaPitch float64) {
 	newYaw := float64(m.Yaw) + deltaYaw
 	newPitch := float64(m.Pitch) + deltaPitch
 
@@ -62,7 +61,7 @@ func (m *Module) Rotate(deltaYaw, deltaPitch float64) error {
 	for newYaw >= 360 {
 		newYaw -= 360
 	}
-	return m.SetRotation(newYaw, newPitch)
+	m.SetRotation(newYaw, newPitch)
 }
 
 func (m *Module) Respawn() error {
