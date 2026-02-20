@@ -32,6 +32,8 @@ type Module struct {
 	DeathLocation   ns.PrefixedOptional[ns.GlobalPos]
 	Gamemode        ns.Uint8
 
+	activeEffects map[int32]*EffectInstance
+
 	onDeath     []func()
 	onSpawn     []func()
 	onHealthSet []func(health, food float32)
@@ -45,6 +47,7 @@ func New() *Module {
 		Health:         20,
 		Food:           20,
 		FoodSaturation: 5,
+		activeEffects:  make(map[int32]*EffectInstance),
 	}
 }
 
@@ -64,6 +67,7 @@ func (m *Module) Reset() {
 	m.Z = 0
 	m.Yaw = 0
 	m.Pitch = 0
+	clear(m.activeEffects)
 }
 
 // From retrieves the self module from a client.
@@ -103,6 +107,10 @@ func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 		m.handleCombatKill(pkt)
 	case packet_ids.S2CGameEventID:
 		m.handleGameEvent(pkt)
+	case packet_ids.S2CUpdateMobEffectID:
+		m.handleUpdateMobEffect(pkt)
+	case packet_ids.S2CRemoveMobEffectID:
+		m.handleRemoveMobEffect(pkt)
 	}
 }
 

@@ -229,6 +229,9 @@ func (m *Module) tick() {
 		return
 	}
 
+	// tick effect durations (vanilla: LivingEntity.tickEffects before aiStep)
+	s.TickEffects()
+
 	// fire tick callbacks FIRST so navigation can set input for this tick
 	// (matches vanilla: applyInput runs before travel)
 	for _, cb := range m.onTick {
@@ -256,7 +259,7 @@ func (m *Module) tick() {
 
 	// jump
 	if m.Jumping && m.OnGround {
-		m.jump(yaw)
+		m.jump(s, yaw)
 	}
 
 	// apply fluid flow pushing (Entity.baseTick in vanilla, before travel)
@@ -275,7 +278,7 @@ func (m *Module) tick() {
 	} else if inLava {
 		m.applyLavaInputScaled(yaw, forwardImpulse, strafeImpulse)
 	} else {
-		blockFriction = m.applyAirInputScaled(x, y, z, yaw, w, forwardImpulse, strafeImpulse)
+		blockFriction = m.applyAirInputScaled(s, x, y, z, yaw, w, forwardImpulse, strafeImpulse)
 	}
 
 	// resolve collisions (this.move in vanilla)
@@ -311,7 +314,7 @@ func (m *Module) tick() {
 	} else if inLava {
 		m.applyLavaPhysics()
 	} else {
-		m.applyAirPhysics(blockFriction)
+		m.applyAirPhysics(s, blockFriction)
 	}
 
 	// entity pushing
@@ -336,7 +339,7 @@ func (m *Module) tick() {
 
 // applyAirInputScaled adds movement input to velocity (pre-collision) with pre-scaled impulses.
 // Returns the block friction for use in post-collision physics.
-func (m *Module) applyAirInputScaled(x, y, z, yaw float64, w *world.Module, forward, strafe float64) float64 {
+func (m *Module) applyAirInputScaled(s *self.Module, x, y, z, yaw float64, w *world.Module, forward, strafe float64) float64 {
 	belowBlock := w.GetBlock(int(math.Floor(x)), int(math.Floor(y-0.5)), int(math.Floor(z)))
 	var blockFriction float64
 	if m.OnGround {
@@ -348,7 +351,7 @@ func (m *Module) applyAirInputScaled(x, y, z, yaw float64, w *world.Module, forw
 
 	var speed float64
 	if m.OnGround {
-		baseSpeed := PlayerSpeed
+		baseSpeed := m.getEffectiveSpeed(s)
 		if m.Sprinting {
 			baseSpeed *= (1.0 + SprintModifier)
 		}
@@ -365,10 +368,20 @@ func (m *Module) applyAirInputScaled(x, y, z, yaw float64, w *world.Module, forw
 	return blockFriction
 }
 
-// applyAirPhysics applies gravity and friction after collision (post-move).
-func (m *Module) applyAirPhysics(blockFriction float64) {
+// applyAirPhysics applies gravity/levitation and friction after collision (post-move).
+// Matches LivingEntity.travelInAir: levitation replaces gravity, slow falling caps it.
+func (m *Module) applyAirPhysics(s *self.Module, blockFriction float64) {
 	friction := blockFriction * AirFrictionMul
-	m.VelY -= Gravity
+
+	levAmp := s.EffectAmplifier(effectLevitation)
+	if levAmp >= 0 {
+		// levitation replaces gravity: lerp toward target upward velocity
+		target := LevitationPerLevel * float64(levAmp+1)
+		m.VelY += (target - m.VelY) * LevitationLerpFactor
+	} else {
+		m.VelY -= m.getEffectiveGravity(s)
+	}
+
 	m.VelX *= friction
 	m.VelZ *= friction
 	m.VelY *= VerticalAirFriction
@@ -409,14 +422,66 @@ func (m *Module) applyLavaPhysics() {
 }
 
 // jump applies jump velocity (LivingEntity.jumpFromGround)
-func (m *Module) jump(yaw float64) {
-	m.VelY = JumpPower
+func (m *Module) jump(s *self.Module, yaw float64) {
+	jp := m.getJumpPower(s)
+	m.VelY = max(jp, m.VelY)
 	if m.Sprinting {
 		angle := yaw * math.Pi / 180.0
 		m.VelX += -math.Sin(angle) * SprintJumpBoost
 		m.VelZ += math.Cos(angle) * SprintJumpBoost
 	}
 	m.OnGround = false
+}
+
+// getJumpPower returns jump velocity accounting for Jump Boost effect.
+// Matches LivingEntity.getJumpPower + getJumpBoostPower.
+func (m *Module) getJumpPower(s *self.Module) float64 {
+	power := JumpPower
+	amp := s.EffectAmplifier(effectJumpBoost)
+	if amp >= 0 {
+		power += JumpBoostPerLevel * float64(amp+1)
+	}
+	return power
+}
+
+// GetJumpPower returns current jump power accounting for active effects.
+func (m *Module) GetJumpPower() float64 {
+	s := self.From(m.client)
+	if s == nil {
+		return JumpPower
+	}
+	return m.getJumpPower(s)
+}
+
+// getEffectiveGravity returns gravity, capped to 0.01 when slow falling and descending.
+// Matches LivingEntity.getEffectiveGravity.
+func (m *Module) getEffectiveGravity(s *self.Module) float64 {
+	if m.VelY <= 0 && s.HasEffect(effectSlowFalling) {
+		return min(Gravity, SlowFallingGravity)
+	}
+	return Gravity
+}
+
+// getEffectiveSpeed returns base movement speed accounting for Speed and Slowness effects.
+// Matches attribute modifiers with ADD_MULTIPLIED_TOTAL operation.
+func (m *Module) getEffectiveSpeed(s *self.Module) float64 {
+	speed := PlayerSpeed
+	if amp := s.EffectAmplifier(effectSpeed); amp >= 0 {
+		speed *= 1.0 + SpeedPerLevel*float64(amp+1)
+	}
+	if amp := s.EffectAmplifier(effectSlowness); amp >= 0 {
+		speed *= 1.0 - SlownessPerLevel*float64(amp+1)
+	}
+	return max(speed, 0)
+}
+
+// GetEffectiveSpeed returns current base movement speed accounting for active effects.
+func (m *Module) GetEffectiveSpeed() float64 {
+	s := self.From(m.client)
+	if s == nil {
+		return PlayerSpeed
+	}
+	return m.getEffectiveSpeed(s)
 }
 
 // moveRelative computes input vector rotated by yaw (Entity.getInputVector)

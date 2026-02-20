@@ -1,6 +1,10 @@
 package physics
 
-import "time"
+import (
+	"time"
+
+	"github.com/go-mclib/data/pkg/data/registries"
+)
 
 // physics constants from the Minecraft Java Edition source code (1.21.11)
 const (
@@ -31,4 +35,21 @@ const (
 	TicksPerSecond       = 20
 	TickDuration         = 50 * time.Millisecond
 	FrictionSpeedFactor  = 0.21600002 // 0.216 = (0.6^3 * 0.91^3) normalization factor
+
+	// effect modifiers (MobEffects.java + LivingEntity.java)
+	JumpBoostPerLevel    = 0.1  // added to jump velocity per amplifier+1
+	SpeedPerLevel        = 0.2  // ADD_MULTIPLIED_TOTAL per amplifier+1
+	SlownessPerLevel     = 0.15 // ADD_MULTIPLIED_TOTAL (negative) per amplifier+1
+	SlowFallingGravity   = 0.01 // gravity cap when slow falling and descending
+	LevitationPerLevel   = 0.05 // target upward velocity per amplifier+1
+	LevitationLerpFactor = 0.2  // lerp speed toward target velocity
+)
+
+// cached effect protocol IDs from the mob_effect registry
+var (
+	effectSpeed       = registries.MobEffect.Get("minecraft:speed")
+	effectSlowness    = registries.MobEffect.Get("minecraft:slowness")
+	effectJumpBoost   = registries.MobEffect.Get("minecraft:jump_boost")
+	effectLevitation  = registries.MobEffect.Get("minecraft:levitation")
+	effectSlowFalling = registries.MobEffect.Get("minecraft:slow_falling")
 )
