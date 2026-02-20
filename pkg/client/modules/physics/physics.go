@@ -40,6 +40,7 @@ type Module struct {
 	lastSentHorizontalCollision     bool
 	lastSentSprinting               bool
 	lastSentSneaking                bool
+	lastSentInputFlags              uint8
 	positionReminder                int
 
 	cancel context.CancelFunc
@@ -342,39 +343,21 @@ func (m *Module) tick() {
 	// entity pushing
 	m.applyEntityPushing(newX, newY, newZ, playerHeight)
 
-	// send sprinting state change (vanilla: sendIsSprintingIfNeeded, before sendPosition)
-	if s.Sprinting != m.lastSentSprinting {
-		m.lastSentSprinting = s.Sprinting
-		actionID := ns.VarInt(4) // stop sprinting
-		if s.Sprinting {
-			actionID = 3 // start sprinting
-		}
-		m.client.SendPacket(&packets.C2SPlayerCommand{
-			EntityId: ns.VarInt(s.EntityID),
-			ActionId: actionID,
-		})
-	}
+	// send input state (vanilla: LocalPlayer.tick sends C2SPlayerInput before sendPosition)
+	m.sendInput(s)
 
-	// send sneaking state change
-	if s.Sneaking != m.lastSentSneaking {
-		m.lastSentSneaking = s.Sneaking
-		actionID := ns.VarInt(1) // stop sneaking
-		if s.Sneaking {
-			actionID = 0 // start sneaking
-		}
-		m.client.SendPacket(&packets.C2SPlayerCommand{
-			EntityId: ns.VarInt(s.EntityID),
-			ActionId: actionID,
-		})
-	}
-
-	// send position then tick end (vanilla: Minecraft.tick sends ClientTickEnd after all tick logic)
+	// send position (calls sendIsSprintingIfNeeded equivalent first, matching vanilla)
 	m.sendPosition(s)
+
+	// tick end (vanilla: Minecraft.tick sends ClientTickEnd after all tick logic)
 	m.client.SendPacket(&packets.C2SClientTickEnd{})
 }
 
 // applyAirInputScaled adds movement input to velocity (pre-collision) with pre-scaled impulses.
 // Returns the block friction for use in post-collision physics.
+//
+// Vanilla travelInAir passes raw blockFriction to getFrictionInfluencedSpeed (NOT blockFriction * 0.91).
+// The 0.91 multiplier only applies to post-move velocity friction (applyAirPhysics).
 func (m *Module) applyAirInputScaled(s *self.Module, x, y, z, yaw float64, w *world.Module, forward, strafe float64) float64 {
 	belowBlock := w.GetBlock(int(math.Floor(x)), int(math.Floor(y-0.5)), int(math.Floor(z)))
 	var blockFriction float64
@@ -383,15 +366,15 @@ func (m *Module) applyAirInputScaled(s *self.Module, x, y, z, yaw float64, w *wo
 	} else {
 		blockFriction = 1.0
 	}
-	friction := blockFriction * AirFrictionMul
 
+	// getFrictionInfluencedSpeed uses raw blockFriction, not blockFriction * 0.91
 	var speed float64
 	if m.OnGround {
 		baseSpeed := m.getEffectiveSpeed(s)
 		if s.Sprinting {
 			baseSpeed *= (1.0 + SprintModifier)
 		}
-		speed = baseSpeed * (FrictionSpeedFactor / (friction * friction * friction))
+		speed = baseSpeed * (FrictionSpeedFactor / (blockFriction * blockFriction * blockFriction))
 	} else {
 		speed = FlyingSpeed
 	}
@@ -638,8 +621,69 @@ func (m *Module) applyEntityPushing(x, y, z, height float64) {
 	}
 }
 
-// sendPosition sends position/rotation packets following MC's LocalPlayer.sendPosition logic
+// sendInput sends C2SPlayerInput when key states change (vanilla: LocalPlayer.tick).
+// flags: forward(1), backward(2), left(4), right(8), jump(16), shift(32), sprint(64)
+func (m *Module) sendInput(s *self.Module) {
+	var flags uint8
+	if m.ForwardImpulse > 0 {
+		flags |= 1
+	}
+	if m.ForwardImpulse < 0 {
+		flags |= 2
+	}
+	if m.StrafeImpulse > 0 {
+		flags |= 4
+	}
+	if m.StrafeImpulse < 0 {
+		flags |= 8
+	}
+	if m.Jumping {
+		flags |= 16
+	}
+	if s.Sneaking {
+		flags |= 32
+	}
+	if s.Sprinting {
+		flags |= 64
+	}
+
+	if flags != m.lastSentInputFlags {
+		m.lastSentInputFlags = flags
+		m.client.SendPacket(&packets.C2SPlayerInput{
+			Flags: ns.Uint8(flags),
+		})
+	}
+}
+
+// sendPosition sends position/rotation packets following MC's LocalPlayer.sendPosition logic.
+// Sends sprint/sneak commands first (vanilla: sendIsSprintingIfNeeded is called inside sendPosition).
 func (m *Module) sendPosition(s *self.Module) {
+	// sendIsSprintingIfNeeded
+	if s.Sprinting != m.lastSentSprinting {
+		m.lastSentSprinting = s.Sprinting
+		actionID := ns.VarInt(4) // stop sprinting
+		if s.Sprinting {
+			actionID = 3 // start sprinting
+		}
+		m.client.SendPacket(&packets.C2SPlayerCommand{
+			EntityId: ns.VarInt(s.EntityID),
+			ActionId: actionID,
+		})
+	}
+
+	// send sneaking state change
+	if s.Sneaking != m.lastSentSneaking {
+		m.lastSentSneaking = s.Sneaking
+		actionID := ns.VarInt(1) // stop sneaking
+		if s.Sneaking {
+			actionID = 0 // start sneaking
+		}
+		m.client.SendPacket(&packets.C2SPlayerCommand{
+			EntityId: ns.VarInt(s.EntityID),
+			ActionId: actionID,
+		})
+	}
+
 	m.positionReminder++
 
 	x := float64(s.X)
