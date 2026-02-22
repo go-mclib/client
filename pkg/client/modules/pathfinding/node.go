@@ -1,6 +1,8 @@
 package pathfinding
 
 import (
+	"math"
+
 	"github.com/go-mclib/client/pkg/client/modules/collisions"
 	"github.com/go-mclib/client/pkg/client/modules/entities"
 	"github.com/go-mclib/client/pkg/client/modules/world"
@@ -12,66 +14,40 @@ import (
 type PathNode struct {
 	X, Y, Z  int
 	G, H, F  float64
-	Sneaking bool // whether the player must crouch at this node
-	Jump     bool // whether the player must sprint-jump to reach this node
-	Parent   *PathNode
-	index    int // for heap
-}
+	Sneaking bool    // player must crouch at this node
+	Jump     bool    // player must sprint-jump to reach this node
+	JumpYaw  float64 // yaw direction for the sprint-jump
 
-// danger block names and their cost modifiers
-var dangerCosts = map[string]float64{
-	"minecraft:magma_block":      50,
-	"minecraft:cactus":           50,
-	"minecraft:lava":             100,
-	"minecraft:sweet_berry_bush": 5,
-	"minecraft:powder_snow":      20,
-	"minecraft:soul_sand":        2,
-	"minecraft:water":            2,
-	"minecraft:campfire":         50,
-	"minecraft:soul_campfire":    75,
-	"minecraft:fire":             100,
-	"minecraft:soul_fire":        100,
-	"minecraft:wither_rose":      100,
-}
+	// door interaction: if set, bot must open this door before passing
+	DoorX, DoorY, DoorZ int
+	InteractDoor        bool
 
-// TODO: do not hardcode, fetch from go-mclib/data
-const (
-	playerWidth          = 0.6
-	playerHeight         = 1.8
-	playerSneakingHeight = 1.5
-	jumpArcPeak          = 1.2522 // peak height of a jump
-	safeFallDistance     = 4      // max fall distance without damage (MC safe_fall_distance)
-	maxDiagonalGapDepth  = 2      // max gap depth at cardinal positions for diagonal traversal
-)
+	Parent *PathNode
+	index  int // for heap
+}
 
 // canStandAt checks if the player can stand at the given block position.
-func canStandAt(w *world.Module, col *collisions.Module, x, y, z int) bool {
-	return canStandAtHeight(w, col, x, y, z, playerHeight)
+// Uses AABB-based ground check for partial blocks (chests, slabs, etc.).
+func canStandAt(_ *world.Module, col *collisions.Module, x, y, z int) bool {
+	return canStandAtHeight(col, x, y, z, playerHeight)
 }
 
-// canStandAtSneaking checks if the player can stand at the position while crouching.
-func canStandAtSneaking(w *world.Module, col *collisions.Module, x, y, z int) bool {
-	return canStandAtHeight(w, col, x, y, z, playerSneakingHeight)
+func canStandAtSneaking(_ *world.Module, col *collisions.Module, x, y, z int) bool {
+	return canStandAtHeight(col, x, y, z, playerSneakingHeight)
 }
 
-func canStandAtHeight(w *world.Module, col *collisions.Module, x, y, z int, height float64) bool {
-	// need solid ground below
-	belowState := w.GetBlock(x, y-1, z)
-	if !block_shapes.HasCollision(belowState) {
+func canStandAtHeight(col *collisions.Module, x, y, z int, height float64) bool {
+	cx := float64(x) + 0.5
+	cy := float64(y)
+	cz := float64(z) + 0.5
+
+	// need solid ground below: use AABB probe to handle partial blocks
+	if !col.IsOnGround(cx, cy, cz, playerWidth) {
 		return false
 	}
 
 	// feet and head must be passable
-	feetState := w.GetBlock(x, y, z)
-	headState := w.GetBlock(x, y+1, z)
-
-	// fast path: both air-like
-	if !block_shapes.HasCollision(feetState) && !block_shapes.HasCollision(headState) {
-		return true
-	}
-
-	// either has collision — check with AABB at the given height
-	return col.CanFitAt(float64(x)+0.5, float64(y), float64(z)+0.5, playerWidth, height)
+	return col.CanFitAt(cx, cy, cz, playerWidth, height)
 }
 
 // moveCost returns the cost of moving to the given position.
@@ -80,7 +56,6 @@ func moveCost(w *world.Module, col *collisions.Module, ents *entities.Module, x,
 	if canStandAt(w, col, x, y, z) {
 		return moveCostInner(w, ents, x, y, z, false), false
 	}
-	// try sneaking (lower hitbox)
 	if canStandAtSneaking(w, col, x, y, z) {
 		return moveCostInner(w, ents, x, y, z, true), true
 	}
@@ -88,25 +63,26 @@ func moveCost(w *world.Module, col *collisions.Module, ents *entities.Module, x,
 }
 
 func moveCostInner(w *world.Module, ents *entities.Module, x, y, z int, sneaking bool) float64 {
-	cost := 1.0
+	var cost float64
 	if sneaking {
-		cost += 1.0 // slight penalty for crouching paths
+		cost = SneakOneBlockCost
+	} else {
+		cost = SprintOneBlockCost
 	}
 
 	// danger costs from the block at feet
 	feetState := w.GetBlock(x, y, z)
 	cost += blockDangerCost(feetState)
 
-	// danger from block below (magma, campfire)
+	// danger from block below (magma, campfire, ice)
 	belowState := w.GetBlock(x, y-1, z)
 	cost += blockDangerCost(belowState)
 
-	// check adjacent blocks for lava
-	for _, offset := range [][3]int{{1, 0, 0}, {-1, 0, 0}, {0, 0, 1}, {0, 0, -1}} {
-		adjState := w.GetBlock(x+offset[0], y+offset[1], z+offset[2])
+	// adjacent lava
+	for _, offset := range [4][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
+		adjState := w.GetBlock(x+offset[0], y, z+offset[1])
 		adjBlockID, _ := blocks.StateProperties(int(adjState))
-		adjName := blocks.BlockName(adjBlockID)
-		if adjName == "minecraft:lava" {
+		if blocks.BlockName(adjBlockID) == "minecraft:lava" {
 			cost += 50
 		}
 	}
@@ -121,21 +97,20 @@ func moveCostInner(w *world.Module, ents *entities.Module, x, y, z int, sneaking
 }
 
 // canPassBetween checks if the player can physically move between two adjacent blocks.
-// This catches thin blocks at block edges (doors, fence gates, etc.) that don't
-// intersect the player at block center but block traversal at the boundary.
+// Checks both the midpoint (for thin blocks at edges) and the destination center.
 func canPassBetween(col *collisions.Module, cx, cz, nx, ny, nz int, height float64) bool {
+	// check at destination center
+	if !col.CanFitAt(float64(nx)+0.5, float64(ny), float64(nz)+0.5, playerWidth, height) {
+		return false
+	}
+	// check at midpoint between source and destination (catches doors, fence gates at block edges)
 	midX := float64(cx+nx)/2.0 + 0.5
 	midZ := float64(cz+nz)/2.0 + 0.5
 	return col.CanFitAt(midX, float64(ny), midZ, playerWidth, height)
 }
 
 // canStepUp checks if the player can step up from cy to cy+1 at block (nx, nz).
-// The block at (nx, cy, nz) is the obstacle. For a valid step-up/jump:
-//   - If no collision at ground level: always OK (just walking up onto empty space)
-//   - If collision ≤ step-up height (0.6): step-up mechanic handles it
-//   - If collision > step-up (full block): it's a jump — the block above (nx, cy+1, nz)
-//     must NOT also have collision (otherwise it's a 2+ block wall like a door)
-func canStepUp(w *world.Module, nx, cy, nz int) bool {
+func canStepUp(w *world.Module, col *collisions.Module, nx, cy, nz int) bool {
 	stepState := w.GetBlock(nx, cy, nz)
 	if !block_shapes.HasCollision(stepState) {
 		return true
@@ -155,9 +130,47 @@ func canStepUp(w *world.Module, nx, cy, nz int) bool {
 	}
 
 	// too tall for step-up — needs a jump
-	// reject if the block above also has collision (2-block obstacle like a door)
+	// reject if the block above also has collision (2-block obstacle like closed door)
 	aboveState := w.GetBlock(nx, cy+1, nz)
-	return !block_shapes.HasCollision(aboveState)
+	if block_shapes.HasCollision(aboveState) {
+		return false
+	}
+
+	// verify player fits at the destination above
+	return col.CanFitAt(float64(nx)+0.5, float64(cy+1), float64(nz)+0.5, playerWidth, playerHeight)
+}
+
+// canDiagonalTraverse checks if diagonal movement is safe.
+func canDiagonalTraverse(w *world.Module, col *collisions.Module, cx, cy, cz, ox, oz int) bool {
+	const maxDiagGapDepth = 2
+
+	// fast path: both cardinal components standable
+	if canStandAt(w, col, cx+ox, cy, cz) && canStandAt(w, col, cx, cy, cz+oz) {
+		return true
+	}
+
+	// for each non-standable cardinal position, check gap is recoverable
+	for _, pos := range [2][2]int{{cx + ox, cz}, {cx, cz + oz}} {
+		bx, bz := pos[0], pos[1]
+		if canStandAt(w, col, bx, cy, bz) {
+			continue
+		}
+		recoverable := false
+		for d := 1; d <= maxDiagGapDepth; d++ {
+			if canStandAt(w, col, bx, cy-d, bz) {
+				recoverable = true
+				break
+			}
+		}
+		if !recoverable {
+			return false
+		}
+	}
+
+	// verify AABB fits at the diagonal midpoint
+	midX := float64(cx) + float64(ox)*0.5 + 0.5
+	midZ := float64(cz) + float64(oz)*0.5 + 0.5
+	return col.CanFitAt(midX, float64(cy), midZ, playerWidth, playerHeight)
 }
 
 func blockDangerCost(stateID int32) float64 {
@@ -170,80 +183,6 @@ func blockDangerCost(stateID int32) float64 {
 		return c
 	}
 	return 0
-}
-
-// canJumpTo checks if the player can sprint-jump from (sx, sy, sz) to (dx, dy, dz)
-// across a gap. The jump path must be along a single cardinal axis.
-func canJumpTo(w *world.Module, col *collisions.Module, sx, sy, sz, dx, dy, dz int) bool {
-	// source must have solid ground
-	if !block_shapes.HasCollision(w.GetBlock(sx, sy-1, sz)) {
-		return false
-	}
-
-	// destination must be standable
-	if !canStandAt(w, col, dx, dy, dz) {
-		return false
-	}
-
-	stepX := sign(dx - sx)
-	stepZ := sign(dz - sz)
-	dist := iabs(dx-sx) + iabs(dz-sz)
-
-	// clearance height: playerHeight + jumpArcPeak (~3.05 blocks)
-	clearHeight := playerHeight + jumpArcPeak
-	minY := min(sy, dy)
-
-	// source column must have clearance for the full jump arc
-	if !col.CanFitAt(float64(sx)+0.5, float64(minY), float64(sz)+0.5, playerWidth, clearHeight) {
-		return false
-	}
-
-	// each intermediate column must be clear
-	for i := 1; i < dist; i++ {
-		ix := sx + stepX*i
-		iz := sz + stepZ*i
-		if !col.CanFitAt(float64(ix)+0.5, float64(minY), float64(iz)+0.5, playerWidth, clearHeight) {
-			return false
-		}
-	}
-
-	return true
-}
-
-// canDiagonalTraverse checks if diagonal movement is safe when one or both
-// cardinal components are not standable. The player's width (0.6) means they
-// maintain partial overlap with solid blocks during diagonal movement.
-// Allows the diagonal if the gaps at cardinal positions are shallow enough
-// to recover from (player can jump out).
-func canDiagonalTraverse(w *world.Module, col *collisions.Module, cx, cy, cz, ox, oz int) bool {
-	// fast path: both cardinal components standable (original behavior)
-	if canStandAt(w, col, cx+ox, cy, cz) && canStandAt(w, col, cx, cy, cz+oz) {
-		return true
-	}
-
-	// for each non-standable cardinal position, check the gap is recoverable
-	for _, pos := range [2][2]int{{cx + ox, cz}, {cx, cz + oz}} {
-		bx, bz := pos[0], pos[1]
-		if canStandAt(w, col, bx, cy, bz) {
-			continue
-		}
-		// check if the player can stand within maxDiagonalGapDepth blocks below
-		recoverable := false
-		for d := 1; d <= maxDiagonalGapDepth; d++ {
-			if canStandAt(w, col, bx, cy-d, bz) {
-				recoverable = true
-				break
-			}
-		}
-		if !recoverable {
-			return false
-		}
-	}
-
-	// verify AABB fits at the diagonal midpoint (no head collisions from blocks)
-	midX := float64(cx) + float64(ox)*0.5 + 0.5
-	midZ := float64(cz) + float64(oz)*0.5 + 0.5
-	return col.CanFitAt(midX, float64(cy), midZ, playerWidth, playerHeight)
 }
 
 func sign(x int) int {
@@ -261,4 +200,11 @@ func iabs(x int) int {
 		return -x
 	}
 	return x
+}
+
+// yawBetween returns the yaw angle from block (sx,sz) toward (dx,dz).
+func yawBetween(sx, sz, dx, dz int) float64 {
+	ddx := float64(dx - sx)
+	ddz := float64(dz - sz)
+	return math.Atan2(ddz, ddx)*180.0/math.Pi - 90.0
 }

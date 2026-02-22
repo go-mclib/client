@@ -25,13 +25,17 @@ type Module struct {
 	path          []PathNode
 	pathIndex     int
 	stuckTicks    int
-	retreatTicks  int // countdown for corner retreat phase
-	retreatCycles int // number of retreat cycles since last progress
+	retreatTicks  int
+	retreatCycles int
 	lastNavX      float64
 	lastNavZ      float64
 	goalX         float64
 	goalY         float64
 	goalZ         float64
+
+	// door interaction state
+	doorWaitTicks int  // countdown while waiting for door to open
+	doorOpened    bool // whether we already sent the interact packet
 
 	// saved sprint/sneak state to restore after navigation
 	savedSprinting bool
@@ -53,7 +57,6 @@ func (m *Module) HandlePacket(_ *jp.WirePacket) {}
 func (m *Module) Init(c *client.Client) {
 	m.client = c
 
-	// register tick callback for navigation
 	p := physics.From(c)
 	if p != nil {
 		p.OnTick(func() {
@@ -71,6 +74,8 @@ func (m *Module) Reset() {
 	m.stuckTicks = 0
 	m.retreatTicks = 0
 	m.retreatCycles = 0
+	m.doorWaitTicks = 0
+	m.doorOpened = false
 }
 
 func From(c *client.Client) *Module {
@@ -97,6 +102,7 @@ func (m *Module) FindPath(goalX, goalY, goalZ float64) ([]PathNode, error) {
 	w := world.From(m.client)
 	col := collisions.From(m.client)
 	ents := entities.From(m.client)
+	p := physics.From(m.client)
 	if s == nil || w == nil || col == nil {
 		return nil, nil
 	}
@@ -114,7 +120,14 @@ func (m *Module) FindPath(goalX, goalY, goalZ float64) ([]PathNode, error) {
 		maxNodes = DefaultMaxNodes
 	}
 
-	path, err := findPath(w, col, ents, startX, startY, startZ, gx, gy, gz, maxNodes)
+	// get current physics params for jump simulation
+	var jumpPower, effectiveSpeed float64
+	if p != nil {
+		jumpPower = p.GetJumpPower()
+		effectiveSpeed = p.GetEffectiveSpeed()
+	}
+
+	path, err := findPath(w, col, ents, startX, startY, startZ, gx, gy, gz, maxNodes, jumpPower, effectiveSpeed)
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +140,6 @@ func (m *Module) FindPath(goalX, goalY, goalZ float64) ([]PathNode, error) {
 }
 
 // NavigateTo computes a path and begins navigating to the goal.
-// Navigation is driven by physics tick callbacks.
 func (m *Module) NavigateTo(goalX, goalY, goalZ float64) error {
 	path, err := m.FindPath(goalX, goalY, goalZ)
 	if err != nil {
@@ -143,6 +155,8 @@ func (m *Module) NavigateTo(goalX, goalY, goalZ float64) error {
 	m.stuckTicks = 0
 	m.retreatTicks = 0
 	m.retreatCycles = 0
+	m.doorWaitTicks = 0
+	m.doorOpened = false
 	m.goalX = goalX
 	m.goalY = goalY
 	m.goalZ = goalZ
@@ -164,7 +178,6 @@ func (m *Module) Stop() {
 		m.navigating = false
 		m.path = nil
 
-		// clear physics input, restore sprint/sneak state
 		p := physics.From(m.client)
 		if p != nil {
 			p.SetInput(0, 0, false)
@@ -204,7 +217,6 @@ func (m *Module) navigationTick() {
 	y := float64(s.Y)
 	z := float64(s.Z)
 
-	// get current waypoint
 	if m.pathIndex >= len(m.path) {
 		m.completeNavigation(true)
 		return
@@ -215,11 +227,10 @@ func (m *Module) navigationTick() {
 		for i := m.pathIndex; i < len(m.path) && i < m.pathIndex+3; i++ {
 			node := m.path[i]
 			if i == len(m.path)-1 {
-				break // don't check the goal node
+				break // don't check goal
 			}
 			cost, _ := moveCost(w, col, nil, node.X, node.Y, node.Z)
 			if cost < 0 {
-				// path is obstructed, attempt re-path
 				if m.tryRepath() {
 					return
 				}
@@ -231,6 +242,13 @@ func (m *Module) navigationTick() {
 
 	wp := m.path[m.pathIndex]
 	isLastWaypoint := m.pathIndex == len(m.path)-1
+
+	// door interaction: wait for door to open before proceeding
+	if wp.InteractDoor && m.doorWaitTicks > 0 {
+		m.doorWaitTicks--
+		p.SetInput(0, 0, false) // stop while waiting
+		return
+	}
 
 	// use exact float goal for the final waypoint
 	var wpX, wpY, wpZ float64
@@ -248,13 +266,13 @@ func (m *Module) navigationTick() {
 	horizDist := math.Sqrt(dx*dx + dz*dz)
 
 	// reached waypoint?
-	threshold := 0.5
+	threshold := 0.35
 	vertThreshold := 1.0
 	if isLastWaypoint {
 		threshold = 0.3
 	}
 	if wp.Jump {
-		threshold = 0.8 // more forgiving for high-velocity jump landings
+		threshold = 0.8
 		vertThreshold = 1.5
 	}
 	if horizDist < threshold && math.Abs(dy) < vertThreshold {
@@ -266,7 +284,9 @@ func (m *Module) navigationTick() {
 		m.stuckTicks = 0
 		m.retreatTicks = 0
 		m.retreatCycles = 0
-		// update waypoint
+		m.doorWaitTicks = 0
+		m.doorOpened = false
+
 		wp = m.path[m.pathIndex]
 		isLastWaypoint = m.pathIndex == len(m.path)-1
 		if isLastWaypoint {
@@ -282,26 +302,37 @@ func (m *Module) navigationTick() {
 		horizDist = math.Sqrt(dx*dx + dz*dz)
 	}
 
-	// wall-slide: when hitting a wall, adjust facing to slide along
-	// the unblocked axis. When stuck for several ticks with wall contact,
-	// enter retreat mode to escape corners. After multiple retreat cycles,
-	// trigger repath.
+	// door interaction: interact with door when close enough
+	if wp.InteractDoor && !m.doorOpened {
+		doorDist := math.Sqrt(
+			math.Pow(float64(wp.DoorX)+0.5-x, 2) +
+				math.Pow(float64(wp.DoorZ)+0.5-z, 2),
+		)
+		if doorDist < 2.5 {
+			// look at the door block
+			s.LookAt(float64(wp.DoorX)+0.5, float64(wp.DoorY)+0.5, float64(wp.DoorZ)+0.5)
+			// right-click the door
+			_ = m.client.InteractBlock(wp.DoorX, wp.DoorY, wp.DoorZ, 0, 0, 0.5, 0.5, 0.5)
+			m.doorOpened = true
+			m.doorWaitTicks = 4 // wait a few ticks for the server to process
+			p.SetInput(0, 0, false)
+			return
+		}
+	}
+
+	// wall-slide and retreat logic
 	lookX, lookZ := wpX, wpZ
 	if m.retreatTicks > 0 {
-		// persisted retreat: face away from waypoint
 		lookX = x - dx
 		lookZ = z - dz
 		m.retreatTicks--
 	} else if p.HorizontalCollision && m.stuckTicks > 3 {
-		// stuck for several ticks with wall contact — escalate to retreat
-		// (catches both simultaneous corner AND alternating single-axis blocks)
 		m.retreatTicks = 8
 		m.retreatCycles++
 		lookX = x - dx
 		lookZ = z - dz
 	} else if p.HorizontalCollision {
 		if p.XCollision && p.ZCollision {
-			// immediate corner: both axes blocked
 			m.retreatTicks = 8
 			m.retreatCycles++
 			lookX = x - dx
@@ -316,17 +347,24 @@ func (m *Module) navigationTick() {
 	}
 	s.LookAt(lookX, wpY+playerHeight, lookZ)
 
-	// set movement input
+	// movement input
 	sneaking := s.Sneaking || wp.Sneaking
 	var jumping, sprinting bool
 	if wp.Jump {
-		// sprint-jump: always sprint (required for distance)
 		sprinting = true
-		jumping = p.OnGround
 		sneaking = false
+
+		// edge-jumping: wait until near the edge of the block before jumping
+		distFromEdge := distToBlockEdge(x, z, dx, dz)
+		jumping = p.OnGround && distFromEdge < 0.3
 	} else {
-		jumping = dy > 0.5 && p.OnGround
-		sprinting = s.Sprinting && horizDist > 5.0 && !sneaking
+		// no jumping for regular movement — step-ups are handled by physics
+		jumping = false
+
+		// sprint when moving straight and far enough ahead
+		if !sneaking && horizDist > 2.0 {
+			sprinting = shouldSprint(m.path, m.pathIndex, x, z)
+		}
 	}
 
 	s.Sneaking = sneaking
@@ -345,7 +383,6 @@ func (m *Module) navigationTick() {
 	m.lastNavX = x
 	m.lastNavZ = z
 
-	// repath after being stuck for 40 ticks or 3 retreat cycles
 	if m.stuckTicks > 40 || m.retreatCycles > 3 {
 		if m.tryRepath() {
 			return
@@ -355,12 +392,12 @@ func (m *Module) navigationTick() {
 }
 
 // tryRepath attempts to recompute a path to the current goal.
-// Must be called with m.mu held. Returns true if a new path was found.
 func (m *Module) tryRepath() bool {
 	s := self.From(m.client)
 	w := world.From(m.client)
 	col := collisions.From(m.client)
 	ents := entities.From(m.client)
+	p := physics.From(m.client)
 	if s == nil || w == nil || col == nil {
 		return false
 	}
@@ -378,7 +415,13 @@ func (m *Module) tryRepath() bool {
 		maxNodes = DefaultMaxNodes
 	}
 
-	path, err := findPath(w, col, ents, startX, startY, startZ, gx, gy, gz, maxNodes)
+	var jumpPower, effectiveSpeed float64
+	if p != nil {
+		jumpPower = p.GetJumpPower()
+		effectiveSpeed = p.GetEffectiveSpeed()
+	}
+
+	path, err := findPath(w, col, ents, startX, startY, startZ, gx, gy, gz, maxNodes, jumpPower, effectiveSpeed)
 	if err != nil {
 		return false
 	}
@@ -388,6 +431,8 @@ func (m *Module) tryRepath() bool {
 	m.stuckTicks = 0
 	m.retreatTicks = 0
 	m.retreatCycles = 0
+	m.doorWaitTicks = 0
+	m.doorOpened = false
 	return true
 }
 
@@ -408,4 +453,55 @@ func (m *Module) completeNavigation(reached bool) {
 	for _, cb := range m.onNavigationComplete {
 		cb(reached)
 	}
+}
+
+// distToBlockEdge returns the distance from (x,z) to the block edge in the
+// direction of (dx,dz). Used for timing parkour edge-jumps.
+func distToBlockEdge(x, z, dx, dz float64) float64 {
+	// determine primary movement axis
+	if math.Abs(dx) > math.Abs(dz) {
+		// X axis dominant
+		bx := math.Floor(x)
+		if dx > 0 {
+			return (bx + 1) - x
+		}
+		return x - bx
+	}
+	// Z axis dominant
+	bz := math.Floor(z)
+	if dz > 0 {
+		return (bz + 1) - z
+	}
+	return z - bz
+}
+
+// shouldSprint returns true if the bot should sprint for the current segment.
+// Sprints when the next few waypoints are roughly in a straight line.
+func shouldSprint(path []PathNode, currentIdx int, x, z float64) bool {
+	if currentIdx >= len(path)-1 {
+		return false
+	}
+
+	current := path[currentIdx]
+	next := current
+	if currentIdx+1 < len(path) {
+		next = path[currentIdx+1]
+	}
+
+	// check if direction changes significantly in the next 2 waypoints
+	dx1 := float64(current.X) + 0.5 - x
+	dz1 := float64(current.Z) + 0.5 - z
+	dx2 := float64(next.X) - float64(current.X)
+	dz2 := float64(next.Z) - float64(current.Z)
+
+	// dot product of direction vectors (normalized)
+	len1 := math.Sqrt(dx1*dx1 + dz1*dz1)
+	len2 := math.Sqrt(dx2*dx2 + dz2*dz2)
+	if len1 < 0.1 || len2 < 0.1 {
+		return true // too close to tell direction, sprint
+	}
+
+	dot := (dx1*dx2 + dz1*dz2) / (len1 * len2)
+	// sprint if the turn angle is less than ~45 degrees (cos 45 ≈ 0.707)
+	return dot > 0.6
 }
