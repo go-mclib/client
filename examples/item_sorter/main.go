@@ -314,9 +314,11 @@ func (sr *sorter) debounceItems() bool {
 	}
 }
 
-func (sr *sorter) depositItem(itemID int32) int {
+// depositItem stores all stacks of itemID into the open container.
+// Returns (moved, full): moved is how many stacks were stored,
+// full is true if the chest ran out of space before all stacks were stored.
+func (sr *sorter) depositItem(itemID int32) (moved int, full bool) {
 	slotCount := sr.inv.ContainerSlotCount()
-	moved := 0
 	for i := range 36 {
 		if !sr.inv.ContainerOpen() {
 			break
@@ -327,7 +329,7 @@ func (sr *sorter) depositItem(itemID int32) int {
 		}
 		if !sr.containerHasSpace(itemID) {
 			sr.c.Logger.Println("chest is full")
-			break
+			return moved, true
 		}
 		viewIdx := slotCount + i
 		sr.c.Logger.Printf("  storing %s x%d", items.ItemName(item.ID), item.Count)
@@ -338,7 +340,7 @@ func (sr *sorter) depositItem(itemID int32) int {
 		moved++
 		time.Sleep(50 * time.Millisecond)
 	}
-	return moved
+	return moved, false
 }
 
 func (sr *sorter) containerHasSpace(itemID int32) bool {
@@ -464,25 +466,33 @@ func (sr *sorter) processFilterChest(pos blockPos) {
 // depositAll uses greedy grouped navigation: finds a position covering the
 // most destination chests, navigates there once, deposits into all reachable
 // chests by rotating, then repeats for remaining chests.
+// Items that don't fit (chest full) are redirected to the trash chest.
 func (sr *sorter) depositAll() {
 	groups := sr.groupSortableItems()
 	if len(groups) == 0 {
 		return
 	}
 
-	// collect unique chest positions
+	sr.mu.Lock()
+	trashChest := sr.trashChest
+	sr.mu.Unlock()
+
+	// track item IDs that overflowed from full chests
+	var overflowIDs []int32
+
+	// collect unique chest positions (exclude trash — handled separately)
 	remaining := make(map[blockPos]bool, len(groups))
 	for pos := range groups {
+		if trashChest != nil && pos == *trashChest {
+			continue // trash is deposited last
+		}
 		remaining[pos] = true
 	}
 
 	for len(remaining) > 0 {
-		// build target list from remaining chests
 		var targets [][3]int
-		var targetPositions []blockPos
 		for pos := range remaining {
 			targets = append(targets, [3]int{pos.x, pos.y, pos.z})
-			targetPositions = append(targetPositions, pos)
 		}
 
 		standX, standY, standZ, reachable, found := pathfinding.FindBestReachPosition(
@@ -495,7 +505,6 @@ func (sr *sorter) depositAll() {
 
 		sr.c.Logger.Printf("navigating to %d,%d,%d to reach %d chest(s)", standX, standY, standZ, len(reachable))
 
-		// navigate if not already close enough
 		dx := float64(standX) + 0.5 - float64(sr.s.X)
 		dz := float64(standZ) + 0.5 - float64(sr.s.Z)
 		if math.Sqrt(dx*dx+dz*dz) > 1.0 {
@@ -506,7 +515,6 @@ func (sr *sorter) depositAll() {
 		sr.pf.Stop()
 		time.Sleep(200 * time.Millisecond)
 
-		// deposit into each reachable chest from this position
 		for _, t := range reachable {
 			pos := blockPos{t[0], t[1], t[2]}
 			itemIDs := groups[pos]
@@ -518,9 +526,12 @@ func (sr *sorter) depositAll() {
 				continue
 			}
 			for _, id := range itemIDs {
-				moved := sr.depositItem(id)
+				moved, full := sr.depositItem(id)
 				if moved > 0 {
 					sr.c.Logger.Printf("stored %d stacks of %s", moved, items.ItemName(id))
+				}
+				if full {
+					overflowIDs = append(overflowIDs, id)
 				}
 				if !sr.inv.ContainerOpen() {
 					break
@@ -531,11 +542,42 @@ func (sr *sorter) depositAll() {
 			delete(remaining, pos)
 		}
 
-		// remove any targets that were reachable but had no items (shouldn't happen, but safe)
 		for _, t := range reachable {
 			delete(remaining, blockPos{t[0], t[1], t[2]})
 		}
 	}
+
+	// deposit overflow + originally-trash items into the trash chest
+	if trashChest == nil {
+		return
+	}
+	trashIDs := groups[*trashChest]
+	trashIDs = append(trashIDs, overflowIDs...)
+	if len(trashIDs) == 0 {
+		return
+	}
+	// deduplicate
+	seen := make(map[int32]bool)
+	var uniqueTrash []int32
+	for _, id := range trashIDs {
+		if !seen[id] {
+			seen[id] = true
+			uniqueTrash = append(uniqueTrash, id)
+		}
+	}
+	if !sr.openChest(*trashChest) {
+		return
+	}
+	for _, id := range uniqueTrash {
+		moved, _ := sr.depositItem(id)
+		if moved > 0 {
+			sr.c.Logger.Printf("trashed %d stacks of %s", moved, items.ItemName(id))
+		}
+		if !sr.inv.ContainerOpen() {
+			break
+		}
+	}
+	sr.closeContainer()
 }
 
 // groupSortableItems returns items in the player inventory grouped by their
