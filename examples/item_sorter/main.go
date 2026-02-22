@@ -66,6 +66,9 @@ var customCategories = map[string]func(string) bool{
 	"spawn_eggs": func(name string) bool {
 		return strings.HasSuffix(name, "_spawn_egg")
 	},
+	"netherite": func(name string) bool {
+		return strings.Contains(name, "netherite")
+	},
 }
 
 // itemSetMatcher returns a match function that checks membership in a fixed set.
