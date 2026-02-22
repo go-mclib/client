@@ -46,56 +46,6 @@ var barrelBlockID = blocks.BlockID("minecraft:barrel")
 
 const blockReach = 4.5
 
-// findReachableWithLOS searches for a standable position within reach of (bx, by, bz)
-// that has line-of-sight to the target block center. Returns the closest one.
-func findReachableWithLOS(w *world.Module, col *collisions.Module, bx, by, bz int) (int, int, int, bool) {
-	targetX := float64(bx) + 0.5
-	targetY := float64(by) + 0.5
-	targetZ := float64(bz) + 0.5
-
-	r := int(math.Ceil(blockReach))
-	bestDist := math.MaxFloat64
-	var bestX, bestY, bestZ int
-	found := false
-
-	for dx := -r; dx <= r; dx++ {
-		for dz := -r; dz <= r; dz++ {
-			for dy := -r; dy <= r; dy++ {
-				nx, ny, nz := bx+dx, by+dy, bz+dz
-				below := w.GetBlock(nx, ny-1, nz)
-				feet := w.GetBlock(nx, ny, nz)
-				head := w.GetBlock(nx, ny+1, nz)
-				if !blockHitboxes.HasCollision(below) || blockHitboxes.HasCollision(feet) || blockHitboxes.HasCollision(head) {
-					continue
-				}
-				eyeX := float64(nx) + 0.5
-				eyeY := float64(ny) + self.EyeHeight
-				eyeZ := float64(nz) + 0.5
-				ddx := eyeX - targetX
-				ddy := eyeY - targetY
-				ddz := eyeZ - targetZ
-				dist := math.Sqrt(ddx*ddx + ddy*ddy + ddz*ddz)
-				if dist > blockReach {
-					continue
-				}
-				if dist >= bestDist {
-					continue
-				}
-				if col != nil {
-					hit, _, _, _ := col.RaycastBlocks(eyeX, eyeY, eyeZ, targetX, targetY, targetZ)
-					if hit {
-						continue
-					}
-				}
-				bestDist = dist
-				bestX, bestY, bestZ = nx, ny, nz
-				found = true
-			}
-		}
-	}
-	return bestX, bestY, bestZ, found
-}
-
 func main() {
 	var f helpers.Flags
 	helpers.RegisterFlags(&f)
@@ -184,7 +134,7 @@ func main() {
 		c.Logger.Printf("nearest container at %d, %d, %d", cx, cy, cz)
 
 		// find a reachable position with LOS to the container
-		adjX, adjY, adjZ, adjFound := findReachableWithLOS(w, col, cx, cy, cz)
+		adjX, adjY, adjZ, adjFound := pathfinding.FindReachablePosition(col, float64(s.X), float64(s.Y), float64(s.Z), cx, cy, cz, blockReach)
 		if !adjFound {
 			c.Logger.Println("no reachable block with line-of-sight to container")
 			return

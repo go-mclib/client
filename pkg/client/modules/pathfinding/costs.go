@@ -20,6 +20,7 @@ const (
 	playerWidth          = 0.6
 	playerHeight         = 1.8
 	playerSneakingHeight = 1.5
+	eyeHeight            = 1.62
 	safeFallDistance     = 4
 )
 

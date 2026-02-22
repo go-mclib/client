@@ -19,7 +19,6 @@ import (
 	"github.com/go-mclib/client/pkg/helpers"
 	"github.com/go-mclib/data/pkg/data/blocks"
 	dataEntities "github.com/go-mclib/data/pkg/data/entities"
-	blockHitboxes "github.com/go-mclib/data/pkg/data/hitboxes/blocks"
 	"github.com/go-mclib/data/pkg/data/items"
 	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
 	"github.com/go-mclib/protocol/nbt"
@@ -190,8 +189,9 @@ func (sr *sorter) navigateTo(x, y, z float64, timeout time.Duration) bool {
 	}
 }
 
+// openChest navigates to a reachable position and interacts with the chest.
 func (sr *sorter) openChest(pos blockPos) bool {
-	standX, standY, standZ, found := findReachableWithLOS(sr.w, sr.col, pos.x, pos.y, pos.z)
+	standX, standY, standZ, found := pathfinding.FindReachablePosition(sr.col, float64(sr.s.X), float64(sr.s.Y), float64(sr.s.Z), pos.x, pos.y, pos.z, blockReach)
 	if !found {
 		sr.c.Logger.Printf("no reachable position for chest at %d,%d,%d", pos.x, pos.y, pos.z)
 		return false
@@ -206,17 +206,19 @@ func (sr *sorter) openChest(pos blockPos) bool {
 		}
 	}
 
-	// fully stop pathfinding and let physics settle before interacting
 	sr.pf.Stop()
 	time.Sleep(200 * time.Millisecond)
 
-	// close any previously open container
+	return sr.interactChest(pos)
+}
+
+// interactChest looks at a chest and opens it (assumes already in range).
+func (sr *sorter) interactChest(pos blockPos) bool {
 	if sr.inv.ContainerOpen() {
 		sr.closeContainer()
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// look at the chest and interact
 	sr.s.LookAt(float64(pos.x)+0.5, float64(pos.y)+0.5, float64(pos.z)+0.5)
 	time.Sleep(50 * time.Millisecond)
 
@@ -459,25 +461,80 @@ func (sr *sorter) processFilterChest(pos blockPos) {
 	sr.closeContainer()
 }
 
-// depositAll groups inventory items by destination chest and deposits each
-// batch in a single container window (one open/close per chest).
+// depositAll uses greedy grouped navigation: finds a position covering the
+// most destination chests, navigates there once, deposits into all reachable
+// chests by rotating, then repeats for remaining chests.
 func (sr *sorter) depositAll() {
 	groups := sr.groupSortableItems()
-	for pos, itemIDs := range groups {
-		if !sr.openChest(pos) {
-			continue
+	if len(groups) == 0 {
+		return
+	}
+
+	// collect unique chest positions
+	remaining := make(map[blockPos]bool, len(groups))
+	for pos := range groups {
+		remaining[pos] = true
+	}
+
+	for len(remaining) > 0 {
+		// build target list from remaining chests
+		var targets [][3]int
+		var targetPositions []blockPos
+		for pos := range remaining {
+			targets = append(targets, [3]int{pos.x, pos.y, pos.z})
+			targetPositions = append(targetPositions, pos)
 		}
-		for _, id := range itemIDs {
-			moved := sr.depositItem(id)
-			if moved > 0 {
-				sr.c.Logger.Printf("stored %d stacks of %s", moved, items.ItemName(id))
-			}
-			if !sr.inv.ContainerOpen() {
+
+		standX, standY, standZ, reachable, found := pathfinding.FindBestReachPosition(
+			sr.col, float64(sr.s.X), float64(sr.s.Y), float64(sr.s.Z), targets, blockReach,
+		)
+		if !found {
+			sr.c.Logger.Println("no reachable position for remaining chests")
+			break
+		}
+
+		sr.c.Logger.Printf("navigating to %d,%d,%d to reach %d chest(s)", standX, standY, standZ, len(reachable))
+
+		// navigate if not already close enough
+		dx := float64(standX) + 0.5 - float64(sr.s.X)
+		dz := float64(standZ) + 0.5 - float64(sr.s.Z)
+		if math.Sqrt(dx*dx+dz*dz) > 1.0 {
+			if !sr.navigateTo(float64(standX)+0.5, float64(standY), float64(standZ)+0.5, 30*time.Second) {
 				break
 			}
 		}
-		sr.closeContainer()
+		sr.pf.Stop()
 		time.Sleep(200 * time.Millisecond)
+
+		// deposit into each reachable chest from this position
+		for _, t := range reachable {
+			pos := blockPos{t[0], t[1], t[2]}
+			itemIDs := groups[pos]
+			if len(itemIDs) == 0 {
+				delete(remaining, pos)
+				continue
+			}
+			if !sr.interactChest(pos) {
+				continue
+			}
+			for _, id := range itemIDs {
+				moved := sr.depositItem(id)
+				if moved > 0 {
+					sr.c.Logger.Printf("stored %d stacks of %s", moved, items.ItemName(id))
+				}
+				if !sr.inv.ContainerOpen() {
+					break
+				}
+			}
+			sr.closeContainer()
+			time.Sleep(200 * time.Millisecond)
+			delete(remaining, pos)
+		}
+
+		// remove any targets that were reachable but had no items (shouldn't happen, but safe)
+		for _, t := range reachable {
+			delete(remaining, blockPos{t[0], t[1], t[2]})
+		}
 	}
 }
 
@@ -680,47 +737,6 @@ func (sr *sorter) setup() {
 }
 
 // --- pure helpers ---
-
-func findReachableWithLOS(w *world.Module, col *collisions.Module, bx, by, bz int) (int, int, int, bool) {
-	targetX := float64(bx) + 0.5
-	targetY := float64(by) + 0.5
-	targetZ := float64(bz) + 0.5
-	r := int(math.Ceil(blockReach))
-
-	bestDist := math.MaxFloat64
-	var bestX, bestY, bestZ int
-	found := false
-
-	for dx := -r; dx <= r; dx++ {
-		for dz := -r; dz <= r; dz++ {
-			for dy := -r; dy <= r; dy++ {
-				nx, ny, nz := bx+dx, by+dy, bz+dz
-				if !blockHitboxes.HasCollision(w.GetBlock(nx, ny-1, nz)) ||
-					blockHitboxes.HasCollision(w.GetBlock(nx, ny, nz)) ||
-					blockHitboxes.HasCollision(w.GetBlock(nx, ny+1, nz)) {
-					continue
-				}
-				eyeX := float64(nx) + 0.5
-				eyeY := float64(ny) + self.EyeHeight
-				eyeZ := float64(nz) + 0.5
-				ddx, ddy, ddz := eyeX-targetX, eyeY-targetY, eyeZ-targetZ
-				dist := math.Sqrt(ddx*ddx + ddy*ddy + ddz*ddz)
-				if dist > blockReach || dist >= bestDist {
-					continue
-				}
-				if col != nil {
-					if hit, _, _, _ := col.RaycastBlocks(eyeX, eyeY, eyeZ, targetX, targetY, targetZ); hit {
-						continue
-					}
-				}
-				bestDist = dist
-				bestX, bestY, bestZ = nx, ny, nz
-				found = true
-			}
-		}
-	}
-	return bestX, bestY, bestZ, found
-}
 
 func isContainer(blockID int32) bool {
 	return slices.Contains(containerBlockIDs, blockID)

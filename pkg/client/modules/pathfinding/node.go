@@ -173,6 +173,114 @@ func canDiagonalTraverse(w *world.Module, col *collisions.Module, cx, cy, cz, ox
 	return col.CanFitAt(midX, float64(cy), midZ, playerWidth, playerHeight)
 }
 
+// FindReachablePosition finds the standable position closest to (fromX, fromY, fromZ)
+// that has line-of-sight to (bx, by, bz) within reach distance.
+func FindReachablePosition(col *collisions.Module, fromX, fromY, fromZ float64, bx, by, bz int, reach float64) (int, int, int, bool) {
+	_, _, _, reachable, found := FindBestReachPosition(col, fromX, fromY, fromZ, [][3]int{{bx, by, bz}}, reach)
+	if !found || len(reachable) == 0 {
+		return 0, 0, 0, false
+	}
+	return reachable[0][0], reachable[0][1], reachable[0][2], true
+}
+
+// FindBestReachPosition finds the standable position from which the most targets
+// are reachable (within reach distance with line-of-sight). Among positions covering
+// the same number of targets, prefers the one closest to (fromX, fromY, fromZ).
+// Returns the stand position and the subset of targets reachable from it.
+func FindBestReachPosition(col *collisions.Module,
+	fromX, fromY, fromZ float64,
+	targets [][3]int,
+	reach float64,
+) (standX, standY, standZ int, reachable [][3]int, found bool) {
+	if len(targets) == 0 {
+		return 0, 0, 0, nil, false
+	}
+
+	r := int(math.Ceil(reach))
+
+	// collect unique candidate standable positions around all targets
+	candidates := make(map[[3]int]bool)
+	for _, t := range targets {
+		for dx := -r; dx <= r; dx++ {
+			for dz := -r; dz <= r; dz++ {
+				for dy := -r; dy <= r; dy++ {
+					pos := [3]int{t[0] + dx, t[1] + dy, t[2] + dz}
+					if candidates[pos] {
+						continue
+					}
+					if canStandAtHeight(col, pos[0], pos[1], pos[2], playerHeight) {
+						candidates[pos] = true
+					}
+				}
+			}
+		}
+	}
+
+	bestCount := 0
+	bestFromDist := math.MaxFloat64
+
+	for pos := range candidates {
+		eyeX := float64(pos[0]) + 0.5
+		eyeY := float64(pos[1]) + eyeHeight
+		eyeZ := float64(pos[2]) + 0.5
+
+		// count reachable targets from this position
+		count := 0
+		for _, t := range targets {
+			if canReachBlock(col, eyeX, eyeY, eyeZ, t[0], t[1], t[2], reach) {
+				count++
+			}
+		}
+		if count == 0 {
+			continue
+		}
+
+		// prefer more targets, then closer to the bot
+		fdx, fdy, fdz := fromX-eyeX, fromY-eyeY, fromZ-eyeZ
+		fromDist := fdx*fdx + fdy*fdy + fdz*fdz
+		if count > bestCount || (count == bestCount && fromDist < bestFromDist) {
+			bestCount = count
+			bestFromDist = fromDist
+			standX, standY, standZ = pos[0], pos[1], pos[2]
+			found = true
+		}
+	}
+
+	if !found {
+		return 0, 0, 0, nil, false
+	}
+
+	// collect which targets are reachable from the chosen position
+	eyeX := float64(standX) + 0.5
+	eyeY := float64(standY) + eyeHeight
+	eyeZ := float64(standZ) + 0.5
+	for _, t := range targets {
+		if canReachBlock(col, eyeX, eyeY, eyeZ, t[0], t[1], t[2], reach) {
+			reachable = append(reachable, t)
+		}
+	}
+	return standX, standY, standZ, reachable, true
+}
+
+// canReachBlock checks if a position (eye coords) can interact with a block
+// at (bx,by,bz) — within reach distance and with clear line of sight.
+func canReachBlock(col *collisions.Module, eyeX, eyeY, eyeZ float64, bx, by, bz int, reach float64) bool {
+	tx := float64(bx) + 0.5
+	ty := float64(by) + 0.5
+	tz := float64(bz) + 0.5
+	dx, dy, dz := eyeX-tx, eyeY-ty, eyeZ-tz
+	if dx*dx+dy*dy+dz*dz > reach*reach {
+		return false
+	}
+	if col != nil {
+		hit, _, _, _ := col.RaycastBlocks(eyeX, eyeY, eyeZ, tx, ty, tz)
+		if hit {
+			return false
+		}
+	}
+	return true
+}
+
 func blockDangerCost(stateID int32) float64 {
 	if stateID == 0 {
 		return 0
