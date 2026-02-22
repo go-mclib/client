@@ -66,6 +66,9 @@ var customCategories = map[string]func(string) bool{
 	"spawn_eggs": func(name string) bool {
 		return strings.HasSuffix(name, "_spawn_egg")
 	},
+	"templates": func(name string) bool {
+		return strings.HasSuffix(name, "_smithing_template")
+	},
 	"netherite": func(name string) bool {
 		return strings.Contains(name, "netherite")
 	},
