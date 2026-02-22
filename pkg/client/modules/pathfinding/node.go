@@ -176,11 +176,11 @@ func canDiagonalTraverse(w *world.Module, col *collisions.Module, cx, cy, cz, ox
 // FindReachablePosition finds the standable position closest to (fromX, fromY, fromZ)
 // that has line-of-sight to (bx, by, bz) within reach distance.
 func FindReachablePosition(col *collisions.Module, fromX, fromY, fromZ float64, bx, by, bz int, reach float64) (int, int, int, bool) {
-	_, _, _, reachable, found := FindBestReachPosition(col, fromX, fromY, fromZ, [][3]int{{bx, by, bz}}, reach)
-	if !found || len(reachable) == 0 {
+	standX, standY, standZ, _, found := FindBestReachPosition(col, fromX, fromY, fromZ, [][3]int{{bx, by, bz}}, reach)
+	if !found {
 		return 0, 0, 0, false
 	}
-	return reachable[0][0], reachable[0][1], reachable[0][2], true
+	return standX, standY, standZ, true
 }
 
 // FindBestReachPosition finds the standable position from which the most targets
