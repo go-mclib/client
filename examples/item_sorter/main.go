@@ -30,10 +30,11 @@ var containerBlockIDs = []int32{
 	blocks.BlockID("minecraft:barrel"),
 }
 
-// customCategories maps category names to item lists for use on signs.
-// Reference these with a : prefix (e.g. ":food", ":valuables").
-var customCategories = map[string][]string{
-	"food": {
+// customCategories maps category names to match functions for use on signs.
+// Reference these with a : prefix (e.g. ":food", ":valuables", ":spawn_eggs").
+// Each function receives an item name and returns true if it belongs to the category.
+var customCategories = map[string]func(string) bool{
+	"food": itemSetMatcher(
 		"minecraft:cooked_beef",
 		"minecraft:cooked_porkchop",
 		"minecraft:cooked_chicken",
@@ -44,8 +45,8 @@ var customCategories = map[string][]string{
 		"minecraft:baked_potato",
 		"minecraft:golden_carrot",
 		"minecraft:apple",
-	},
-	"valuables": {
+	),
+	"valuables": itemSetMatcher(
 		"minecraft:diamond",
 		"minecraft:diamond_block",
 		"minecraft:emerald_block",
@@ -56,13 +57,24 @@ var customCategories = map[string][]string{
 		"minecraft:netherite_block",
 		"minecraft:elytra",
 		"minecraft:heavy_core",
-		"minecraft:elytra",
 		"minecraft:vault",
 		"minecraft:reinforced_deepslate",
 		"minecraft:ender_chest",
 		"minecraft:golden_apple",
 		"minecraft:enchanted_golden_apple",
+	),
+	"spawn_eggs": func(name string) bool {
+		return strings.HasSuffix(name, "_spawn_egg")
 	},
+}
+
+// itemSetMatcher returns a match function that checks membership in a fixed set.
+func itemSetMatcher(names ...string) func(string) bool {
+	set := make(map[string]bool, len(names))
+	for _, n := range names {
+		set[n] = true
+	}
+	return func(name string) bool { return set[name] }
 }
 
 // foodItemNames lists items the bot may eat, ordered by preference (best first).
@@ -73,9 +85,8 @@ var foodItemNames = []string{
 }
 
 var (
-	foodItemIDs        []int32
-	resolvedCategories map[string][]int32
-	wallSignBlockIDs   = map[int32]bool{}
+	foodItemIDs      []int32
+	wallSignBlockIDs = map[int32]bool{}
 )
 
 const (
@@ -105,14 +116,6 @@ func init() {
 			foodItemIDs = append(foodItemIDs, id)
 		}
 	}
-	resolvedCategories = make(map[string][]int32, len(customCategories))
-	for cat, names := range customCategories {
-		for _, name := range names {
-			if id := items.ItemID(name); id >= 0 {
-				resolvedCategories[cat] = append(resolvedCategories[cat], id)
-			}
-		}
-	}
 }
 
 type blockPos struct{ x, y, z int }
@@ -124,6 +127,12 @@ type blockPos struct{ x, y, z int }
 // at them, waits for items to arrive, takes everything, then deposits each
 // item type into the matching labeled chest before returning.
 // A chest labeled "trash" receives all items that have no other destination.
+// categoryMatcher pairs a match function with a destination chest.
+type categoryMatcher struct {
+	match func(string) bool
+	pos   blockPos
+}
+
 type sorter struct {
 	c    *client.Client
 	inv  *inventory.Module
@@ -133,10 +142,11 @@ type sorter struct {
 	col  *collisions.Module
 	ents *entities.Module
 
-	mu           sync.Mutex
-	labelMap     map[int32]blockPos // item ID -> destination chest
-	filterChests []blockPos         // "filter me" input chests
-	trashChest   *blockPos          // "trash" chest for unlabeled items
+	mu               sync.Mutex
+	labelMap         map[int32]blockPos // item ID -> destination chest
+	categoryMatchers []categoryMatcher  // pattern-based categories
+	filterChests     []blockPos         // "filter me" input chests
+	trashChest       *blockPos          // "trash" chest for unlabeled items
 
 	navCh       chan bool     // current navigation result channel
 	containerCh chan struct{} // current container-open signal channel
@@ -581,7 +591,8 @@ func (sr *sorter) depositAll() {
 }
 
 // groupSortableItems returns items in the player inventory grouped by their
-// destination chest. Each chest maps to a deduplicated list of item IDs.
+// destination chest. Checks exact ID labels first, then category matchers,
+// then falls back to trash.
 func (sr *sorter) groupSortableItems() map[blockPos][]int32 {
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
@@ -598,9 +609,29 @@ func (sr *sorter) groupSortableItems() map[blockPos][]int32 {
 			continue
 		}
 		seen[item.ID] = true
+
+		// exact ID match
 		if pos, ok := sr.labelMap[item.ID]; ok {
 			groups[pos] = append(groups[pos], item.ID)
-		} else if sr.trashChest != nil {
+			continue
+		}
+
+		// category matcher
+		name := items.ItemName(item.ID)
+		matched := false
+		for _, m := range sr.categoryMatchers {
+			if m.match(name) {
+				groups[m.pos] = append(groups[m.pos], item.ID)
+				matched = true
+				break
+			}
+		}
+		if matched {
+			continue
+		}
+
+		// trash fallback
+		if sr.trashChest != nil {
 			groups[*sr.trashChest] = append(groups[*sr.trashChest], item.ID)
 		}
 	}
@@ -618,6 +649,7 @@ func (sr *sorter) buildLabelMap() {
 	cz := int(math.Floor(float64(sr.s.Z)))
 
 	labelMap := make(map[int32]blockPos)
+	var matchers []categoryMatcher
 	var filterChests []blockPos
 	var trashChest *blockPos
 
@@ -658,13 +690,14 @@ func (sr *sorter) buildLabelMap() {
 				if !wallSignBlockIDs[blockID] {
 					continue
 				}
-				sr.processSignAt(x, y, z, stateID, labelMap, &filterChests, &trashChest)
+				sr.processSignAt(x, y, z, stateID, labelMap, &matchers, &filterChests, &trashChest)
 			}
 		}
 	}
 
 	sr.mu.Lock()
 	sr.labelMap = labelMap
+	sr.categoryMatchers = matchers
 	sr.filterChests = filterChests
 	sr.trashChest = trashChest
 	sr.mu.Unlock()
@@ -672,7 +705,7 @@ func (sr *sorter) buildLabelMap() {
 	sr.c.Logger.Printf("labels: %d items, %d filter chests, trash=%v", len(labelMap), len(filterChests), trashChest != nil)
 }
 
-func (sr *sorter) processSignAt(x, y, z int, stateID int32, labelMap map[int32]blockPos, filterChests *[]blockPos, trashChest **blockPos) {
+func (sr *sorter) processSignAt(x, y, z int, stateID int32, labelMap map[int32]blockPos, matchers *[]categoryMatcher, filterChests *[]blockPos, trashChest **blockPos) {
 	be := sr.w.GetBlockEntity(x, y, z)
 	if be == nil || (be.Type != signBlockEntityType && be.Type != hangingSignEntityType) {
 		return
@@ -703,7 +736,19 @@ func (sr *sorter) processSignAt(x, y, z int, stateID int32, labelMap map[int32]b
 	}
 
 	for _, line := range lines {
-		for _, itemID := range resolveLabel(line) {
+		trimmed := strings.TrimSpace(line)
+
+		// :category — pattern-based matcher
+		if strings.HasPrefix(trimmed, ":") {
+			cat := strings.ToLower(trimmed[1:])
+			if match, ok := customCategories[cat]; ok {
+				*matchers = append(*matchers, categoryMatcher{match: match, pos: pos})
+				sr.c.Logger.Printf("category: :%s -> %d,%d,%d (sign)", cat, pos.x, pos.y, pos.z)
+			}
+			continue
+		}
+
+		for _, itemID := range resolveLabel(trimmed) {
 			labelMap[itemID] = pos
 			sr.c.Logger.Printf("label: %s -> %d,%d,%d (sign)", items.ItemName(itemID), pos.x, pos.y, pos.z)
 		}
@@ -762,6 +807,15 @@ func (sr *sorter) setup() {
 		sr.mu.Lock()
 		_, labeled := sr.labelMap[item.ID]
 		hasTrash := sr.trashChest != nil
+		if !labeled {
+			name := items.ItemName(item.ID)
+			for _, m := range sr.categoryMatchers {
+				if m.match(name) {
+					labeled = true
+					break
+				}
+			}
+		}
 		sr.mu.Unlock()
 		if labeled || hasTrash {
 			sr.requestSort()
@@ -878,10 +932,6 @@ func resolveLabel(line string) []int32 {
 			tag = "minecraft:" + tag
 		}
 		return items.ItemTag(tag)
-	}
-
-	if strings.HasPrefix(line, ":") {
-		return resolvedCategories[strings.ToLower(line[1:])]
 	}
 
 	name := strings.ToLower(line)
