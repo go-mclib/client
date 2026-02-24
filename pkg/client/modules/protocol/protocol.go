@@ -84,7 +84,7 @@ func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 func (m *Module) handleLogin(pkt *jp.WirePacket) {
 	c := m.client
 
-	if pkt.PacketID == packet_ids.S2CHelloID && c.SessionClient != nil {
+	if pkt.PacketID == packet_ids.S2CHelloID {
 		m.handleEncryptionRequest(pkt)
 		return
 	}

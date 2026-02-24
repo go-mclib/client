@@ -198,10 +198,7 @@ func (c *ChatChainStore) GetLastSeenMessages(count int) []MessageRef {
 	defer c.mu.RUnlock()
 
 	refs := make([]MessageRef, 0, count)
-	start := len(c.inboundHistory) - count
-	if start < 0 {
-		start = 0
-	}
+	start := max(len(c.inboundHistory)-count, 0)
 
 	for i := start; i < len(c.inboundHistory); i++ {
 		msg := c.inboundHistory[i]
