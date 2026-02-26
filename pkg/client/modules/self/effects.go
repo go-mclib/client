@@ -14,12 +14,16 @@ type EffectInstance struct {
 
 // HasEffect returns whether the player has the given effect active.
 func (m *Module) HasEffect(effectID int32) bool {
+	m.effectsMu.Lock()
+	defer m.effectsMu.Unlock()
 	_, ok := m.activeEffects[effectID]
 	return ok
 }
 
 // EffectAmplifier returns the amplifier of the given effect, or -1 if not active.
 func (m *Module) EffectAmplifier(effectID int32) int32 {
+	m.effectsMu.Lock()
+	defer m.effectsMu.Unlock()
 	e, ok := m.activeEffects[effectID]
 	if !ok {
 		return -1
@@ -30,6 +34,8 @@ func (m *Module) EffectAmplifier(effectID int32) int32 {
 // TickEffects decrements durations and removes expired effects.
 // Matches vanilla MobEffectInstance.tickClient. Called once per tick by the physics module.
 func (m *Module) TickEffects() {
+	m.effectsMu.Lock()
+	defer m.effectsMu.Unlock()
 	for id, e := range m.activeEffects {
 		if e.Duration == -1 {
 			continue // infinite
@@ -49,11 +55,13 @@ func (m *Module) handleUpdateMobEffect(pkt *jp.WirePacket) {
 	if int32(d.EntityId) != int32(m.EntityID) {
 		return
 	}
+	m.effectsMu.Lock()
 	m.activeEffects[int32(d.EffectId)] = &EffectInstance{
 		ID:        int32(d.EffectId),
 		Amplifier: int32(d.Amplifier),
 		Duration:  int32(d.Duration),
 	}
+	m.effectsMu.Unlock()
 }
 
 func (m *Module) handleRemoveMobEffect(pkt *jp.WirePacket) {
@@ -64,5 +72,7 @@ func (m *Module) handleRemoveMobEffect(pkt *jp.WirePacket) {
 	if int32(d.EntityId) != int32(m.EntityID) {
 		return
 	}
+	m.effectsMu.Lock()
 	delete(m.activeEffects, int32(d.EffectId))
+	m.effectsMu.Unlock()
 }

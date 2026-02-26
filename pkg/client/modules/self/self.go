@@ -1,6 +1,8 @@
 package self
 
 import (
+	"sync"
+
 	"github.com/go-mclib/client/pkg/client"
 	"github.com/go-mclib/data/pkg/data/packet_ids"
 	"github.com/go-mclib/data/pkg/packets"
@@ -36,6 +38,7 @@ type Module struct {
 	Sprinting bool
 	Sneaking  bool
 
+	effectsMu     sync.Mutex
 	activeEffects map[int32]*EffectInstance
 
 	onDeath     []func()
@@ -73,7 +76,9 @@ func (m *Module) Reset() {
 	m.Pitch = 0
 	m.Sprinting = false
 	m.Sneaking = false
+	m.effectsMu.Lock()
 	clear(m.activeEffects)
+	m.effectsMu.Unlock()
 }
 
 // From retrieves the self module from a client.
