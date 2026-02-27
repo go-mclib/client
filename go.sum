@@ -34,6 +34,8 @@ github.com/go-mclib/data v0.0.0-20260221084356-727d73956392 h1:fdEg561Ce+zMTN259
 github.com/go-mclib/data v0.0.0-20260221084356-727d73956392/go.mod h1:9/10KkPuIHRv/LcLzr1+H91LqM2/ihUlbOowFvcyNw4=
 github.com/go-mclib/data v0.0.0-20260224123753-8499d96f2dec h1:kxmjOtzfmnPBbB3mhXV51Fu0T+oF+B6DQN7BAtpEk50=
 github.com/go-mclib/data v0.0.0-20260224123753-8499d96f2dec/go.mod h1:yl+2pBm3G30qvNTTAM2QhNK6Uoictu53nBBe9buy5GI=
+github.com/go-mclib/data v0.0.0-20260227203559-7298522dfa23 h1:WEMRIVqUGhykHHVqmF/0rf+YmGr4mCjW8qwrjJ2L0Bg=
+github.com/go-mclib/data v0.0.0-20260227203559-7298522dfa23/go.mod h1:yl+2pBm3G30qvNTTAM2QhNK6Uoictu53nBBe9buy5GI=
 github.com/go-mclib/protocol v0.0.0-20260208115823-45b7238b9a64 h1:MDtQ6MS5YLT5qwYcojHtX//BELFX0afx2lqqG33k7Tg=
 github.com/go-mclib/protocol v0.0.0-20260208115823-45b7238b9a64/go.mod h1:aVfH1TFVFv7ksiVmFKyWctJTws2MvXjnAJprdx9/5gw=
 github.com/go-mclib/protocol v0.0.0-20260217192914-6a30f7dd3c93 h1:rXiHZ3SRU/DDnGQHIwI6kOHBaZwOKmfn6GolvCDjOEk=
