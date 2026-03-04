@@ -10,7 +10,7 @@ func (m *Module) GetBlock(x, y, z int) int32 {
 	chunkX, chunkZ := chunks.ChunkPos(x, z)
 
 	m.mu.RLock()
-	chunk := m.Chunks[chunkKey(chunkX, chunkZ)]
+	chunk := m.Chunks[ChunkKey(chunkX, chunkZ)]
 	m.mu.RUnlock()
 
 	if chunk == nil {
@@ -23,7 +23,7 @@ func (m *Module) GetBlock(x, y, z int) int32 {
 func (m *Module) IsChunkLoaded(chunkX, chunkZ int32) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	_, ok := m.Chunks[chunkKey(chunkX, chunkZ)]
+	_, ok := m.Chunks[ChunkKey(chunkX, chunkZ)]
 	return ok
 }
 
@@ -31,7 +31,7 @@ func (m *Module) IsChunkLoaded(chunkX, chunkZ int32) bool {
 func (m *Module) GetChunk(chunkX, chunkZ int32) *chunks.ChunkColumn {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.Chunks[chunkKey(chunkX, chunkZ)]
+	return m.Chunks[ChunkKey(chunkX, chunkZ)]
 }
 
 // GetLoadedChunkCount returns the number of loaded chunks.

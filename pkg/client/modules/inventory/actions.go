@@ -8,6 +8,16 @@ import (
 	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
 )
 
+// RawSlots returns all 46 protocol slots, the state ID, and cursor slot.
+func (m *Module) RawSlots() (slots [TotalSlots]ns.Slot, stateID int32, cursor ns.Slot) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for i := range TotalSlots {
+		slots[i] = m.slots[i].raw
+	}
+	return slots, m.stateID, m.cursor.raw
+}
+
 // GetSlot returns the item at a container slot index (0-45), or nil if empty.
 func (m *Module) GetSlot(index int) *items.ItemStack {
 	if index < 0 || index >= TotalSlots {

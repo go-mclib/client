@@ -22,11 +22,11 @@ func TestChunkKey(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		key := chunkKey(tt.x, tt.z)
+		key := ChunkKey(tt.x, tt.z)
 		gotX := int32(key >> 32)
 		gotZ := int32(key)
 		if gotX != tt.x || gotZ != tt.z {
-			t.Errorf("chunkKey(%d, %d) roundtrip failed: got (%d, %d)", tt.x, tt.z, gotX, gotZ)
+			t.Errorf("ChunkKey(%d, %d) roundtrip failed: got (%d, %d)", tt.x, tt.z, gotX, gotZ)
 		}
 	}
 }
@@ -37,7 +37,7 @@ func TestGetSetBlock(t *testing.T) {
 	// create a test chunk at (0, 0) with an empty section at Y=64 (section index 8)
 	column := &chunks.ChunkColumn{X: 0, Z: 0}
 	column.Sections[8] = chunks.NewEmptySection()
-	m.Chunks[chunkKey(0, 0)] = column
+	m.Chunks[ChunkKey(0, 0)] = column
 
 	got := m.GetBlock(8, 64, 8)
 	if got != 0 {
@@ -69,7 +69,7 @@ func TestIsChunkLoaded(t *testing.T) {
 		t.Error("IsChunkLoaded(0, 0) = true, want false")
 	}
 
-	m.Chunks[chunkKey(0, 0)] = &chunks.ChunkColumn{X: 0, Z: 0}
+	m.Chunks[ChunkKey(0, 0)] = &chunks.ChunkColumn{X: 0, Z: 0}
 
 	if !m.IsChunkLoaded(0, 0) {
 		t.Error("IsChunkLoaded(0, 0) = false, want true")
@@ -79,8 +79,8 @@ func TestIsChunkLoaded(t *testing.T) {
 func TestReset(t *testing.T) {
 	m := New()
 
-	m.Chunks[chunkKey(0, 0)] = &chunks.ChunkColumn{X: 0, Z: 0}
-	m.Chunks[chunkKey(1, 1)] = &chunks.ChunkColumn{X: 1, Z: 1}
+	m.Chunks[ChunkKey(0, 0)] = &chunks.ChunkColumn{X: 0, Z: 0}
+	m.Chunks[ChunkKey(1, 1)] = &chunks.ChunkColumn{X: 1, Z: 1}
 
 	if m.GetLoadedChunkCount() != 2 {
 		t.Errorf("GetLoadedChunkCount() = %d, want 2", m.GetLoadedChunkCount())

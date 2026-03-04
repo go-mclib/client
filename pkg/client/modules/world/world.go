@@ -123,7 +123,7 @@ func (m *Module) handleChunkData(pkt *jp.WirePacket) {
 
 	cx, cz := int32(d.ChunkX), int32(d.ChunkZ)
 	m.mu.Lock()
-	m.Chunks[chunkKey(cx, cz)] = column
+	m.Chunks[ChunkKey(cx, cz)] = column
 	// store block entities from chunk data
 	for _, be := range column.BlockEntities {
 		x := int(cx)*16 + be.X()
@@ -152,7 +152,7 @@ func (m *Module) handleUnloadChunk(pkt *jp.WirePacket) {
 	cx, cz := int32(d.ChunkX), int32(d.ChunkZ)
 	baseX, baseZ := int(cx)*16, int(cz)*16
 	m.mu.Lock()
-	delete(m.Chunks, chunkKey(cx, cz))
+	delete(m.Chunks, ChunkKey(cx, cz))
 	for key := range m.blockEntities {
 		if key[0] >= baseX && key[0] < baseX+16 && key[2] >= baseZ && key[2] < baseZ+16 {
 			delete(m.blockEntities, key)
@@ -193,7 +193,7 @@ func (m *Module) handleBlockUpdate(pkt *jp.WirePacket) {
 	chunkX, chunkZ := chunks.ChunkPos(int(d.Location.X), int(d.Location.Z))
 
 	m.mu.Lock()
-	chunk := m.Chunks[chunkKey(chunkX, chunkZ)]
+	chunk := m.Chunks[ChunkKey(chunkX, chunkZ)]
 	if chunk != nil {
 		chunk.SetBlockState(int(d.Location.X), int(d.Location.Y), int(d.Location.Z), int32(d.BlockId))
 	}
@@ -213,7 +213,7 @@ func (m *Module) handleSectionBlocksUpdate(pkt *jp.WirePacket) {
 	sectionX, sectionY, sectionZ := chunks.DecodeSectionPosition(int64(d.ChunkSectionPosition))
 
 	m.mu.Lock()
-	chunk := m.Chunks[chunkKey(sectionX, sectionZ)]
+	chunk := m.Chunks[ChunkKey(sectionX, sectionZ)]
 	if chunk != nil {
 		sectionIndex := chunks.SectionIndex(int(sectionY) * 16)
 		if sectionIndex >= 0 && sectionIndex < len(chunk.Sections) {
