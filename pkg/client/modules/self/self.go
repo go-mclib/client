@@ -34,6 +34,12 @@ type Module struct {
 	DeathLocation   ns.PrefixedOptional[ns.GlobalPos]
 	Gamemode        ns.Uint8
 
+	// SuppressPositionEcho prevents the module from echoing position
+	// back to the server after receiving S2CPlayerPosition. Useful when
+	// an external controller (e.g. pproxy) is handling movement.
+	// The teleport confirm is still sent.
+	SuppressPositionEcho bool
+
 	// movement state flags (readable/settable by any module or user code)
 	Sprinting bool
 	Sneaking  bool
@@ -222,12 +228,14 @@ func (m *Module) handlePlayerPosition(pkt *jp.WirePacket) {
 		TeleportId: d.TeleportId,
 	})
 
-	// send position confirmation (as vanilla client does)
-	_ = m.client.WritePacket(&packets.C2SMovePlayerPosRot{
-		X: m.X, FeetY: m.Y, Z: m.Z,
-		Yaw: ns.Float32(m.Yaw), Pitch: ns.Float32(m.Pitch),
-		Flags: 0,
-	})
+	if !m.SuppressPositionEcho {
+		// send position confirmation (as vanilla client does)
+		_ = m.client.WritePacket(&packets.C2SMovePlayerPosRot{
+			X: m.X, FeetY: m.Y, Z: m.Z,
+			Yaw: ns.Float32(m.Yaw), Pitch: ns.Float32(m.Pitch),
+			Flags: 0,
+		})
+	}
 
 	for _, cb := range m.onPosition {
 		cb(float64(m.X), float64(m.Y), float64(m.Z))

@@ -89,10 +89,7 @@ func (m *Module) handleSystemChat(pkt *jp.WirePacket) {
 	if err := pkt.ReadInto(&d); err != nil {
 		return
 	}
-	txt := d.Content.Text
-	if txt == "" {
-		txt = d.Content.Translate
-	}
+	txt := d.Content.String()
 	if d.Overlay {
 		m.client.Logger.Printf("[SYSTEM-ACTION] %s", txt)
 	} else {
@@ -109,10 +106,10 @@ func (m *Module) handleDisguisedChat(pkt *jp.WirePacket) {
 		return
 	}
 	isWhisper := d.TargetName.Present
-	sender := d.SenderName.Text
-	msg := d.Message.Text
+	sender := d.SenderName.String()
+	msg := d.Message.String()
 	if isWhisper {
-		m.client.Logger.Printf("[DISGUISED] %s -> %s: %s", sender, d.TargetName.Value.Text, msg)
+		m.client.Logger.Printf("[DISGUISED] %s -> %s: %s", sender, d.TargetName.Value.String(), msg)
 	} else {
 		m.client.Logger.Printf("[DISGUISED] %s: %s", sender, msg)
 	}

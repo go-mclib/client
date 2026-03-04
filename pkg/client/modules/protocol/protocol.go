@@ -95,7 +95,7 @@ func (m *Module) handleLogin(pkt *jp.WirePacket) {
 		if err := pkt.ReadInto(&d); err != nil {
 			c.Logger.Println("login disconnect (parse):", err)
 		} else {
-			c.Logger.Printf("login disconnect: %s", d.Reason.Text)
+			c.Logger.Printf("login disconnect: %s", d.Reason)
 		}
 		c.Disconnect(false)
 	case packet_ids.S2CLoginFinishedID:
@@ -171,7 +171,7 @@ func (m *Module) handleConfiguration(pkt *jp.WirePacket) {
 		if err := pkt.ReadInto(&d); err != nil {
 			c.Logger.Println("failed to parse disconnect configuration data:", err)
 		}
-		c.Logger.Printf("disconnected during configuration: %s", d.Reason.Text)
+		c.Logger.Printf("disconnected during configuration: %s", d.Reason)
 		c.Disconnect(false)
 	case packet_ids.S2CFinishConfigurationID:
 		_ = c.WritePacket(&packets.C2SFinishConfiguration{})
@@ -218,7 +218,7 @@ func (m *Module) handlePlay(pkt *jp.WirePacket) {
 	case packet_ids.S2CDisconnectPlayID:
 		var d packets.S2CDisconnectPlay
 		if err := pkt.ReadInto(&d); err == nil {
-			c.Logger.Printf("disconnect: %s", d.Reason.Text)
+			c.Logger.Printf("disconnect: %s", d.Reason)
 		}
 		c.Disconnect(false)
 	case packet_ids.S2CStartConfigurationID:
