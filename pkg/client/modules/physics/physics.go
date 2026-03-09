@@ -239,6 +239,11 @@ func (m *Module) tick() {
 		return
 	}
 
+	// an external controller handles movement and position — skip physics
+	if s.SuppressPositionEcho {
+		return
+	}
+
 	// tick effect durations (vanilla: LivingEntity.tickEffects before aiStep)
 	s.TickEffects()
 

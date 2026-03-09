@@ -223,13 +223,11 @@ func (m *Module) handlePlayerPosition(pkt *jp.WirePacket) {
 		m.Pitch = d.Pitch
 	}
 
-	// confirm teleport (required by protocol)
-	_ = m.client.WritePacket(&packets.C2SAcceptTeleportation{
-		TeleportId: d.TeleportId,
-	})
-
 	if !m.SuppressPositionEcho {
-		// send position confirmation (as vanilla client does)
+		// confirm teleport + echo position (as vanilla client does)
+		_ = m.client.WritePacket(&packets.C2SAcceptTeleportation{
+			TeleportId: d.TeleportId,
+		})
 		_ = m.client.WritePacket(&packets.C2SMovePlayerPosRot{
 			X: m.X, FeetY: m.Y, Z: m.Z,
 			Yaw: ns.Float32(m.Yaw), Pitch: ns.Float32(m.Pitch),

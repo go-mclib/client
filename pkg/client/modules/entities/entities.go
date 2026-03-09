@@ -1,6 +1,7 @@
 package entities
 
 import (
+	"math"
 	"sync"
 
 	"github.com/go-mclib/client/pkg/client"
@@ -95,6 +96,8 @@ func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 		m.handleAddEntity(pkt)
 	case packet_ids.S2CRemoveEntitiesID:
 		m.handleRemoveEntities(pkt)
+	case packet_ids.S2CForgetLevelChunkID:
+		m.handleForgetLevelChunk(pkt)
 	case packet_ids.S2CMoveEntityPosID:
 		m.handleMoveEntityPos(pkt)
 	case packet_ids.S2CMoveEntityPosRotID:
@@ -178,6 +181,33 @@ func (m *Module) handleRemoveEntities(pkt *jp.WirePacket) {
 	m.mu.Unlock()
 
 	for _, id := range ids {
+		for _, cb := range m.onEntityRemove {
+			cb(id)
+		}
+	}
+}
+
+func (m *Module) handleForgetLevelChunk(pkt *jp.WirePacket) {
+	var d packets.S2CForgetLevelChunk
+	if err := pkt.ReadInto(&d); err != nil {
+		return
+	}
+
+	cx, cz := int32(d.ChunkX), int32(d.ChunkZ)
+	var removed []int32
+
+	m.mu.Lock()
+	for id, e := range m.entities {
+		ecx := int32(math.Floor(e.X / 16))
+		ecz := int32(math.Floor(e.Z / 16))
+		if ecx == cx && ecz == cz {
+			delete(m.entities, id)
+			removed = append(removed, id)
+		}
+	}
+	m.mu.Unlock()
+
+	for _, id := range removed {
 		for _, cb := range m.onEntityRemove {
 			cb(id)
 		}

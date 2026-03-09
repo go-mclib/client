@@ -27,13 +27,13 @@ type Flags struct {
 
 // RegisterFlags registers the standard CLI flags on the default flag set.
 //
-//  // -s <string> (server-address:port, default: localhost:25565)
-//  // -u <string> (username, default: "" - determine from auth)
-//  // -v <bool> (verbose logging, default: false)
-//  // -online <bool> (default: true)
-//  // -i <bool> (interactive mode with chat input, default: false)
-//  // -d <bool> (treat server transfer packet as disconnect and reconnect, e.g. minehut sending player to lobby, default: false)
-//  // -reconnects <int> (max reconnect attempts, default: 5)
+//	// -s <string> (server-address:port, default: localhost:25565)
+//	// -u <string> (username, default: "" - determine from auth)
+//	// -v <bool> (verbose logging, default: false)
+//	// -online <bool> (default: true)
+//	// -i <bool> (interactive mode with chat input, default: false)
+//	// -d <bool> (treat server transfer packet as disconnect and reconnect, e.g. minehut sending player to lobby, default: false)
+//	// -reconnects <int> (max reconnect attempts, default: 5)
 func RegisterFlags(f *Flags) {
 	flag.StringVar(&f.Address, "s", "localhost:25565", "server address (host:port)")
 	flag.StringVar(&f.Username, "u", "", "username (offline or online)")
