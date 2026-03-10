@@ -47,6 +47,12 @@ type Client struct {
 	modulesByName map[string]Module
 	handlers      []Handler
 
+	// lifecycle callbacks
+	onConnect    []func()
+	onTransfer   []func()
+	onPlay       []func()
+	onDisconnect []func()
+
 	// populated after Connect()
 	resolvedHost string
 	resolvedPort string
@@ -94,6 +100,34 @@ func (c *Client) Module(name string) Module {
 // RegisterHandler appends a lightweight packet callback (escape hatch).
 func (c *Client) RegisterHandler(h Handler) {
 	c.handlers = append(c.handlers, h)
+}
+
+// lifecycle event registration
+
+func (c *Client) OnConnect(cb func())    { c.onConnect = append(c.onConnect, cb) }
+func (c *Client) OnTransfer(cb func())   { c.onTransfer = append(c.onTransfer, cb) }
+func (c *Client) OnPlay(cb func())       { c.onPlay = append(c.onPlay, cb) }
+func (c *Client) OnDisconnect(cb func()) { c.onDisconnect = append(c.onDisconnect, cb) }
+
+func (c *Client) FireConnect() {
+	for _, cb := range c.onConnect {
+		cb()
+	}
+}
+func (c *Client) FireTransfer() {
+	for _, cb := range c.onTransfer {
+		cb()
+	}
+}
+func (c *Client) FirePlay() {
+	for _, cb := range c.onPlay {
+		cb()
+	}
+}
+func (c *Client) FireDisconnect() {
+	for _, cb := range c.onDisconnect {
+		cb()
+	}
 }
 
 // SendPacket queues a packet for outgoing transmission.
@@ -246,12 +280,8 @@ func (c *Client) connectAndStartOnce(ctx context.Context) error {
 		return err
 	}
 
-	// notify modules of connection
-	for _, m := range c.modules {
-		if ch, ok := m.(ConnectHandler); ok {
-			ch.OnConnect()
-		}
-	}
+	// notify callbacks of connection
+	c.FireConnect()
 
 	// outgoing queue worker
 	go func() {
@@ -268,6 +298,7 @@ func (c *Client) connectAndStartOnce(ctx context.Context) error {
 		if err != nil {
 			c.Logger.Println("read packet error:", err)
 			c.shouldReconnect = true
+			c.FireDisconnect()
 			return err
 		}
 		for _, m := range c.modules {

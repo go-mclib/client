@@ -15,13 +15,6 @@ type Module interface {
 	Reset()
 }
 
-// ConnectHandler is optionally implemented by modules that need to act
-// after TCP connection is established but before the packet loop starts.
-// The protocol module uses this to send handshake + login start.
-type ConnectHandler interface {
-	OnConnect()
-}
-
 // ChatSessionSender is optionally implemented by the chat module.
 // The protocol module calls this during config -> play transition.
 type ChatSessionSender interface {

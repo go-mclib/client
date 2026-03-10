@@ -60,6 +60,7 @@ func (m *Module) Name() string { return ModuleName }
 
 func (m *Module) Init(c *client.Client) {
 	m.client = c
+	c.OnTransfer(m.Reset)
 
 	s := self.From(c)
 	if s != nil {

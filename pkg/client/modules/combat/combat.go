@@ -38,6 +38,7 @@ func (m *Module) Name() string { return ModuleName }
 
 func (m *Module) Init(c *client.Client) {
 	m.client = c
+	c.OnTransfer(m.Reset)
 
 	// register tick callback for continuous attacking
 	p := physics.From(c)

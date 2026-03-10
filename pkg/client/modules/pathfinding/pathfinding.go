@@ -56,6 +56,7 @@ func (m *Module) HandlePacket(_ *jp.WirePacket) {}
 
 func (m *Module) Init(c *client.Client) {
 	m.client = c
+	c.OnTransfer(m.Reset)
 
 	p := physics.From(c)
 	if p != nil {

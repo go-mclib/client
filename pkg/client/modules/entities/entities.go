@@ -54,8 +54,11 @@ func New() *Module {
 	}
 }
 
-func (m *Module) Name() string          { return ModuleName }
-func (m *Module) Init(c *client.Client) { m.client = c }
+func (m *Module) Name() string { return ModuleName }
+func (m *Module) Init(c *client.Client) {
+	m.client = c
+	c.OnTransfer(m.Reset)
+}
 
 func (m *Module) Reset() {
 	m.mu.Lock()

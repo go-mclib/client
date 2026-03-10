@@ -43,6 +43,8 @@ func (m *Module) Name() string { return ModuleName }
 
 func (m *Module) Init(c *client.Client) {
 	m.client = c
+	c.OnConnect(m.onConnect)
+	c.OnTransfer(m.Reset)
 }
 
 func (m *Module) Reset() {
@@ -62,8 +64,7 @@ func From(c *client.Client) *Module {
 	return mod.(*Module)
 }
 
-// OnConnect sends handshake and login start after TCP connection.
-func (m *Module) OnConnect() {
+func (m *Module) onConnect() {
 	c := m.client
 
 	host, port := c.ResolvedAddr()
@@ -214,6 +215,7 @@ func (m *Module) handleConfiguration(pkt *jp.WirePacket) {
 				}
 			}
 		}
+		c.FirePlay()
 	case packet_ids.S2CKeepAliveConfigurationID:
 		var d packets.S2CKeepAliveConfiguration
 		if err := pkt.ReadInto(&d); err == nil {
@@ -270,18 +272,14 @@ func (m *Module) handlePlay(pkt *jp.WirePacket) {
 			c.Disconnect(false)
 			return
 		}
-		// clear all recorded state — will be re-recorded during new config phase
-		m.configPackets = nil
-		m.configDone = false
-		m.commandsPacket = nil
-		m.playerInfoPackets = nil
-		m.waypointPackets = nil
+
+		c.Logger.Println("server transfer: play -> configuration")
+		c.FireTransfer()
 
 		if err := c.WritePacket(&packets.C2SConfigurationAcknowledged{}); err != nil {
 			c.Logger.Println("failed to send configuration_acknowledged:", err)
 		}
 		c.SetState(jp.StateConfiguration)
-		c.Logger.Println("switched from play -> configuration phase, client is probably being transfered to another server")
 	case packet_ids.S2CKeepAlivePlayID:
 		var d packets.S2CKeepAlivePlay
 		if err := pkt.ReadInto(&d); err == nil {
