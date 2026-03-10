@@ -29,6 +29,7 @@ type Entity struct {
 	OnGround         bool
 	Width, Height    float64
 	EyeHeight        float64
+	SpawnData        int32 // extra data from S2CAddEntity (e.g. block state for falling blocks)
 	Metadata         entities.Metadata
 }
 
@@ -145,6 +146,7 @@ func (m *Module) handleAddEntity(pkt *jp.WirePacket) {
 		Width:     float64(width),
 		Height:    float64(height),
 		EyeHeight: float64(eyeHeight),
+		SpawnData: int32(d.Data),
 	}
 
 	m.mu.Lock()
@@ -377,6 +379,34 @@ func (m *Module) handleHurtAnimation(pkt *jp.WirePacket) {
 	for _, cb := range m.onHurtAnimation {
 		cb(int32(d.EntityId), float32(d.Yaw))
 	}
+}
+
+// SpawnWirePackets reconstructs S2CAddEntity wire packets from stored entity data.
+func (m *Module) SpawnWirePackets() []*jp.WirePacket {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := make([]*jp.WirePacket, 0, len(m.entities))
+	for _, e := range m.entities {
+		pkt := &packets.S2CAddEntity{
+			EntityId:   ns.VarInt(e.ID),
+			EntityUuid: ns.UUID(e.UUID),
+			Type:       ns.VarInt(e.TypeID),
+			X:          ns.Float64(e.X),
+			Y:          ns.Float64(e.Y),
+			Z:          ns.Float64(e.Z),
+			Velocity:   ns.LpVec3{X: e.VelX, Y: e.VelY, Z: e.VelZ},
+			Pitch:      ns.AngleFromDegrees(float64(e.Pitch)),
+			Yaw:        ns.AngleFromDegrees(float64(e.Yaw)),
+			HeadYaw:    ns.AngleFromDegrees(float64(e.HeadYaw)),
+			Data:       ns.VarInt(e.SpawnData),
+		}
+		wire, err := jp.ToWire(pkt)
+		if err != nil {
+			continue
+		}
+		result = append(result, wire)
+	}
+	return result
 }
 
 // ownEntityID returns the player's own entity ID, or -1 if self module is not registered.

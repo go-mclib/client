@@ -1,6 +1,7 @@
 package self
 
 import (
+	"encoding/binary"
 	"sync"
 
 	"github.com/go-mclib/client/pkg/client"
@@ -21,18 +22,63 @@ type Module struct {
 	// AutoRespawn automatically respawns on death (default: true).
 	AutoRespawn bool
 
-	EntityID        ns.VarInt
+	// login state (full S2CLogin fields)
+	EntityID            ns.VarInt
+	IsHardcore          bool
+	DimensionNames      []string
+	MaxPlayers          int32
+	ViewDistance        int32
+	SimulationDistance  int32
+	ReducedDebugInfo    bool
+	EnableRespawnScreen bool
+	DoLimitedCrafting   bool
+	DimensionType       int32
+	DimensionName       string
+	HashedSeed          int64
+	Gamemode            ns.Uint8
+	PreviousGameMode    int8
+	IsDebug             bool
+	IsFlat              bool
+	DeathLocation       ns.PrefixedOptional[ns.GlobalPos]
+	PortalCooldown      int32
+	SeaLevel            int32
+	EnforcesSecureChat  bool
+
+	// health & experience
 	Health          ns.Float32
 	Food            ns.VarInt
 	FoodSaturation  ns.Float32
 	ExperienceBar   ns.Float32
 	Level           ns.VarInt
 	TotalExperience ns.VarInt
-	X, Y, Z         ns.Float64
-	Yaw             ns.Float32
-	Pitch           ns.Float32
-	DeathLocation   ns.PrefixedOptional[ns.GlobalPos]
-	Gamemode        ns.Uint8
+
+	// position & rotation
+	X, Y, Z ns.Float64
+	Yaw     ns.Float32
+	Pitch   ns.Float32
+
+	// difficulty
+	Difficulty       uint8
+	DifficultyLocked bool
+
+	// abilities
+	AbilityFlags int8
+	FlyingSpeed  float32
+	FOVModifier  float32
+
+	// spawn position
+	SpawnDimension string
+	SpawnPosition  ns.Position
+	SpawnYaw       float32
+	SpawnPitch     float32
+
+	// time
+	WorldAge       int64
+	TimeOfDay      int64
+	TimeIncreasing bool
+
+	// op level (0-4, derived from entity event status 24-28)
+	OpLevel int8
 
 	// SuppressPositionEcho prevents the module from echoing position
 	// back to the server after receiving S2CPlayerPosition. Useful when
@@ -60,6 +106,8 @@ func New() *Module {
 		Health:         20,
 		Food:           20,
 		FoodSaturation: 5,
+		FlyingSpeed:    0.05,
+		FOVModifier:    0.1,
 		activeEffects:  make(map[int32]*EffectInstance),
 	}
 }
@@ -82,6 +130,19 @@ func (m *Module) Reset() {
 	m.Pitch = 0
 	m.Sprinting = false
 	m.Sneaking = false
+	m.Difficulty = 0
+	m.DifficultyLocked = false
+	m.AbilityFlags = 0
+	m.FlyingSpeed = 0.05
+	m.FOVModifier = 0.1
+	m.SpawnDimension = ""
+	m.SpawnPosition = ns.Position{}
+	m.SpawnYaw = 0
+	m.SpawnPitch = 0
+	m.WorldAge = 0
+	m.TimeOfDay = 0
+	m.TimeIncreasing = false
+	m.OpLevel = 0
 	m.effectsMu.Lock()
 	clear(m.activeEffects)
 	m.effectsMu.Unlock()
@@ -97,6 +158,37 @@ func From(c *client.Client) *Module {
 }
 
 func (m *Module) IsDead() bool { return m.Health <= 0 }
+
+// LoginPacket reconstructs the full S2CLogin packet from stored state.
+func (m *Module) LoginPacket() *packets.S2CLogin {
+	dims := make(ns.PrefixedArray[ns.Identifier], len(m.DimensionNames))
+	for i, name := range m.DimensionNames {
+		dims[i] = ns.Identifier(name)
+	}
+
+	return &packets.S2CLogin{
+		EntityId:            ns.Int32(m.EntityID),
+		IsHardcore:          ns.Boolean(m.IsHardcore),
+		DimensionNames:      dims,
+		MaxPlayers:          ns.VarInt(m.MaxPlayers),
+		ViewDistance:        ns.VarInt(m.ViewDistance),
+		SimulationDistance:  ns.VarInt(m.SimulationDistance),
+		ReducedDebugInfo:    ns.Boolean(m.ReducedDebugInfo),
+		EnableRespawnScreen: ns.Boolean(m.EnableRespawnScreen),
+		DoLimitedCrafting:   ns.Boolean(m.DoLimitedCrafting),
+		DimensionType:       ns.VarInt(m.DimensionType),
+		DimensionName:       ns.Identifier(m.DimensionName),
+		HashedSeed:          ns.Int64(m.HashedSeed),
+		GameMode:            m.Gamemode,
+		PreviousGameMode:    ns.Int8(m.PreviousGameMode),
+		IsDebug:             ns.Boolean(m.IsDebug),
+		IsFlat:              ns.Boolean(m.IsFlat),
+		DeathLocation:       m.DeathLocation,
+		PortalCooldown:      ns.VarInt(m.PortalCooldown),
+		SeaLevel:            ns.VarInt(m.SeaLevel),
+		EnforcesSecureChat:  ns.Boolean(m.EnforcesSecureChat),
+	}
+}
 
 // events
 
@@ -128,6 +220,16 @@ func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 		m.handleUpdateMobEffect(pkt)
 	case packet_ids.S2CRemoveMobEffectID:
 		m.handleRemoveMobEffect(pkt)
+	case packet_ids.S2CChangeDifficultyID:
+		m.handleChangeDifficulty(pkt)
+	case packet_ids.S2CPlayerAbilitiesID:
+		m.handlePlayerAbilities(pkt)
+	case packet_ids.S2CSetDefaultSpawnPositionID:
+		m.handleSetDefaultSpawnPosition(pkt)
+	case packet_ids.S2CSetTimeID:
+		m.handleSetTime(pkt)
+	case packet_ids.S2CEntityEventID:
+		m.handleEntityEvent(pkt)
 	}
 }
 
@@ -137,9 +239,31 @@ func (m *Module) handleLogin(pkt *jp.WirePacket) {
 		m.client.Logger.Println("failed to parse login play data:", err)
 		return
 	}
+
 	m.EntityID = ns.VarInt(d.EntityId)
-	m.DeathLocation = d.DeathLocation
+	m.IsHardcore = bool(d.IsHardcore)
+	m.DimensionNames = make([]string, len(d.DimensionNames))
+	for i, name := range d.DimensionNames {
+		m.DimensionNames[i] = string(name)
+	}
+	m.MaxPlayers = int32(d.MaxPlayers)
+	m.ViewDistance = int32(d.ViewDistance)
+	m.SimulationDistance = int32(d.SimulationDistance)
+	m.ReducedDebugInfo = bool(d.ReducedDebugInfo)
+	m.EnableRespawnScreen = bool(d.EnableRespawnScreen)
+	m.DoLimitedCrafting = bool(d.DoLimitedCrafting)
+	m.DimensionType = int32(d.DimensionType)
+	m.DimensionName = string(d.DimensionName)
+	m.HashedSeed = int64(d.HashedSeed)
 	m.Gamemode = d.GameMode
+	m.PreviousGameMode = int8(d.PreviousGameMode)
+	m.IsDebug = bool(d.IsDebug)
+	m.IsFlat = bool(d.IsFlat)
+	m.DeathLocation = d.DeathLocation
+	m.PortalCooldown = int32(d.PortalCooldown)
+	m.SeaLevel = int32(d.SeaLevel)
+	m.EnforcesSecureChat = bool(d.EnforcesSecureChat)
+
 	m.client.Logger.Println("spawned; ready")
 
 	if m.client.Interactive {
@@ -265,5 +389,59 @@ func (m *Module) handleCombatKill(pkt *jp.WirePacket) {
 		if m.AutoRespawn {
 			m.Respawn()
 		}
+	}
+}
+
+func (m *Module) handleChangeDifficulty(pkt *jp.WirePacket) {
+	var d packets.S2CChangeDifficulty
+	if err := pkt.ReadInto(&d); err != nil {
+		return
+	}
+	m.Difficulty = uint8(d.Difficulty)
+	m.DifficultyLocked = bool(d.DifficultyLocked)
+}
+
+func (m *Module) handlePlayerAbilities(pkt *jp.WirePacket) {
+	var d packets.S2CPlayerAbilities
+	if err := pkt.ReadInto(&d); err != nil {
+		return
+	}
+	m.AbilityFlags = int8(d.Flags)
+	m.FlyingSpeed = float32(d.FlyingSpeed)
+	m.FOVModifier = float32(d.FieldOfViewModifier)
+}
+
+func (m *Module) handleSetDefaultSpawnPosition(pkt *jp.WirePacket) {
+	var d packets.S2CSetDefaultSpawnPosition
+	if err := pkt.ReadInto(&d); err != nil {
+		return
+	}
+	m.SpawnDimension = string(d.DimensionName)
+	m.SpawnPosition = d.Location
+	m.SpawnYaw = float32(d.Yaw)
+	m.SpawnPitch = float32(d.Pitch)
+}
+
+func (m *Module) handleSetTime(pkt *jp.WirePacket) {
+	var d packets.S2CSetTime
+	if err := pkt.ReadInto(&d); err != nil {
+		return
+	}
+	m.WorldAge = int64(d.WorldAge)
+	m.TimeOfDay = int64(d.TimeOfDay)
+	m.TimeIncreasing = bool(d.TimeOfDayIncreasing)
+}
+
+func (m *Module) handleEntityEvent(pkt *jp.WirePacket) {
+	// entity event is a fixed-size packet: Int32 entity ID + Int8 status
+	if len(pkt.Data) < 5 {
+		return
+	}
+	eid := int32(binary.BigEndian.Uint32(pkt.Data[0:4]))
+	status := int8(pkt.Data[4])
+
+	// status 24-28 = op permission levels 0-4
+	if eid == int32(m.EntityID) && status >= 24 && status <= 28 {
+		m.OpLevel = status - 24
 	}
 }

@@ -24,6 +24,15 @@ type Module struct {
 	// TreatTransferAsDisconnect treats S2CStartConfiguration in play state
 	// as a disconnect instead of transitioning back to configuration.
 	TreatTransferAsDisconnect bool
+
+	// recorded config-phase packets (for proxy replay)
+	configPackets []*jp.WirePacket
+	configDone    bool
+
+	// recorded play-phase opaque packets
+	commandsPacket    *jp.WirePacket
+	playerInfoPackets []*jp.WirePacket
+	waypointPackets   []*jp.WirePacket
 }
 
 func New() *Module {
@@ -36,7 +45,13 @@ func (m *Module) Init(c *client.Client) {
 	m.client = c
 }
 
-func (m *Module) Reset() {}
+func (m *Module) Reset() {
+	m.configPackets = nil
+	m.configDone = false
+	m.commandsPacket = nil
+	m.playerInfoPackets = nil
+	m.waypointPackets = nil
+}
 
 // From retrieves the protocol module from a client.
 func From(c *client.Client) *Module {
@@ -165,6 +180,19 @@ func (m *Module) handleEncryptionRequest(pkt *jp.WirePacket) {
 func (m *Module) handleConfiguration(pkt *jp.WirePacket) {
 	c := m.client
 
+	// record config packets for replay (skip protocol-level ones)
+	if !m.configDone {
+		switch pkt.PacketID {
+		case packet_ids.S2CFinishConfigurationID,
+			packet_ids.S2CKeepAliveConfigurationID,
+			packet_ids.S2CPingConfigurationID,
+			packet_ids.S2CDisconnectConfigurationID:
+			// don't record
+		default:
+			m.configPackets = append(m.configPackets, pkt.Clone())
+		}
+	}
+
 	switch pkt.PacketID {
 	case packet_ids.S2CDisconnectConfigurationID:
 		var d packets.S2CDisconnectConfiguration
@@ -214,6 +242,21 @@ func (m *Module) handleConfiguration(pkt *jp.WirePacket) {
 func (m *Module) handlePlay(pkt *jp.WirePacket) {
 	c := m.client
 
+	// mark config as done on first play packet
+	if !m.configDone {
+		m.configDone = true
+	}
+
+	// record opaque play-state packets
+	switch pkt.PacketID {
+	case packet_ids.S2CCommandsID:
+		m.commandsPacket = pkt.Clone()
+	case packet_ids.S2CPlayerInfoUpdateID, packet_ids.S2CPlayerInfoRemoveID:
+		m.playerInfoPackets = append(m.playerInfoPackets, pkt.Clone())
+	case packet_ids.S2CWaypointID:
+		m.waypointPackets = append(m.waypointPackets, pkt.Clone())
+	}
+
 	switch pkt.PacketID {
 	case packet_ids.S2CDisconnectPlayID:
 		var d packets.S2CDisconnectPlay
@@ -227,6 +270,13 @@ func (m *Module) handlePlay(pkt *jp.WirePacket) {
 			c.Disconnect(false)
 			return
 		}
+		// clear all recorded state — will be re-recorded during new config phase
+		m.configPackets = nil
+		m.configDone = false
+		m.commandsPacket = nil
+		m.playerInfoPackets = nil
+		m.waypointPackets = nil
+
 		if err := c.WritePacket(&packets.C2SConfigurationAcknowledged{}); err != nil {
 			c.Logger.Println("failed to send configuration_acknowledged:", err)
 		}
@@ -257,6 +307,33 @@ func (m *Module) sendClientInformation() {
 		AllowServerListings: true,
 		ParticleStatus:      2,
 	})
+}
+
+// ConfigDone returns whether configuration phase has completed.
+func (m *Module) ConfigDone() bool { return m.configDone }
+
+// ConfigPackets returns the recorded configuration-phase packets.
+func (m *Module) ConfigPackets() []*jp.WirePacket {
+	result := make([]*jp.WirePacket, len(m.configPackets))
+	copy(result, m.configPackets)
+	return result
+}
+
+// CommandsPacket returns the last recorded commands packet, or nil.
+func (m *Module) CommandsPacket() *jp.WirePacket { return m.commandsPacket }
+
+// PlayerInfoPackets returns all recorded player info update/remove packets.
+func (m *Module) PlayerInfoPackets() []*jp.WirePacket {
+	result := make([]*jp.WirePacket, len(m.playerInfoPackets))
+	copy(result, m.playerInfoPackets)
+	return result
+}
+
+// WaypointPackets returns all recorded waypoint packets.
+func (m *Module) WaypointPackets() []*jp.WirePacket {
+	result := make([]*jp.WirePacket, len(m.waypointPackets))
+	copy(result, m.waypointPackets)
+	return result
 }
 
 func (m *Module) sendBrandPluginMessage() {

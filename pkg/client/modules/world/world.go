@@ -39,12 +39,16 @@ type BlockEntityData struct {
 type Module struct {
 	client *client.Client
 
-	mu            sync.RWMutex
-	Chunks        map[int64]*chunks.ChunkColumn
-	blockEntities map[[3]int]*BlockEntityData // [x,y,z] -> data
-	CenterChunkX  int32
-	CenterChunkZ  int32
-	ViewDistance  int32
+	mu               sync.RWMutex
+	Chunks           map[int64]*chunks.ChunkColumn
+	chunkWirePackets map[int64]*jp.WirePacket
+	blockEntities    map[[3]int]*BlockEntityData // [x,y,z] -> data
+	CenterChunkX     int32
+	CenterChunkZ     int32
+	ViewDistance     int32
+
+	// border state (from S2CInitializeBorder)
+	border *packets.S2CInitializeBorder
 
 	onChunkLoad   []func(x, z int32)
 	onChunkUnload []func(x, z int32)
@@ -53,9 +57,10 @@ type Module struct {
 
 func New() *Module {
 	return &Module{
-		Chunks:        make(map[int64]*chunks.ChunkColumn),
-		blockEntities: make(map[[3]int]*BlockEntityData),
-		ViewDistance:  10,
+		Chunks:           make(map[int64]*chunks.ChunkColumn),
+		chunkWirePackets: make(map[int64]*jp.WirePacket),
+		blockEntities:    make(map[[3]int]*BlockEntityData),
+		ViewDistance:     10,
 	}
 }
 
@@ -67,7 +72,9 @@ func (m *Module) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.Chunks = make(map[int64]*chunks.ChunkColumn)
+	m.chunkWirePackets = make(map[int64]*jp.WirePacket)
 	m.blockEntities = make(map[[3]int]*BlockEntityData)
+	m.border = nil
 }
 
 // From retrieves the world module from a client.
@@ -105,6 +112,8 @@ func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 		m.handleChunkBatchFinished()
 	case packet_ids.S2CBlockEntityDataID:
 		m.handleBlockEntityData(pkt)
+	case packet_ids.S2CInitializeBorderID:
+		m.handleInitializeBorder(pkt)
 	}
 }
 
@@ -122,8 +131,10 @@ func (m *Module) handleChunkData(pkt *jp.WirePacket) {
 	}
 
 	cx, cz := int32(d.ChunkX), int32(d.ChunkZ)
+	key := ChunkKey(cx, cz)
 	m.mu.Lock()
-	m.Chunks[ChunkKey(cx, cz)] = column
+	m.Chunks[key] = column
+	m.chunkWirePackets[key] = pkt.Clone()
 	// store block entities from chunk data
 	for _, be := range column.BlockEntities {
 		x := int(cx)*16 + be.X()
@@ -150,9 +161,11 @@ func (m *Module) handleUnloadChunk(pkt *jp.WirePacket) {
 	}
 
 	cx, cz := int32(d.ChunkX), int32(d.ChunkZ)
+	key := ChunkKey(cx, cz)
 	baseX, baseZ := int(cx)*16, int(cz)*16
 	m.mu.Lock()
-	delete(m.Chunks, ChunkKey(cx, cz))
+	delete(m.Chunks, key)
+	delete(m.chunkWirePackets, key)
 	for key := range m.blockEntities {
 		if key[0] >= baseX && key[0] < baseX+16 && key[2] >= baseZ && key[2] < baseZ+16 {
 			delete(m.blockEntities, key)
@@ -264,4 +277,32 @@ func (m *Module) handleChunkBatchFinished() {
 	m.client.SendPacket(&packets.C2SChunkBatchReceived{
 		ChunksPerTick: ns.Float32(25.0),
 	})
+}
+
+func (m *Module) handleInitializeBorder(pkt *jp.WirePacket) {
+	var d packets.S2CInitializeBorder
+	if err := pkt.ReadInto(&d); err != nil {
+		return
+	}
+	m.mu.Lock()
+	m.border = &d
+	m.mu.Unlock()
+}
+
+// ChunkWirePackets returns a snapshot of all stored chunk wire packets.
+func (m *Module) ChunkWirePackets() []*jp.WirePacket {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := make([]*jp.WirePacket, 0, len(m.chunkWirePackets))
+	for _, pkt := range m.chunkWirePackets {
+		result = append(result, pkt)
+	}
+	return result
+}
+
+// Border returns the last received border initialization, or nil.
+func (m *Module) Border() *packets.S2CInitializeBorder {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.border
 }
