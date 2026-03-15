@@ -71,6 +71,13 @@ func (c *Client) ResolvedAddr() (host, port string) {
 	return c.resolvedHost, c.resolvedPort
 }
 
+// Debugf logs a message only when Verbose is enabled.
+func (c *Client) Debugf(format string, args ...any) {
+	if c.Verbose {
+		c.Logger.Printf("[DEBUG] "+format, args...)
+	}
+}
+
 // New creates a minimal client. Register modules before calling ConnectAndStart.
 func New(address, username string, onlineMode bool) *Client {
 	return &Client{
