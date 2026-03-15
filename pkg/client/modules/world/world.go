@@ -98,6 +98,9 @@ func (m *Module) OnBlockUpdate(cb func(x, y, z int, stateID int32)) {
 }
 
 func (m *Module) HandlePacket(pkt *jp.WirePacket) {
+	if m.client.State() != jp.StatePlay {
+		return
+	}
 	switch pkt.PacketID {
 	case packet_ids.S2CLevelChunkWithLightID:
 		m.handleChunkData(pkt)

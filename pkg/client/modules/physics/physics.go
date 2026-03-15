@@ -121,6 +121,9 @@ func (m *Module) SetInput(forward, strafe float64, jumping bool) {
 
 // HandlePacket handles velocity-related packets for the player's own entity.
 func (m *Module) HandlePacket(pkt *jp.WirePacket) {
+	if m.client.State() != jp.StatePlay {
+		return
+	}
 	switch pkt.PacketID {
 	case packet_ids.S2CDamageEventID:
 		m.handleDamageEvent(pkt)

@@ -79,6 +79,9 @@ func (m *Module) OnContainerClose(cb func()) {
 }
 
 func (m *Module) HandlePacket(pkt *jp.WirePacket) {
+	if m.client.State() != jp.StatePlay {
+		return
+	}
 	switch pkt.PacketID {
 	case packet_ids.S2COpenScreenID:
 		m.handleOpenScreen(pkt)

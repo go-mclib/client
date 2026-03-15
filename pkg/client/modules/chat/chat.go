@@ -56,6 +56,9 @@ func (m *Module) OnDisguisedChat(cb func(sender, message string, isWhisper bool)
 }
 
 func (m *Module) HandlePacket(pkt *jp.WirePacket) {
+	if m.client.State() != jp.StatePlay {
+		return
+	}
 	switch pkt.PacketID {
 	case packet_ids.S2CPlayerChatID:
 		m.handlePlayerChat(pkt)

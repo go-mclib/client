@@ -33,10 +33,13 @@ type Module struct {
 	commandsPacket    *jp.WirePacket
 	playerInfoPackets []*jp.WirePacket
 	waypointPackets   []*jp.WirePacket
+	bossEventPackets  map[ns.UUID]*jp.WirePacket // keyed by boss bar UUID
 }
 
 func New() *Module {
-	return &Module{}
+	return &Module{
+		bossEventPackets: make(map[ns.UUID]*jp.WirePacket),
+	}
 }
 
 func (m *Module) Name() string { return ModuleName }
@@ -53,6 +56,7 @@ func (m *Module) Reset() {
 	m.commandsPacket = nil
 	m.playerInfoPackets = nil
 	m.waypointPackets = nil
+	clear(m.bossEventPackets)
 }
 
 // From retrieves the protocol module from a client.
@@ -257,6 +261,8 @@ func (m *Module) handlePlay(pkt *jp.WirePacket) {
 		m.playerInfoPackets = append(m.playerInfoPackets, pkt.Clone())
 	case packet_ids.S2CWaypointID:
 		m.waypointPackets = append(m.waypointPackets, pkt.Clone())
+	case packet_ids.S2CBossEventID:
+		m.recordBossEvent(pkt)
 	}
 
 	switch pkt.PacketID {
@@ -331,6 +337,29 @@ func (m *Module) PlayerInfoPackets() []*jp.WirePacket {
 func (m *Module) WaypointPackets() []*jp.WirePacket {
 	result := make([]*jp.WirePacket, len(m.waypointPackets))
 	copy(result, m.waypointPackets)
+	return result
+}
+
+// recordBossEvent tracks boss bar add/remove for proxy replay.
+func (m *Module) recordBossEvent(pkt *jp.WirePacket) {
+	var d packets.S2CBossEvent
+	if err := pkt.ReadInto(&d); err != nil {
+		return
+	}
+	switch d.Action {
+	case packets.BossEventActionAdd:
+		m.bossEventPackets[d.Uuid] = pkt.Clone()
+	case packets.BossEventActionRemove:
+		delete(m.bossEventPackets, d.Uuid)
+	}
+}
+
+// BossEventPackets returns stored boss bar "add" packets for replay.
+func (m *Module) BossEventPackets() []*jp.WirePacket {
+	result := make([]*jp.WirePacket, 0, len(m.bossEventPackets))
+	for _, pkt := range m.bossEventPackets {
+		result = append(result, pkt)
+	}
 	return result
 }
 

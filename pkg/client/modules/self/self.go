@@ -206,6 +206,9 @@ func (m *Module) OnGameEvent(cb func(event uint8, value float32)) {
 }
 
 func (m *Module) HandlePacket(pkt *jp.WirePacket) {
+	if m.client.State() != jp.StatePlay {
+		return
+	}
 	switch pkt.PacketID {
 	case packet_ids.S2CLoginID:
 		m.handleLogin(pkt)
