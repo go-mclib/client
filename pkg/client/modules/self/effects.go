@@ -52,16 +52,28 @@ func (m *Module) handleUpdateMobEffect(pkt *jp.WirePacket) {
 	if err := pkt.ReadInto(&d); err != nil {
 		return
 	}
-	if int32(d.EntityId) != int32(m.EntityID) {
+
+	m.mu.RLock()
+	isUs := int32(d.EntityId) == m.entityID
+	m.mu.RUnlock()
+	if !isUs {
 		return
 	}
+
+	effectID := int32(d.EffectId)
+	amp := int32(d.Amplifier)
+	dur := int32(d.Duration)
 	m.effectsMu.Lock()
-	m.activeEffects[int32(d.EffectId)] = &EffectInstance{
-		ID:        int32(d.EffectId),
-		Amplifier: int32(d.Amplifier),
-		Duration:  int32(d.Duration),
+	m.activeEffects[effectID] = &EffectInstance{
+		ID:        effectID,
+		Amplifier: amp,
+		Duration:  dur,
 	}
 	m.effectsMu.Unlock()
+
+	for _, cb := range m.onEffectAdded {
+		cb(effectID, amp, dur)
+	}
 }
 
 func (m *Module) handleRemoveMobEffect(pkt *jp.WirePacket) {
@@ -69,10 +81,20 @@ func (m *Module) handleRemoveMobEffect(pkt *jp.WirePacket) {
 	if err := pkt.ReadInto(&d); err != nil {
 		return
 	}
-	if int32(d.EntityId) != int32(m.EntityID) {
+
+	m.mu.RLock()
+	isUs := int32(d.EntityId) == m.entityID
+	m.mu.RUnlock()
+	if !isUs {
 		return
 	}
+
+	effectID := int32(d.EffectId)
 	m.effectsMu.Lock()
-	delete(m.activeEffects, int32(d.EffectId))
+	delete(m.activeEffects, effectID)
 	m.effectsMu.Unlock()
+
+	for _, cb := range m.onEffectRemoved {
+		cb(effectID)
+	}
 }

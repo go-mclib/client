@@ -74,8 +74,9 @@ func main() {
 
 		s := self.From(c)
 		w := world.From(c)
+		bx, by, bz := s.Position()
 		c.Logger.Printf("%s said 'come' — entity at (%.2f, %.2f, %.2f)", senderName, e.X, e.Y, e.Z)
-		c.Logger.Printf("bot at (%.2f, %.2f, %.2f), chunks loaded: %d", float64(s.X), float64(s.Y), float64(s.Z), len(w.Chunks))
+		c.Logger.Printf("bot at (%.2f, %.2f, %.2f), chunks loaded: %d", bx, by, bz, w.GetLoadedChunkCount())
 		ch.SendMessage(fmt.Sprintf("Coming to you, %s!", senderName))
 
 		if err := pf.NavigateTo(e.X, e.Y, e.Z); err != nil {

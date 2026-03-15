@@ -45,7 +45,7 @@ func main() {
 			return
 		}
 
-		px, py, pz := float64(s.X), float64(s.Y), float64(s.Z)
+		px, py, pz := s.Position()
 
 		filter := func(e *entities.Entity) bool {
 			if !dataEntities.IsAttackable(e.TypeName) {
@@ -69,7 +69,7 @@ func main() {
 		c.SendPacket(&packets.C2SInteract{
 			EntityId:        ns.VarInt(closest.ID),
 			Type:            1,
-			SneakKeyPressed: ns.Boolean(s.Sneaking),
+			SneakKeyPressed: ns.Boolean(s.Sneaking()),
 		})
 		c.SendPacket(&packets.C2SSwing{Hand: 0})
 		ticksSinceAttack = 0
@@ -100,10 +100,12 @@ func attackCooldownTicks(inv *inventory.Module) float32 {
 // crosshairHits checks whether a ray from the bot's eye along its look direction
 // intersects the entity's AABB within attack range (slab method).
 func crosshairHits(s *self.Module, e *entities.Entity) bool {
-	ox, oy, oz := float64(s.X), float64(s.Y)+self.EyeHeight, float64(s.Z)
+	ox, oy, oz := s.Position()
+	oy += self.EyeHeight
 
-	yawRad := float64(s.Yaw) * math.Pi / 180
-	pitchRad := float64(s.Pitch) * math.Pi / 180
+	yaw, pitch := s.Rotation()
+	yawRad := float64(yaw) * math.Pi / 180
+	pitchRad := float64(pitch) * math.Pi / 180
 	dx := -math.Sin(yawRad) * math.Cos(pitchRad)
 	dy := -math.Sin(pitchRad)
 	dz := math.Cos(yawRad) * math.Cos(pitchRad)

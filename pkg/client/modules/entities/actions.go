@@ -143,9 +143,10 @@ func (m *Module) CanSee(entityID int32) bool {
 		return false
 	}
 
-	eyeX := float64(s.X)
-	eyeY := float64(s.Y) + self.EyeHeight
-	eyeZ := float64(s.Z)
+	sx, sy, sz := s.Position()
+	eyeX := sx
+	eyeY := sy + self.EyeHeight
+	eyeZ := sz
 	hit, _, _, _ := col.RaycastBlocks(eyeX, eyeY, eyeZ, e.X, e.Y+e.EyeHeight, e.Z)
 	return !hit
 }

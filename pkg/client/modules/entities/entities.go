@@ -393,5 +393,5 @@ func (m *Module) ownEntityID() int32 {
 	if s == nil {
 		return -1
 	}
-	return int32(s.EntityID)
+	return s.EntityID()
 }

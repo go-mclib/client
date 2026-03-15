@@ -95,9 +95,9 @@ func (m *Module) applyFluidPushing(x, y, z float64, w *world.Module) {
 	totalY *= scale
 	totalZ *= scale
 
-	m.VelX += totalX
-	m.VelY += totalY
-	m.VelZ += totalZ
+	m.velX += totalX
+	m.velY += totalY
+	m.velZ += totalZ
 }
 
 // getFluidFlow computes the flow direction at a fluid block.

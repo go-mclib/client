@@ -10,7 +10,7 @@ func (m *Module) GetBlock(x, y, z int) int32 {
 	chunkX, chunkZ := chunks.ChunkPos(x, z)
 
 	m.mu.RLock()
-	chunk := m.Chunks[ChunkKey(chunkX, chunkZ)]
+	chunk := m.chunks[ChunkKey(chunkX, chunkZ)]
 	m.mu.RUnlock()
 
 	if chunk == nil {
@@ -23,7 +23,7 @@ func (m *Module) GetBlock(x, y, z int) int32 {
 func (m *Module) IsChunkLoaded(chunkX, chunkZ int32) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	_, ok := m.Chunks[ChunkKey(chunkX, chunkZ)]
+	_, ok := m.chunks[ChunkKey(chunkX, chunkZ)]
 	return ok
 }
 
@@ -31,14 +31,14 @@ func (m *Module) IsChunkLoaded(chunkX, chunkZ int32) bool {
 func (m *Module) GetChunk(chunkX, chunkZ int32) *chunks.ChunkColumn {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.Chunks[ChunkKey(chunkX, chunkZ)]
+	return m.chunks[ChunkKey(chunkX, chunkZ)]
 }
 
 // GetLoadedChunkCount returns the number of loaded chunks.
 func (m *Module) GetLoadedChunkCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return len(m.Chunks)
+	return len(m.chunks)
 }
 
 // GetBlockEntity returns the block entity data at the given position, or nil.
@@ -68,7 +68,7 @@ func (m *Module) FindBlocks(blockIDs []int32, fn func(x, y, z int, stateID int32
 	// collect matches under the lock
 	var matches []match
 	m.mu.RLock()
-	for _, chunk := range m.Chunks {
+	for _, chunk := range m.chunks {
 		for secIdx, sec := range chunk.Sections {
 			if sec == nil {
 				continue

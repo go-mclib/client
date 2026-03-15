@@ -66,7 +66,7 @@ func main() {
 	var storing bool
 
 	findNearestContainer := func() (int, int, int, bool) {
-		px, py, pz := float64(s.X), float64(s.Y), float64(s.Z)
+		px, py, pz := s.Position()
 		bestDist := math.MaxFloat64
 		var bx, by, bz int
 		found := false
@@ -134,15 +134,16 @@ func main() {
 		c.Logger.Printf("nearest container at %d, %d, %d", cx, cy, cz)
 
 		// find a reachable position with LOS to the container
-		adjX, adjY, adjZ, adjFound := pathfinding.FindReachablePosition(col, float64(s.X), float64(s.Y), float64(s.Z), cx, cy, cz, blockReach)
+		sx, sy, sz := s.Position()
+		adjX, adjY, adjZ, adjFound := pathfinding.FindReachablePosition(col, sx, sy, sz, cx, cy, cz, blockReach)
 		if !adjFound {
 			c.Logger.Println("no reachable block with line-of-sight to container")
 			return
 		}
 
 		// navigate there if too far
-		dx := float64(adjX) + 0.5 - float64(s.X)
-		dz := float64(adjZ) + 0.5 - float64(s.Z)
+		dx := float64(adjX) + 0.5 - sx
+		dz := float64(adjZ) + 0.5 - sz
 		if math.Sqrt(dx*dx+dz*dz) > 1.0 {
 			done := make(chan bool, 1)
 			pf.OnNavigationComplete(func(reached bool) {

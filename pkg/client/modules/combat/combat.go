@@ -162,7 +162,7 @@ func (m *Module) performAttack(e *entities.Entity) error {
 	m.client.SendPacket(&packets.C2SInteract{
 		EntityId:        ns.VarInt(e.ID),
 		Type:            1, // attack
-		SneakKeyPressed: ns.Boolean(s.Sneaking),
+		SneakKeyPressed: ns.Boolean(s.Sneaking()),
 	})
 
 	// swing arm
@@ -184,9 +184,10 @@ func (m *Module) isWithinReach(e *entities.Entity) bool {
 		return false
 	}
 
-	eyeX := float64(s.X)
-	eyeY := float64(s.Y) + self.EyeHeight
-	eyeZ := float64(s.Z)
+	sx, sy, sz := s.Position()
+	eyeX := sx
+	eyeY := sy + self.EyeHeight
+	eyeZ := sz
 
 	aabb := collisions.EntityAABB(e.X, e.Y, e.Z, e.Width, e.Height)
 	cx, cy, cz := aabb.ClosestPoint(eyeX, eyeY, eyeZ)

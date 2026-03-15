@@ -108,9 +108,10 @@ func (m *Module) FindPath(goalX, goalY, goalZ float64) ([]PathNode, error) {
 		return nil, nil
 	}
 
-	startX := int(math.Floor(float64(s.X)))
-	startY := int(math.Floor(float64(s.Y)))
-	startZ := int(math.Floor(float64(s.Z)))
+	sx, sy, sz := s.Position()
+	startX := int(math.Floor(sx))
+	startY := int(math.Floor(sy))
+	startZ := int(math.Floor(sz))
 
 	gx := int(math.Floor(goalX))
 	gy := int(math.Floor(goalY))
@@ -162,8 +163,8 @@ func (m *Module) NavigateTo(goalX, goalY, goalZ float64) error {
 	m.goalY = goalY
 	m.goalZ = goalZ
 	if s != nil {
-		m.savedSprinting = s.Sprinting
-		m.savedSneaking = s.Sneaking
+		m.savedSprinting = s.Sprinting()
+		m.savedSneaking = s.Sneaking()
 	}
 	m.mu.Unlock()
 
@@ -185,8 +186,8 @@ func (m *Module) Stop() {
 		}
 		s := self.From(m.client)
 		if s != nil {
-			s.Sprinting = m.savedSprinting
-			s.Sneaking = m.savedSneaking
+			s.SetSprinting(m.savedSprinting)
+			s.SetSneaking(m.savedSneaking)
 		}
 	}
 }
@@ -214,9 +215,7 @@ func (m *Module) navigationTick() {
 		return
 	}
 
-	x := float64(s.X)
-	y := float64(s.Y)
-	z := float64(s.Z)
+	x, y, z := s.Position()
 
 	if m.pathIndex >= len(m.path) {
 		m.completeNavigation(true)
@@ -327,18 +326,19 @@ func (m *Module) navigationTick() {
 		lookX = x - dx
 		lookZ = z - dz
 		m.retreatTicks--
-	} else if p.HorizontalCollision && m.stuckTicks > 3 {
+	} else if p.HasHorizontalCollision() && m.stuckTicks > 3 {
 		m.retreatTicks = 8
 		m.retreatCycles++
 		lookX = x - dx
 		lookZ = z - dz
-	} else if p.HorizontalCollision {
-		if p.XCollision && p.ZCollision {
+	} else if p.HasHorizontalCollision() {
+		xCol, zCol := p.CollisionAxes()
+		if xCol && zCol {
 			m.retreatTicks = 8
 			m.retreatCycles++
 			lookX = x - dx
 			lookZ = z - dz
-		} else if p.XCollision {
+		} else if xCol {
 			lookX = x
 			lookZ = z + dz
 		} else {
@@ -349,7 +349,7 @@ func (m *Module) navigationTick() {
 	s.LookAt(lookX, wpY+playerHeight, lookZ)
 
 	// movement input
-	sneaking := s.Sneaking || wp.Sneaking
+	sneaking := s.Sneaking() || wp.Sneaking
 	var jumping, sprinting bool
 	if wp.Jump {
 		sprinting = true
@@ -357,7 +357,7 @@ func (m *Module) navigationTick() {
 
 		// edge-jumping: wait until near the edge of the block before jumping
 		distFromEdge := distToBlockEdge(x, z, dx, dz)
-		jumping = p.OnGround && distFromEdge < 0.3
+		jumping = p.IsOnGround() && distFromEdge < 0.3
 	} else {
 		// no jumping for regular movement — step-ups are handled by physics
 		jumping = false
@@ -368,8 +368,8 @@ func (m *Module) navigationTick() {
 		}
 	}
 
-	s.Sneaking = sneaking
-	s.Sprinting = sprinting
+	s.SetSneaking(sneaking)
+	s.SetSprinting(sprinting)
 	p.SetInput(1.0, 0, jumping)
 
 	// stuck detection
@@ -403,9 +403,10 @@ func (m *Module) tryRepath() bool {
 		return false
 	}
 
-	startX := int(math.Floor(float64(s.X)))
-	startY := int(math.Floor(float64(s.Y)))
-	startZ := int(math.Floor(float64(s.Z)))
+	sx, sy, sz := s.Position()
+	startX := int(math.Floor(sx))
+	startY := int(math.Floor(sy))
+	startZ := int(math.Floor(sz))
 
 	gx := int(math.Floor(m.goalX))
 	gy := int(math.Floor(m.goalY))
@@ -447,8 +448,8 @@ func (m *Module) completeNavigation(reached bool) {
 	}
 	s := self.From(m.client)
 	if s != nil {
-		s.Sprinting = m.savedSprinting
-		s.Sneaking = m.savedSneaking
+		s.SetSprinting(m.savedSprinting)
+		s.SetSneaking(m.savedSneaking)
 	}
 
 	for _, cb := range m.onNavigationComplete {

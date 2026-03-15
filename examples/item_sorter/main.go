@@ -207,15 +207,16 @@ func (sr *sorter) navigateTo(x, y, z float64, timeout time.Duration) bool {
 
 // openChest navigates to a reachable position and interacts with the chest.
 func (sr *sorter) openChest(pos blockPos) bool {
-	standX, standY, standZ, found := pathfinding.FindReachablePosition(sr.col, float64(sr.s.X), float64(sr.s.Y), float64(sr.s.Z), pos.x, pos.y, pos.z, blockReach)
+	sx, sy, sz := sr.s.Position()
+	standX, standY, standZ, found := pathfinding.FindReachablePosition(sr.col, sx, sy, sz, pos.x, pos.y, pos.z, blockReach)
 	if !found {
 		sr.c.Logger.Printf("no reachable position for chest at %d,%d,%d", pos.x, pos.y, pos.z)
 		return false
 	}
 
 	// navigate if not already close enough
-	dx := float64(standX) + 0.5 - float64(sr.s.X)
-	dz := float64(standZ) + 0.5 - float64(sr.s.Z)
+	dx := float64(standX) + 0.5 - sx
+	dz := float64(standZ) + 0.5 - sz
 	if math.Sqrt(dx*dx+dz*dz) > 1.0 {
 		if !sr.navigateTo(float64(standX)+0.5, float64(standY), float64(standZ)+0.5, 30*time.Second) {
 			return false
@@ -407,8 +408,8 @@ func (sr *sorter) eatIfHungry() {
 	if len(foodItemIDs) == 0 {
 		return
 	}
-	for int32(sr.s.Food) < hungerThreshold {
-		sr.c.Logger.Printf("hungry (food=%d), eating...", sr.s.Food)
+	for sr.s.Food() < hungerThreshold {
+		sr.c.Logger.Printf("hungry (food=%d), eating...", sr.s.Food())
 		if err := sr.s.Eat(foodItemIDs); err != nil {
 			sr.c.Logger.Printf("failed to eat: %v", err)
 			return
@@ -511,8 +512,9 @@ func (sr *sorter) depositAll() {
 			targets = append(targets, [3]int{pos.x, pos.y, pos.z})
 		}
 
+		sx, sy, sz := sr.s.Position()
 		standX, standY, standZ, reachable, found := pathfinding.FindBestReachPosition(
-			sr.col, float64(sr.s.X), float64(sr.s.Y), float64(sr.s.Z), targets, blockReach,
+			sr.col, sx, sy, sz, targets, blockReach,
 		)
 		if !found {
 			sr.c.Logger.Println("no reachable position for remaining chests")
@@ -521,8 +523,8 @@ func (sr *sorter) depositAll() {
 
 		sr.c.Logger.Printf("navigating to %d,%d,%d to reach %d chest(s)", standX, standY, standZ, len(reachable))
 
-		dx := float64(standX) + 0.5 - float64(sr.s.X)
-		dz := float64(standZ) + 0.5 - float64(sr.s.Z)
+		dx := float64(standX) + 0.5 - sx
+		dz := float64(standZ) + 0.5 - sz
 		if math.Sqrt(dx*dx+dz*dz) > 1.0 {
 			if !sr.navigateTo(float64(standX)+0.5, float64(standY), float64(standZ)+0.5, 30*time.Second) {
 				break
@@ -650,9 +652,10 @@ func (sr *sorter) groupSortableItems() map[blockPos][]int32 {
 // items to destination chests. Uses individual GetBlock calls instead of
 // FindBlocks to avoid holding the world RLock for long durations.
 func (sr *sorter) buildLabelMap() {
-	cx := int(math.Floor(float64(sr.s.X)))
-	cy := int(math.Floor(float64(sr.s.Y)))
-	cz := int(math.Floor(float64(sr.s.Z)))
+	sx, sy, sz := sr.s.Position()
+	cx := int(math.Floor(sx))
+	cy := int(math.Floor(sy))
+	cz := int(math.Floor(sz))
 
 	labelMap := make(map[int32]blockPos)
 	var matchers []categoryMatcher
@@ -660,7 +663,7 @@ func (sr *sorter) buildLabelMap() {
 	var trashChest *blockPos
 
 	// scan item frames within radius
-	for _, typeID := range []int32{dataEntities.ItemFrame, dataEntities.GlowItemFrame} {
+	for _, typeID := range []int32{dataEntities.EntityTypeID("minecraft:item_frame"), dataEntities.EntityTypeID("minecraft:glow_item_frame")} {
 		for _, e := range sr.ents.GetEntitiesByType(typeID) {
 			ex, ey, ez := int(math.Floor(e.X)), int(math.Floor(e.Y)), int(math.Floor(e.Z))
 			if intAbs(ex-cx) > scanRadius || intAbs(ey-cy) > scanRadius || intAbs(ez-cz) > scanRadius {

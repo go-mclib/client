@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-mclib/client/pkg/client/modules/inventory"
@@ -29,39 +30,44 @@ func (m *Module) Move(x, y, z float64, onGround, pushingAgainstWall bool) error 
 }
 
 func (m *Module) MoveRelative(dx, dy, dz float64, onGround, pushingAgainstWall bool) error {
-	return m.Move(float64(m.X)+dx, float64(m.Y)+dy, float64(m.Z)+dz, onGround, pushingAgainstWall)
+	m.mu.RLock()
+	x, y, z := m.x+dx, m.y+dy, m.z+dz
+	m.mu.RUnlock()
+	return m.Move(x, y, z, onGround, pushingAgainstWall)
 }
 
 // LookAt sets yaw/pitch to face the given world position.
-// The rotation is sent to the server by the physics module's sendPosition.
 func (m *Module) LookAt(x, y, z float64) {
-	yaw, pitch := WorldPosToYawPitch(float64(m.X), float64(m.Y)+EyeHeight, float64(m.Z), x, y, z)
-	m.SetRotation(yaw, pitch)
+	m.mu.Lock()
+	yaw, pitch := WorldPosToYawPitch(m.x, m.y+EyeHeight, m.z, x, y, z)
+	m.yaw = float32(yaw)
+	m.pitch = float32(pitch)
+	m.mu.Unlock()
 }
 
-// SetRotation sets yaw and pitch.
-// The rotation is sent to the server by the physics module's sendPosition.
+// SetRotation updates yaw and pitch.
 func (m *Module) SetRotation(yaw, pitch float64) {
-	m.Yaw = ns.Float32(yaw)
-	m.Pitch = ns.Float32(pitch)
+	m.mu.Lock()
+	m.yaw = float32(yaw)
+	m.pitch = float32(pitch)
+	m.mu.Unlock()
 }
 
 func (m *Module) Rotate(deltaYaw, deltaPitch float64) {
-	newYaw := float64(m.Yaw) + deltaYaw
-	newPitch := float64(m.Pitch) + deltaPitch
+	m.mu.Lock()
+	newYaw := float64(m.yaw) + deltaYaw
+	newPitch := float64(m.pitch) + deltaPitch
 
-	if newPitch > 90 {
-		newPitch = 90
-	} else if newPitch < -90 {
-		newPitch = -90
-	}
+	newPitch = max(-90, min(90, newPitch))
 	for newYaw < 0 {
 		newYaw += 360
 	}
 	for newYaw >= 360 {
 		newYaw -= 360
 	}
-	m.SetRotation(newYaw, newPitch)
+	m.yaw = float32(newYaw)
+	m.pitch = float32(newPitch)
+	m.mu.Unlock()
 }
 
 func (m *Module) Respawn() error {
@@ -78,7 +84,10 @@ func (m *Module) UseAt(hand int8, yaw, pitch float64) error {
 }
 
 func (m *Module) Use(hand int8) error {
-	return m.UseAt(hand, float64(m.Yaw), float64(m.Pitch))
+	m.mu.RLock()
+	yaw, pitch := float64(m.yaw), float64(m.pitch)
+	m.mu.RUnlock()
+	return m.UseAt(hand, yaw, pitch)
 }
 
 // Eat finds a food item from the given list, holds it, and eats it.
@@ -119,11 +128,16 @@ func (m *Module) Eat(foodItemIDs []int32) error {
 	defer inv.SetHeldSlot(prevSlot)
 	time.Sleep(50 * time.Millisecond)
 
-	// register a one-shot callback to detect food change
+	// one-shot callback to detect food change (disarms itself after firing)
 	done := make(chan struct{}, 1)
-	prevFood := int32(m.Food)
+	prevFood := m.Food()
+	var fired atomic.Bool
 	m.OnHealthSet(func(_, food float32) {
+		if fired.Load() {
+			return
+		}
 		if int32(food) != prevFood {
+			fired.Store(true)
 			select {
 			case done <- struct{}{}:
 			default:
@@ -145,12 +159,12 @@ func (m *Module) Eat(foodItemIDs []int32) error {
 }
 
 // WorldPosToYawPitch calculates yaw and pitch to look from (x,y,z) at (lookX,lookY,lookZ).
-// Matches MC convention: yaw 0=south(+Z), 90=west(-X), -90/270=east(+X), 180=north(-Z).
+// MC yaw: 0=south(+Z), 90=west(-X), 180=north(-Z), 270=east(+X).
 func WorldPosToYawPitch(x, y, z, lookX, lookY, lookZ float64) (yaw, pitch float64) {
 	dx := lookX - x
 	dy := lookY - y
 	dz := lookZ - z
-	yaw = math.Atan2(dz, dx)*180/math.Pi - 90
+	yaw = -math.Atan2(dx, dz) * 180 / math.Pi
 	pitch = -math.Atan2(dy, math.Sqrt(dx*dx+dz*dz)) * 180 / math.Pi
 	return
 }

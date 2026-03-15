@@ -3,6 +3,7 @@ package physics
 import (
 	"context"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/go-mclib/client/pkg/client"
@@ -20,20 +21,21 @@ const ModuleName = "physics"
 
 type Module struct {
 	client *client.Client
+	mu     sync.RWMutex
 
 	// velocity (delta movement)
-	VelX, VelY, VelZ float64
+	velX, velY, velZ float64
 
 	// state
-	OnGround            bool
-	HorizontalCollision bool
-	XCollision          bool
-	ZCollision          bool
+	onGround            bool
+	horizontalCollision bool
+	xCollision          bool
+	zCollision          bool
 
 	// input
-	ForwardImpulse float64 // -1.0 to 1.0
-	StrafeImpulse  float64 // -1.0 to 1.0
-	Jumping        bool
+	forwardImpulse float64 // -1.0 to 1.0
+	strafeImpulse  float64 // -1.0 to 1.0
+	jumping        bool
 
 	// position packet tracking (LocalPlayer.sendPosition)
 	lastSentX, lastSentY, lastSentZ float64
@@ -75,9 +77,10 @@ func (m *Module) Init(c *client.Client) {
 			m.lastSentX = x
 			m.lastSentY = y
 			m.lastSentZ = z
-			m.lastSentYaw = float32(s.Yaw)
-			m.lastSentPitch = float32(s.Pitch)
-			m.lastSentOnGround = m.OnGround
+			yaw, pitch := s.Rotation()
+			m.lastSentYaw = yaw
+			m.lastSentPitch = pitch
+			m.lastSentOnGround = m.onGround
 			m.positionReminder = 0
 		})
 	}
@@ -88,14 +91,18 @@ func (m *Module) Reset() {
 		m.cancel()
 		m.cancel = nil
 	}
-	m.VelX = 0
-	m.VelY = 0
-	m.VelZ = 0
-	m.OnGround = false
-	m.HorizontalCollision = false
-	m.ForwardImpulse = 0
-	m.StrafeImpulse = 0
-	m.Jumping = false
+	m.mu.Lock()
+	m.velX = 0
+	m.velY = 0
+	m.velZ = 0
+	m.onGround = false
+	m.horizontalCollision = false
+	m.xCollision = false
+	m.zCollision = false
+	m.forwardImpulse = 0
+	m.strafeImpulse = 0
+	m.jumping = false
+	m.mu.Unlock()
 	m.positionReminder = 0
 }
 
@@ -107,6 +114,43 @@ func From(c *client.Client) *Module {
 	return mod.(*Module)
 }
 
+// getters
+
+// Velocity returns the current velocity (delta movement).
+func (m *Module) Velocity() (x, y, z float64) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.velX, m.velY, m.velZ
+}
+
+// IsOnGround returns whether the player is on the ground.
+func (m *Module) IsOnGround() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.onGround
+}
+
+// HasHorizontalCollision returns whether the player has a horizontal collision.
+func (m *Module) HasHorizontalCollision() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.horizontalCollision
+}
+
+// CollisionAxes returns which axes have horizontal collisions.
+func (m *Module) CollisionAxes() (x, z bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.xCollision, m.zCollision
+}
+
+// Input returns the current movement input state.
+func (m *Module) Input() (forward, strafe float64, jumping bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.forwardImpulse, m.strafeImpulse, m.jumping
+}
+
 // events
 
 func (m *Module) OnTick(cb func()) { m.onTick = append(m.onTick, cb) }
@@ -114,9 +158,11 @@ func (m *Module) OnTick(cb func()) { m.onTick = append(m.onTick, cb) }
 // actions
 
 func (m *Module) SetInput(forward, strafe float64, jumping bool) {
-	m.ForwardImpulse = forward
-	m.StrafeImpulse = strafe
-	m.Jumping = jumping
+	m.mu.Lock()
+	m.forwardImpulse = forward
+	m.strafeImpulse = strafe
+	m.jumping = jumping
+	m.mu.Unlock()
 }
 
 // HandlePacket handles velocity-related packets for the player's own entity.
@@ -141,13 +187,15 @@ func (m *Module) handleDamageEvent(pkt *jp.WirePacket) {
 	}
 
 	s := self.From(m.client)
-	if s == nil || int32(d.EntityId) != int32(s.EntityID) {
+	if s == nil || int32(d.EntityId) != s.EntityID() {
 		return
 	}
 
 	// SourceCauseId and SourceDirectId are >1, or 0 if no entity (e.g. environmental damage)
+	m.mu.Lock()
 	m.hasPendingDamage = true
 	m.lastDamageEntityCause = int32(d.SourceCauseId) > 0 || int32(d.SourceDirectId) > 0
+	m.mu.Unlock()
 }
 
 func (m *Module) handleEntityMotion(pkt *jp.WirePacket) {
@@ -157,21 +205,24 @@ func (m *Module) handleEntityMotion(pkt *jp.WirePacket) {
 	}
 
 	s := self.From(m.client)
-	if s == nil || int32(d.EntityId) != int32(s.EntityID) {
+	if s == nil || int32(d.EntityId) != s.EntityID() {
 		return
 	}
 
+	m.mu.Lock()
 	// if preceded by a damage event, only apply velocity for entity-caused damage
 	if m.hasPendingDamage {
 		m.hasPendingDamage = false
 		if !m.lastDamageEntityCause {
+			m.mu.Unlock()
 			return // environmental damage — ignore knockback
 		}
 	}
 
-	m.VelX = d.Velocity.X
-	m.VelY = d.Velocity.Y
-	m.VelZ = d.Velocity.Z
+	m.velX = d.Velocity.X
+	m.velY = d.Velocity.Y
+	m.velZ = d.Velocity.Z
+	m.mu.Unlock()
 }
 
 func (m *Module) handleTeleport(pkt *jp.WirePacket) {
@@ -182,21 +233,23 @@ func (m *Module) handleTeleport(pkt *jp.WirePacket) {
 
 	flags := int32(d.Flags)
 
+	m.mu.Lock()
 	if flags&0x20 != 0 {
-		m.VelX += float64(d.VelocityX)
+		m.velX += float64(d.VelocityX)
 	} else {
-		m.VelX = float64(d.VelocityX)
+		m.velX = float64(d.VelocityX)
 	}
 	if flags&0x40 != 0 {
-		m.VelY += float64(d.VelocityY)
+		m.velY += float64(d.VelocityY)
 	} else {
-		m.VelY = float64(d.VelocityY)
+		m.velY = float64(d.VelocityY)
 	}
 	if flags&0x80 != 0 {
-		m.VelZ += float64(d.VelocityZ)
+		m.velZ += float64(d.VelocityZ)
 	} else {
-		m.VelZ = float64(d.VelocityZ)
+		m.velZ = float64(d.VelocityZ)
 	}
+	m.mu.Unlock()
 }
 
 func (m *Module) startTickLoop() {
@@ -212,12 +265,14 @@ func (m *Module) startTickLoop() {
 	}
 
 	// initialize last sent position
-	m.lastSentX = float64(s.X)
-	m.lastSentY = float64(s.Y)
-	m.lastSentZ = float64(s.Z)
-	m.lastSentYaw = float32(s.Yaw)
-	m.lastSentPitch = float32(s.Pitch)
-	m.lastSentOnGround = m.OnGround
+	x, y, z := s.Position()
+	yaw, pitch := s.Rotation()
+	m.lastSentX = x
+	m.lastSentY = y
+	m.lastSentZ = z
+	m.lastSentYaw = yaw
+	m.lastSentPitch = pitch
+	m.lastSentOnGround = m.onGround
 	m.positionReminder = 0
 
 	go func() {
@@ -244,7 +299,7 @@ func (m *Module) tick() {
 	}
 
 	// an external controller handles movement and position — skip physics
-	if s.SuppressPositionEcho {
+	if s.SuppressPositionEcho() {
 		return
 	}
 
@@ -257,36 +312,34 @@ func (m *Module) tick() {
 		cb()
 	}
 
-	x := float64(s.X)
-	y := float64(s.Y)
-	z := float64(s.Z)
-	yaw := float64(s.Yaw)
+	x, y, z := s.Position()
+	yaw, _ := s.Rotation()
 
 	// apply fluid flow pushing (Entity.baseTick in vanilla, before aiStep)
 	m.applyFluidPushing(x, y, z, w)
 
 	// process inputs (LocalPlayer.modifyInput: 0.98 friction + sneaking + square normalization)
-	forwardImpulse, strafeImpulse := modifyInput(m.ForwardImpulse, m.StrafeImpulse, s.Sneaking)
+	forwardImpulse, strafeImpulse := modifyInput(m.forwardImpulse, m.strafeImpulse, s.Sneaking())
 
 	// effective player height (1.5 when sneaking, 1.8 otherwise)
 	playerHeight := PlayerHeight
-	if s.Sneaking {
+	if s.Sneaking() {
 		playerHeight = PlayerSneakingHeight
 	}
 
 	// movement threshold zeroing (LivingEntity.aiStep lines 2917-2940)
 	// for players: zero horizontal velocity if magnitude² < 9e-6
-	if m.VelX*m.VelX+m.VelZ*m.VelZ < 9.0e-6 {
-		m.VelX = 0
-		m.VelZ = 0
+	if m.velX*m.velX+m.velZ*m.velZ < 9.0e-6 {
+		m.velX = 0
+		m.velZ = 0
 	}
-	if math.Abs(m.VelY) < 0.003 {
-		m.VelY = 0
+	if math.Abs(m.velY) < 0.003 {
+		m.velY = 0
 	}
 
 	// jump (after threshold zeroing, before travel)
-	if m.Jumping && m.OnGround {
-		m.jump(s, yaw)
+	if m.jumping && m.onGround {
+		m.jump(s, float64(yaw))
 	}
 
 	// determine environment
@@ -298,49 +351,47 @@ func (m *Module) tick() {
 	// vanilla order: moveRelative → move/collide → gravity + friction
 	var blockFriction float64
 	if inWater {
-		m.applyWaterInputScaled(yaw, forwardImpulse, strafeImpulse)
+		m.applyWaterInputScaled(float64(yaw), forwardImpulse, strafeImpulse)
 	} else if inLava {
-		m.applyLavaInputScaled(yaw, forwardImpulse, strafeImpulse)
+		m.applyLavaInputScaled(float64(yaw), forwardImpulse, strafeImpulse)
 	} else {
-		blockFriction = m.applyAirInputScaled(s, x, y, z, yaw, w, forwardImpulse, strafeImpulse)
+		blockFriction = m.applyAirInputScaled(s, x, y, z, float64(yaw), w, forwardImpulse, strafeImpulse)
 	}
 
 	// resolve collisions (this.move in vanilla)
-	origVelY := m.VelY
-	adjX, adjY, adjZ, _, vCol := col.CollideMovement(x, y, z, PlayerWidth, playerHeight, m.VelX, m.VelY, m.VelZ)
+	origVelY := m.velY
+	adjX, adjY, adjZ, _, vCol := col.CollideMovement(x, y, z, PlayerWidth, playerHeight, m.velX, m.velY, m.velZ)
 
 	// horizontal collision detection with tolerance (vanilla Mth.equal: 1e-5)
-	xCollided := notEqual(m.VelX, adjX)
-	zCollided := notEqual(m.VelZ, adjZ)
-	m.HorizontalCollision = xCollided || zCollided
-	m.XCollision = xCollided
-	m.ZCollision = zCollided
+	xCollided := notEqual(m.velX, adjX)
+	zCollided := notEqual(m.velZ, adjZ)
+	m.horizontalCollision = xCollided || zCollided
+	m.xCollision = xCollided
+	m.zCollision = zCollided
 	if vCol {
-		m.VelY = 0
+		m.velY = 0
 	}
 	if xCollided {
-		m.VelX = 0
+		m.velX = 0
 	}
 	if zCollided {
-		m.VelZ = 0
+		m.velZ = 0
 	}
 
 	// update position
 	newX := x + adjX
 	newY := y + adjY
 	newZ := z + adjZ
-	s.X = ns.Float64(newX)
-	s.Y = ns.Float64(newY)
-	s.Z = ns.Float64(newZ)
+	s.SetPosition(newX, newY, newZ)
 
-	m.OnGround = vCol && origVelY < 0
+	m.onGround = vCol && origVelY < 0
 
 	// block speed factor (Entity.move: applied after collision, before friction)
 	if !inWater && !inLava {
 		speedFactor := GetBlockSpeedFactorAt(w, newX, newY, newZ)
 		if speedFactor != 1.0 {
-			m.VelX *= speedFactor
-			m.VelZ *= speedFactor
+			m.velX *= speedFactor
+			m.velZ *= speedFactor
 		}
 	}
 
@@ -374,7 +425,7 @@ func (m *Module) tick() {
 func (m *Module) applyAirInputScaled(s *self.Module, x, y, z, yaw float64, w *world.Module, forward, strafe float64) float64 {
 	belowBlock := w.GetBlock(int(math.Floor(x)), int(math.Floor(y-0.5)), int(math.Floor(z)))
 	var blockFriction float64
-	if m.OnGround {
+	if m.onGround {
 		blockFriction = GetBlockFriction(belowBlock)
 	} else {
 		blockFriction = 1.0
@@ -382,9 +433,9 @@ func (m *Module) applyAirInputScaled(s *self.Module, x, y, z, yaw float64, w *wo
 
 	// vanilla getFrictionInfluencedSpeed: entire calculation in float32
 	var speed float64
-	if m.OnGround {
+	if m.onGround {
 		baseSpeed := m.getEffectiveSpeed(s)
-		if s.Sprinting {
+		if s.Sprinting() {
 			baseSpeed *= (1.0 + SprintModifier)
 		}
 		// vanilla: this.getSpeed() * (0.21600002F / (blockFriction * blockFriction * blockFriction))
@@ -396,8 +447,8 @@ func (m *Module) applyAirInputScaled(s *self.Module, x, y, z, yaw float64, w *wo
 	}
 
 	dx, _, dz := moveRelative(speed, forward, strafe, yaw)
-	m.VelX += dx
-	m.VelZ += dz
+	m.velX += dx
+	m.velZ += dz
 
 	return blockFriction
 }
@@ -412,76 +463,71 @@ func (m *Module) applyAirPhysics(s *self.Module, blockFriction float64) {
 	if levAmp >= 0 {
 		// levitation replaces gravity: lerp toward target upward velocity
 		target := LevitationPerLevel * float64(levAmp+1)
-		m.VelY += (target - m.VelY) * LevitationLerpFactor
+		m.velY += (target - m.velY) * LevitationLerpFactor
 	} else {
-		m.VelY -= m.getEffectiveGravity(s)
+		m.velY -= m.getEffectiveGravity(s)
 	}
 
-	m.VelX *= friction
-	m.VelZ *= friction
-	m.VelY *= VerticalAirFriction
+	m.velX *= friction
+	m.velZ *= friction
+	m.velY *= VerticalAirFriction
 }
 
 // applyWaterInputScaled adds movement input to velocity in water (pre-collision).
 func (m *Module) applyWaterInputScaled(yaw, forward, strafe float64) {
 	dx, _, dz := moveRelative(WaterAcceleration, forward, strafe, yaw)
-	m.VelX += dx
-	m.VelZ += dz
+	m.velX += dx
+	m.velZ += dz
 }
 
 // applyWaterPhysics applies water drag and gravity after collision (post-move).
 func (m *Module) applyWaterPhysics(s *self.Module) {
 	slowDown := WaterSlowdown
-	if s.Sprinting {
+	if s.Sprinting() {
 		slowDown = WaterSprintSlowdown
 	}
-	m.VelX *= slowDown
-	m.VelY *= WaterVerticalDrag
-	m.VelZ *= slowDown
-	m.VelY -= Gravity
+	m.velX *= slowDown
+	m.velY *= WaterVerticalDrag
+	m.velZ *= slowDown
+	m.velY -= Gravity
 }
 
 // applyLavaInputScaled adds movement input to velocity in lava (pre-collision).
 func (m *Module) applyLavaInputScaled(yaw, forward, strafe float64) {
 	dx, _, dz := moveRelative(WaterAcceleration, forward, strafe, yaw)
-	m.VelX += dx
-	m.VelZ += dz
+	m.velX += dx
+	m.velZ += dz
 }
 
 // applyLavaPhysics applies lava drag and gravity after collision (post-move).
 func (m *Module) applyLavaPhysics() {
-	m.VelX *= LavaSlowdown
-	m.VelY *= LavaVerticalDrag
-	m.VelZ *= LavaSlowdown
-	m.VelY -= Gravity * LavaGravityFactor
+	m.velX *= LavaSlowdown
+	m.velY *= LavaVerticalDrag
+	m.velZ *= LavaSlowdown
+	m.velY -= Gravity * LavaGravityFactor
 }
 
 // jump applies jump velocity (LivingEntity.jumpFromGround).
-// Does NOT set OnGround = false — vanilla sets it later inside Entity.move()
-// after collision resolution. Keeping OnGround = true ensures the jump tick
+// Does NOT set onGround = false — vanilla sets it later inside Entity.move()
+// after collision resolution. Keeping onGround = true ensures the jump tick
 // uses ground friction/speed for input, matching vanilla behavior.
 func (m *Module) jump(s *self.Module, yaw float64) {
 	jp := m.getJumpPower(s)
-	m.VelY = max(jp, m.VelY)
-	if s.Sprinting {
+	m.velY = max(jp, m.velY)
+	if s.Sprinting() {
 		angle := yaw * math.Pi / 180.0
-		m.VelX += -math.Sin(angle) * SprintJumpBoost
-		m.VelZ += math.Cos(angle) * SprintJumpBoost
+		m.velX += -math.Sin(angle) * SprintJumpBoost
+		m.velZ += math.Cos(angle) * SprintJumpBoost
 	}
 }
 
-// getJumpPower returns jump velocity accounting for Jump Boost effect.
-// Matches LivingEntity.getJumpPower + getJumpBoostPower.
+// getJumpPower returns jump velocity from the server-tracked attribute.
+// The server sends jump_strength with jump boost modifiers already applied.
 func (m *Module) getJumpPower(s *self.Module) float64 {
-	power := JumpPower
-	amp := s.EffectAmplifier(effectJumpBoost)
-	if amp >= 0 {
-		power += JumpBoostPerLevel * float64(amp+1)
-	}
-	return power
+	return s.AttributeValue("minecraft:jump_strength", JumpPower)
 }
 
-// GetJumpPower returns current jump power accounting for active effects.
+// GetJumpPower returns current jump power from the tracked attribute.
 func (m *Module) GetJumpPower() float64 {
 	s := self.From(m.client)
 	if s == nil {
@@ -490,29 +536,23 @@ func (m *Module) GetJumpPower() float64 {
 	return m.getJumpPower(s)
 }
 
-// getEffectiveGravity returns gravity, capped to 0.01 when slow falling and descending.
-// Matches LivingEntity.getEffectiveGravity.
+// getEffectiveGravity returns gravity from the tracked attribute,
+// capped to SlowFallingGravity when slow falling and descending (client-side logic).
 func (m *Module) getEffectiveGravity(s *self.Module) float64 {
-	if m.VelY <= 0 && s.HasEffect(effectSlowFalling) {
-		return min(Gravity, SlowFallingGravity)
+	g := s.AttributeValue("minecraft:gravity", Gravity)
+	if m.velY <= 0 && s.HasEffect(effectSlowFalling) {
+		return min(g, SlowFallingGravity)
 	}
-	return Gravity
+	return g
 }
 
-// getEffectiveSpeed returns base movement speed accounting for Speed and Slowness effects.
-// Matches attribute modifiers with ADD_MULTIPLIED_TOTAL operation.
+// getEffectiveSpeed returns movement speed from the server-tracked attribute.
+// The server sends movement_speed with speed/slowness modifiers already applied.
 func (m *Module) getEffectiveSpeed(s *self.Module) float64 {
-	speed := PlayerSpeed
-	if amp := s.EffectAmplifier(effectSpeed); amp >= 0 {
-		speed *= 1.0 + SpeedPerLevel*float64(amp+1)
-	}
-	if amp := s.EffectAmplifier(effectSlowness); amp >= 0 {
-		speed *= 1.0 - SlownessPerLevel*float64(amp+1)
-	}
-	return max(speed, 0)
+	return max(s.AttributeValue("minecraft:movement_speed", PlayerSpeed), 0)
 }
 
-// GetEffectiveSpeed returns current base movement speed accounting for active effects.
+// GetEffectiveSpeed returns current movement speed from the tracked attribute.
 func (m *Module) GetEffectiveSpeed() float64 {
 	s := self.From(m.client)
 	if s == nil {
@@ -635,8 +675,8 @@ func (m *Module) applyEntityPushing(x, y, z, height float64) {
 		dz /= dist
 		pow := math.Min(1.0, 1.0/dist)
 		push := pow * EntityPushStrength
-		m.VelX -= dx * push
-		m.VelZ -= dz * push
+		m.velX -= dx * push
+		m.velZ -= dz * push
 	}
 }
 
@@ -644,25 +684,25 @@ func (m *Module) applyEntityPushing(x, y, z, height float64) {
 // flags: forward(1), backward(2), left(4), right(8), jump(16), shift(32), sprint(64)
 func (m *Module) sendInput(s *self.Module) {
 	var flags uint8
-	if m.ForwardImpulse > 0 {
+	if m.forwardImpulse > 0 {
 		flags |= 1
 	}
-	if m.ForwardImpulse < 0 {
+	if m.forwardImpulse < 0 {
 		flags |= 2
 	}
-	if m.StrafeImpulse > 0 {
+	if m.strafeImpulse > 0 {
 		flags |= 4
 	}
-	if m.StrafeImpulse < 0 {
+	if m.strafeImpulse < 0 {
 		flags |= 8
 	}
-	if m.Jumping {
+	if m.jumping {
 		flags |= 16
 	}
-	if s.Sneaking {
+	if s.Sneaking() {
 		flags |= 32
 	}
-	if s.Sprinting {
+	if s.Sprinting() {
 		flags |= 64
 	}
 
@@ -678,38 +718,37 @@ func (m *Module) sendInput(s *self.Module) {
 // Sends sprint/sneak commands first (vanilla: sendIsSprintingIfNeeded is called inside sendPosition).
 func (m *Module) sendPosition(s *self.Module) {
 	// sendIsSprintingIfNeeded
-	if s.Sprinting != m.lastSentSprinting {
-		m.lastSentSprinting = s.Sprinting
+	sprinting := s.Sprinting()
+	if sprinting != m.lastSentSprinting {
+		m.lastSentSprinting = sprinting
 		actionID := ns.VarInt(4) // stop sprinting
-		if s.Sprinting {
+		if sprinting {
 			actionID = 3 // start sprinting
 		}
 		m.client.SendPacket(&packets.C2SPlayerCommand{
-			EntityId: ns.VarInt(s.EntityID),
+			EntityId: ns.VarInt(s.EntityID()),
 			ActionId: actionID,
 		})
 	}
 
 	// send sneaking state change
-	if s.Sneaking != m.lastSentSneaking {
-		m.lastSentSneaking = s.Sneaking
+	sneaking := s.Sneaking()
+	if sneaking != m.lastSentSneaking {
+		m.lastSentSneaking = sneaking
 		actionID := ns.VarInt(1) // stop sneaking
-		if s.Sneaking {
+		if sneaking {
 			actionID = 0 // start sneaking
 		}
 		m.client.SendPacket(&packets.C2SPlayerCommand{
-			EntityId: ns.VarInt(s.EntityID),
+			EntityId: ns.VarInt(s.EntityID()),
 			ActionId: actionID,
 		})
 	}
 
 	m.positionReminder++
 
-	x := float64(s.X)
-	y := float64(s.Y)
-	z := float64(s.Z)
-	yaw := float32(s.Yaw)
-	pitch := float32(s.Pitch)
+	x, y, z := s.Position()
+	yaw, pitch := s.Rotation()
 
 	dx := x - m.lastSentX
 	dy := y - m.lastSentY
@@ -718,10 +757,10 @@ func (m *Module) sendPosition(s *self.Module) {
 	rotated := yaw != m.lastSentYaw || pitch != m.lastSentPitch
 
 	var flags ns.Int8
-	if m.OnGround {
+	if m.onGround {
 		flags = 0x01
 	}
-	if m.HorizontalCollision {
+	if m.horizontalCollision {
 		flags |= 0x02
 	}
 
@@ -741,7 +780,7 @@ func (m *Module) sendPosition(s *self.Module) {
 			Yaw: ns.Float32(yaw), Pitch: ns.Float32(pitch),
 			Flags: flags,
 		})
-	} else if m.OnGround != m.lastSentOnGround || m.HorizontalCollision != m.lastSentHorizontalCollision {
+	} else if m.onGround != m.lastSentOnGround || m.horizontalCollision != m.lastSentHorizontalCollision {
 		m.client.SendPacket(&packets.C2SMovePlayerStatusOnly{
 			Flags: flags,
 		})
@@ -757,6 +796,6 @@ func (m *Module) sendPosition(s *self.Module) {
 		m.lastSentYaw = yaw
 		m.lastSentPitch = pitch
 	}
-	m.lastSentOnGround = m.OnGround
-	m.lastSentHorizontalCollision = m.HorizontalCollision
+	m.lastSentOnGround = m.onGround
+	m.lastSentHorizontalCollision = m.horizontalCollision
 }

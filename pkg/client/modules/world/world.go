@@ -40,25 +40,27 @@ type Module struct {
 	client *client.Client
 
 	mu            sync.RWMutex
-	Chunks        map[int64]*chunks.ChunkColumn
+	chunks        map[int64]*chunks.ChunkColumn
 	blockEntities map[[3]int]*BlockEntityData // [x,y,z] -> data
-	CenterChunkX  int32
-	CenterChunkZ  int32
-	ViewDistance  int32
+	centerChunkX  int32
+	centerChunkZ  int32
+	viewDistance  int32
 
 	// border state (from S2CInitializeBorder)
 	border *packets.S2CInitializeBorder
 
-	onChunkLoad   []func(x, z int32)
-	onChunkUnload []func(x, z int32)
-	onBlockUpdate []func(x, y, z int, stateID int32)
+	onChunkLoad         []func(x, z int32)
+	onChunkUnload       []func(x, z int32)
+	onBlockUpdate       []func(x, y, z int, stateID int32)
+	onViewDistChange    []func(distance int32)
+	onCenterChunkChange []func(x, z int32)
 }
 
 func New() *Module {
 	return &Module{
-		Chunks:        make(map[int64]*chunks.ChunkColumn),
+		chunks:        make(map[int64]*chunks.ChunkColumn),
 		blockEntities: make(map[[3]int]*BlockEntityData),
-		ViewDistance:  10,
+		viewDistance:  10,
 	}
 }
 
@@ -74,14 +76,14 @@ func (m *Module) Init(c *client.Client) {
 func (m *Module) ClearChunks() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Chunks = make(map[int64]*chunks.ChunkColumn)
+	m.chunks = make(map[int64]*chunks.ChunkColumn)
 	m.blockEntities = make(map[[3]int]*BlockEntityData)
 }
 
 func (m *Module) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Chunks = make(map[int64]*chunks.ChunkColumn)
+	m.chunks = make(map[int64]*chunks.ChunkColumn)
 	m.blockEntities = make(map[[3]int]*BlockEntityData)
 	m.border = nil
 }
@@ -101,6 +103,12 @@ func (m *Module) OnChunkLoad(cb func(x, z int32))   { m.onChunkLoad = append(m.o
 func (m *Module) OnChunkUnload(cb func(x, z int32)) { m.onChunkUnload = append(m.onChunkUnload, cb) }
 func (m *Module) OnBlockUpdate(cb func(x, y, z int, stateID int32)) {
 	m.onBlockUpdate = append(m.onBlockUpdate, cb)
+}
+func (m *Module) OnViewDistanceChange(cb func(distance int32)) {
+	m.onViewDistChange = append(m.onViewDistChange, cb)
+}
+func (m *Module) OnCenterChunkChange(cb func(x, z int32)) {
+	m.onCenterChunkChange = append(m.onCenterChunkChange, cb)
 }
 
 func (m *Module) HandlePacket(pkt *jp.WirePacket) {
@@ -149,7 +157,7 @@ func (m *Module) handleChunkData(pkt *jp.WirePacket) {
 	cx, cz := int32(d.ChunkX), int32(d.ChunkZ)
 	key := ChunkKey(cx, cz)
 	m.mu.Lock()
-	m.Chunks[key] = column
+	m.chunks[key] = column
 	// store block entities from chunk data
 	for _, be := range column.BlockEntities {
 		x := int(cx)*16 + be.X()
@@ -179,7 +187,7 @@ func (m *Module) handleUnloadChunk(pkt *jp.WirePacket) {
 	key := ChunkKey(cx, cz)
 	baseX, baseZ := int(cx)*16, int(cz)*16
 	m.mu.Lock()
-	delete(m.Chunks, key)
+	delete(m.chunks, key)
 	for key := range m.blockEntities {
 		if key[0] >= baseX && key[0] < baseX+16 && key[2] >= baseZ && key[2] < baseZ+16 {
 			delete(m.blockEntities, key)
@@ -219,15 +227,22 @@ func (m *Module) handleBlockUpdate(pkt *jp.WirePacket) {
 
 	chunkX, chunkZ := chunks.ChunkPos(int(d.Location.X), int(d.Location.Z))
 
+	bx, by, bz := int(d.Location.X), int(d.Location.Y), int(d.Location.Z)
+	stateID := int32(d.BlockId)
+
 	m.mu.Lock()
-	chunk := m.Chunks[ChunkKey(chunkX, chunkZ)]
+	chunk := m.chunks[ChunkKey(chunkX, chunkZ)]
 	if chunk != nil {
-		chunk.SetBlockState(int(d.Location.X), int(d.Location.Y), int(d.Location.Z), int32(d.BlockId))
+		chunk.SetBlockState(bx, by, bz, stateID)
+	}
+	// clean up stale block entity when block changes to air
+	if stateID == 0 {
+		delete(m.blockEntities, [3]int{bx, by, bz})
 	}
 	m.mu.Unlock()
 
 	for _, cb := range m.onBlockUpdate {
-		cb(int(d.Location.X), int(d.Location.Y), int(d.Location.Z), int32(d.BlockId))
+		cb(bx, by, bz, stateID)
 	}
 }
 
@@ -240,7 +255,7 @@ func (m *Module) handleSectionBlocksUpdate(pkt *jp.WirePacket) {
 	sectionX, sectionY, sectionZ := chunks.DecodeSectionPosition(int64(d.ChunkSectionPosition))
 
 	m.mu.Lock()
-	chunk := m.Chunks[ChunkKey(sectionX, sectionZ)]
+	chunk := m.chunks[ChunkKey(sectionX, sectionZ)]
 	if chunk != nil {
 		sectionIndex := chunks.SectionIndex(int(sectionY) * 16)
 		if sectionIndex >= 0 && sectionIndex < len(chunk.Sections) {
@@ -249,6 +264,12 @@ func (m *Module) handleSectionBlocksUpdate(pkt *jp.WirePacket) {
 				for _, block := range d.Blocks {
 					stateID, localX, localY, localZ := chunks.DecodeBlockEntry(int64(block))
 					section.SetBlockState(localX, localY, localZ, stateID)
+					if stateID == 0 {
+						wx := int(sectionX)*16 + localX
+						wy := int(sectionY)*16 + localY
+						wz := int(sectionZ)*16 + localZ
+						delete(m.blockEntities, [3]int{wx, wy, wz})
+					}
 				}
 			}
 		}
@@ -271,10 +292,15 @@ func (m *Module) handleSetChunkCacheCenter(pkt *jp.WirePacket) {
 	if err := pkt.ReadInto(&d); err != nil {
 		return
 	}
+	x, z := int32(d.ChunkX), int32(d.ChunkZ)
 	m.mu.Lock()
-	m.CenterChunkX = int32(d.ChunkX)
-	m.CenterChunkZ = int32(d.ChunkZ)
+	m.centerChunkX = x
+	m.centerChunkZ = z
 	m.mu.Unlock()
+
+	for _, cb := range m.onCenterChunkChange {
+		cb(x, z)
+	}
 }
 
 func (m *Module) handleSetChunkCacheRadius(pkt *jp.WirePacket) {
@@ -282,9 +308,14 @@ func (m *Module) handleSetChunkCacheRadius(pkt *jp.WirePacket) {
 	if err := pkt.ReadInto(&d); err != nil {
 		return
 	}
+	dist := int32(d.ViewDistance)
 	m.mu.Lock()
-	m.ViewDistance = int32(d.ViewDistance)
+	m.viewDistance = dist
 	m.mu.Unlock()
+
+	for _, cb := range m.onViewDistChange {
+		cb(dist)
+	}
 }
 
 func (m *Module) handleChunkBatchFinished() {
@@ -307,11 +338,25 @@ func (m *Module) handleInitializeBorder(pkt *jp.WirePacket) {
 func (m *Module) GetChunks() []*chunks.ChunkColumn {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	result := make([]*chunks.ChunkColumn, 0, len(m.Chunks))
-	for _, col := range m.Chunks {
+	result := make([]*chunks.ChunkColumn, 0, len(m.chunks))
+	for _, col := range m.chunks {
 		result = append(result, col)
 	}
 	return result
+}
+
+// ChunkCacheCenter returns the current center chunk coordinates.
+func (m *Module) ChunkCacheCenter() (x, z int32) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.centerChunkX, m.centerChunkZ
+}
+
+// GetViewDistance returns the server-sent view distance (chunk cache radius).
+func (m *Module) GetViewDistance() int32 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.viewDistance
 }
 
 // Border returns the last received border initialization, or nil.

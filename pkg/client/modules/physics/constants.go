@@ -70,14 +70,6 @@ const (
 	TicksPerSecond      = 20
 	TickDuration        = 50 * time.Millisecond
 
-	// effect modifiers
-	// float: 0.1F * (amp + 1.0F) in getJumpBoostPower, returns float
-	JumpBoostPerLevel = float64(float32(0.1))
-
-	// double: attribute modifiers
-	SpeedPerLevel    = 0.2
-	SlownessPerLevel = 0.15
-
 	// double: literals in travelInAir / getEffectiveGravity
 	SlowFallingGravity   = 0.01
 	LevitationPerLevel   = 0.05
@@ -86,9 +78,6 @@ const (
 
 // cached effect protocol IDs from the mob_effect registry
 var (
-	effectSpeed       = registries.MobEffect.Get("minecraft:speed")
-	effectSlowness    = registries.MobEffect.Get("minecraft:slowness")
-	effectJumpBoost   = registries.MobEffect.Get("minecraft:jump_boost")
 	effectLevitation  = registries.MobEffect.Get("minecraft:levitation")
 	effectSlowFalling = registries.MobEffect.Get("minecraft:slow_falling")
 )

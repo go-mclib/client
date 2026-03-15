@@ -18,98 +18,107 @@ const (
 
 type Module struct {
 	client *client.Client
+	mu     sync.RWMutex
 
-	// AutoRespawn automatically respawns on death (default: true).
-	AutoRespawn bool
+	autoRespawn bool
 
-	// login state (full S2CLogin fields)
-	EntityID            ns.VarInt
-	IsHardcore          bool
-	DimensionNames      []string
-	MaxPlayers          int32
-	ViewDistance        int32
-	SimulationDistance  int32
-	ReducedDebugInfo    bool
-	EnableRespawnScreen bool
-	DoLimitedCrafting   bool
-	DimensionType       int32
-	DimensionName       string
-	HashedSeed          int64
-	Gamemode            ns.Uint8
-	PreviousGameMode    int8
-	IsDebug             bool
-	IsFlat              bool
-	DeathLocation       ns.PrefixedOptional[ns.GlobalPos]
-	PortalCooldown      int32
-	SeaLevel            int32
-	EnforcesSecureChat  bool
+	// login state
+	entityID            int32
+	isHardcore          bool
+	dimensionNames      []string
+	maxPlayers          int32
+	viewDistance        int32
+	simulationDistance  int32
+	reducedDebugInfo    bool
+	enableRespawnScreen bool
+	doLimitedCrafting   bool
+	dimensionType       int32
+	dimensionName       string
+	hashedSeed          int64
+	gamemode            uint8
+	previousGameMode    int8
+	isDebug             bool
+	isFlat              bool
+	deathLocation       ns.PrefixedOptional[ns.GlobalPos]
+	portalCooldown      int32
+	seaLevel            int32
+	enforcesSecureChat  bool
 
 	// health & experience
-	Health          ns.Float32
-	Food            ns.VarInt
-	FoodSaturation  ns.Float32
-	ExperienceBar   ns.Float32
-	Level           ns.VarInt
-	TotalExperience ns.VarInt
+	health          float32
+	food            int32
+	foodSaturation  float32
+	experienceBar   float32
+	level           int32
+	totalExperience int32
 
 	// position & rotation
-	X, Y, Z ns.Float64
-	Yaw     ns.Float32
-	Pitch   ns.Float32
+	x, y, z float64
+	yaw     float32
+	pitch   float32
 
 	// difficulty
-	Difficulty       uint8
-	DifficultyLocked bool
+	difficulty       uint8
+	difficultyLocked bool
 
 	// abilities
-	AbilityFlags int8
-	FlyingSpeed  float32
-	FOVModifier  float32
+	abilityFlags int8
+	flyingSpeed  float32
+	fovModifier  float32
 
 	// spawn position
-	SpawnDimension string
-	SpawnPosition  ns.Position
-	SpawnYaw       float32
-	SpawnPitch     float32
+	spawnDimension string
+	spawnPosition  ns.Position
+	spawnYaw       float32
+	spawnPitch     float32
 
 	// time
-	WorldAge       int64
-	TimeOfDay      int64
-	TimeIncreasing bool
+	worldAge       int64
+	timeOfDay      int64
+	timeIncreasing bool
 
 	// op level (0-4, derived from entity event status 24-28)
-	OpLevel int8
+	opLevel int8
 
-	// SuppressPositionEcho prevents the module from sending both the
-	// teleport confirm and position echo after S2CPlayerPosition.
-	// When true, an external controller (e.g. pproxy) is responsible
-	// for sending C2SAcceptTeleportation and position packets.
-	SuppressPositionEcho bool
+	// when true, an external controller (e.g. pproxy) handles teleport confirms
+	suppressPositionEcho bool
 
-	// movement state flags (readable/settable by any module or user code)
-	Sprinting bool
-	Sneaking  bool
+	// movement state flags
+	sprinting bool
+	sneaking  bool
+
+	attributes map[string]*Attribute
 
 	effectsMu     sync.Mutex
 	activeEffects map[int32]*EffectInstance
 
-	onDeath     []func()
-	onSpawn     []func()
-	onRespawn   []func()
-	onHealthSet []func(health, food float32)
-	onPosition  []func(x, y, z float64)
-	onGameEvent []func(event uint8, value float32)
+	onDeath            []func()
+	onSpawn            []func()
+	onRespawn          []func()
+	onHealthSet        []func(health, food float32)
+	onPosition         []func(x, y, z float64)
+	onGameEvent        []func(event uint8, value float32)
+	onGamemodeChange   []func(gamemode uint8)
+	onDimensionChange  []func(dimensionName string)
+	onEffectAdded      []func(effectID, amplifier, duration int32)
+	onEffectRemoved    []func(effectID int32)
+	onDifficultyChange []func(difficulty uint8, locked bool)
+	onAbilitiesChange  []func(flags int8, flySpeed, fovMod float32)
+	onTimeUpdate       []func(worldAge, timeOfDay int64)
+	onExperienceChange []func(bar float32, level, total int32)
+	onAttributeUpdate  []func(name string, value float64)
 }
 
 func New() *Module {
 	return &Module{
-		AutoRespawn:    true,
-		Health:         20,
-		Food:           20,
-		FoodSaturation: 5,
-		FlyingSpeed:    0.05,
-		FOVModifier:    0.1,
+		autoRespawn:    true,
+		health:         20,
+		food:           20,
+		foodSaturation: 5,
+		flyingSpeed:    0.05,
+		fovModifier:    0.1,
 		activeEffects:  make(map[int32]*EffectInstance),
+		attributes:     make(map[string]*Attribute),
 	}
 }
 
@@ -134,32 +143,35 @@ func (m *Module) Init(c *client.Client) {
 }
 
 func (m *Module) Reset() {
-	m.Health = 20
-	m.Food = 20
-	m.FoodSaturation = 5
-	m.ExperienceBar = 0
-	m.Level = 0
-	m.TotalExperience = 0
-	m.X = 0
-	m.Y = 0
-	m.Z = 0
-	m.Yaw = 0
-	m.Pitch = 0
-	m.Sprinting = false
-	m.Sneaking = false
-	m.Difficulty = 0
-	m.DifficultyLocked = false
-	m.AbilityFlags = 0
-	m.FlyingSpeed = 0.05
-	m.FOVModifier = 0.1
-	m.SpawnDimension = ""
-	m.SpawnPosition = ns.Position{}
-	m.SpawnYaw = 0
-	m.SpawnPitch = 0
-	m.WorldAge = 0
-	m.TimeOfDay = 0
-	m.TimeIncreasing = false
-	m.OpLevel = 0
+	m.mu.Lock()
+	m.health = 20
+	m.food = 20
+	m.foodSaturation = 5
+	m.experienceBar = 0
+	m.level = 0
+	m.totalExperience = 0
+	m.x = 0
+	m.y = 0
+	m.z = 0
+	m.yaw = 0
+	m.pitch = 0
+	m.sprinting = false
+	m.sneaking = false
+	m.difficulty = 0
+	m.difficultyLocked = false
+	m.abilityFlags = 0
+	m.flyingSpeed = 0.05
+	m.fovModifier = 0.1
+	m.spawnDimension = ""
+	m.spawnPosition = ns.Position{}
+	m.spawnYaw = 0
+	m.spawnPitch = 0
+	m.worldAge = 0
+	m.timeOfDay = 0
+	m.timeIncreasing = false
+	m.opLevel = 0
+	clear(m.attributes)
+	m.mu.Unlock()
 	m.effectsMu.Lock()
 	clear(m.activeEffects)
 	m.effectsMu.Unlock()
@@ -174,9 +186,261 @@ func From(c *client.Client) *Module {
 	return mod.(*Module)
 }
 
-func (m *Module) IsDead() bool { return m.Health <= 0 }
+// --- getters (read-only) ---
 
-// events
+func (m *Module) EntityID() int32 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.entityID
+}
+func (m *Module) IsHardcore() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.isHardcore
+}
+func (m *Module) DimensionNames() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.dimensionNames
+}
+func (m *Module) MaxPlayers() int32 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.maxPlayers
+}
+func (m *Module) ViewDistance() int32 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.viewDistance
+}
+func (m *Module) SimulationDistance() int32 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.simulationDistance
+}
+func (m *Module) ReducedDebugInfo() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.reducedDebugInfo
+}
+func (m *Module) EnableRespawnScreen() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.enableRespawnScreen
+}
+func (m *Module) DoLimitedCrafting() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.doLimitedCrafting
+}
+func (m *Module) DimensionType() int32 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.dimensionType
+}
+func (m *Module) DimensionName() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.dimensionName
+}
+func (m *Module) HashedSeed() int64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.hashedSeed
+}
+func (m *Module) Gamemode() uint8 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.gamemode
+}
+func (m *Module) PreviousGameMode() int8 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.previousGameMode
+}
+func (m *Module) IsDebug() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.isDebug
+}
+func (m *Module) IsFlat() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.isFlat
+}
+func (m *Module) PortalCooldown() int32 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.portalCooldown
+}
+func (m *Module) SeaLevel() int32 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.seaLevel
+}
+func (m *Module) EnforcesSecureChat() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.enforcesSecureChat
+}
+func (m *Module) Health() float32 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.health
+}
+func (m *Module) Food() int32 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.food
+}
+func (m *Module) FoodSaturation() float32 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.foodSaturation
+}
+func (m *Module) ExperienceBar() float32 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.experienceBar
+}
+func (m *Module) Level() int32 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.level
+}
+func (m *Module) TotalExperience() int32 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.totalExperience
+}
+func (m *Module) Difficulty() uint8 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.difficulty
+}
+func (m *Module) DifficultyLocked() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.difficultyLocked
+}
+func (m *Module) AbilityFlags() int8 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.abilityFlags
+}
+func (m *Module) FlyingSpeed() float32 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.flyingSpeed
+}
+func (m *Module) FOVModifier() float32 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.fovModifier
+}
+func (m *Module) WorldAge() int64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.worldAge
+}
+func (m *Module) TimeOfDay() int64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.timeOfDay
+}
+func (m *Module) TimeIncreasing() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.timeIncreasing
+}
+func (m *Module) OpLevel() int8 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.opLevel
+}
+func (m *Module) IsDead() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.health <= 0
+}
+
+func (m *Module) DeathLocation() ns.PrefixedOptional[ns.GlobalPos] {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.deathLocation
+}
+
+func (m *Module) Position() (x, y, z float64) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.x, m.y, m.z
+}
+
+func (m *Module) Rotation() (yaw, pitch float32) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.yaw, m.pitch
+}
+
+func (m *Module) SpawnPoint() (dim string, pos ns.Position, yaw, pitch float32) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.spawnDimension, m.spawnPosition, m.spawnYaw, m.spawnPitch
+}
+
+// --- getters + setters (external write) ---
+
+func (m *Module) AutoRespawn() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.autoRespawn
+}
+func (m *Module) SetAutoRespawn(v bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.autoRespawn = v
+}
+func (m *Module) Sprinting() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.sprinting
+}
+func (m *Module) SetSprinting(v bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sprinting = v
+}
+func (m *Module) Sneaking() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.sneaking
+}
+func (m *Module) SetSneaking(v bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sneaking = v
+}
+func (m *Module) SuppressPositionEcho() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.suppressPositionEcho
+}
+func (m *Module) SetSuppressPositionEcho(v bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.suppressPositionEcho = v
+}
+
+// SetPosition updates the player's position directly (used by physics module).
+func (m *Module) SetPosition(x, y, z float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.x = x
+	m.y = y
+	m.z = z
+}
+
+// --- events ---
 
 func (m *Module) OnDeath(cb func())   { m.onDeath = append(m.onDeath, cb) }
 func (m *Module) OnSpawn(cb func())   { m.onSpawn = append(m.onSpawn, cb) }
@@ -188,6 +452,35 @@ func (m *Module) OnPosition(cb func(x, y, z float64)) { m.onPosition = append(m.
 func (m *Module) OnGameEvent(cb func(event uint8, value float32)) {
 	m.onGameEvent = append(m.onGameEvent, cb)
 }
+func (m *Module) OnGamemodeChange(cb func(gamemode uint8)) {
+	m.onGamemodeChange = append(m.onGamemodeChange, cb)
+}
+func (m *Module) OnDimensionChange(cb func(dimensionName string)) {
+	m.onDimensionChange = append(m.onDimensionChange, cb)
+}
+func (m *Module) OnEffectAdded(cb func(effectID, amplifier, duration int32)) {
+	m.onEffectAdded = append(m.onEffectAdded, cb)
+}
+func (m *Module) OnEffectRemoved(cb func(effectID int32)) {
+	m.onEffectRemoved = append(m.onEffectRemoved, cb)
+}
+func (m *Module) OnDifficultyChange(cb func(difficulty uint8, locked bool)) {
+	m.onDifficultyChange = append(m.onDifficultyChange, cb)
+}
+func (m *Module) OnAbilitiesChange(cb func(flags int8, flySpeed, fovMod float32)) {
+	m.onAbilitiesChange = append(m.onAbilitiesChange, cb)
+}
+func (m *Module) OnTimeUpdate(cb func(worldAge, timeOfDay int64)) {
+	m.onTimeUpdate = append(m.onTimeUpdate, cb)
+}
+func (m *Module) OnExperienceChange(cb func(bar float32, level, total int32)) {
+	m.onExperienceChange = append(m.onExperienceChange, cb)
+}
+func (m *Module) OnAttributeUpdate(cb func(name string, value float64)) {
+	m.onAttributeUpdate = append(m.onAttributeUpdate, cb)
+}
+
+// --- packet handlers ---
 
 func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 	if m.client.State() != jp.StatePlay {
@@ -222,6 +515,8 @@ func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 		m.handleEntityEvent(pkt)
 	case packet_ids.S2CRespawnID:
 		m.handleRespawn(pkt)
+	case packet_ids.S2CUpdateAttributesID:
+		m.handleUpdateAttributes(pkt)
 	}
 }
 
@@ -232,29 +527,32 @@ func (m *Module) handleLogin(pkt *jp.WirePacket) {
 		return
 	}
 
-	m.EntityID = ns.VarInt(d.EntityId)
-	m.IsHardcore = bool(d.IsHardcore)
-	m.DimensionNames = make([]string, len(d.DimensionNames))
+	m.mu.Lock()
+	m.entityID = int32(d.EntityId)
+	m.isHardcore = bool(d.IsHardcore)
+	m.dimensionNames = make([]string, len(d.DimensionNames))
 	for i, name := range d.DimensionNames {
-		m.DimensionNames[i] = string(name)
+		m.dimensionNames[i] = string(name)
 	}
-	m.MaxPlayers = int32(d.MaxPlayers)
-	m.ViewDistance = int32(d.ViewDistance)
-	m.SimulationDistance = int32(d.SimulationDistance)
-	m.ReducedDebugInfo = bool(d.ReducedDebugInfo)
-	m.EnableRespawnScreen = bool(d.EnableRespawnScreen)
-	m.DoLimitedCrafting = bool(d.DoLimitedCrafting)
-	m.DimensionType = int32(d.DimensionType)
-	m.DimensionName = string(d.DimensionName)
-	m.HashedSeed = int64(d.HashedSeed)
-	m.Gamemode = d.GameMode
-	m.PreviousGameMode = int8(d.PreviousGameMode)
-	m.IsDebug = bool(d.IsDebug)
-	m.IsFlat = bool(d.IsFlat)
-	m.DeathLocation = d.DeathLocation
-	m.PortalCooldown = int32(d.PortalCooldown)
-	m.SeaLevel = int32(d.SeaLevel)
-	m.EnforcesSecureChat = bool(d.EnforcesSecureChat)
+	m.maxPlayers = int32(d.MaxPlayers)
+	m.viewDistance = int32(d.ViewDistance)
+	m.simulationDistance = int32(d.SimulationDistance)
+	m.reducedDebugInfo = bool(d.ReducedDebugInfo)
+	m.enableRespawnScreen = bool(d.EnableRespawnScreen)
+	m.doLimitedCrafting = bool(d.DoLimitedCrafting)
+	m.dimensionType = int32(d.DimensionType)
+	m.dimensionName = string(d.DimensionName)
+	m.hashedSeed = int64(d.HashedSeed)
+	m.gamemode = uint8(d.GameMode)
+	m.previousGameMode = int8(d.PreviousGameMode)
+	m.isDebug = bool(d.IsDebug)
+	m.isFlat = bool(d.IsFlat)
+	m.deathLocation = d.DeathLocation
+	m.portalCooldown = int32(d.PortalCooldown)
+	m.seaLevel = int32(d.SeaLevel)
+	m.enforcesSecureChat = bool(d.EnforcesSecureChat)
+	autoRespawn := m.autoRespawn
+	m.mu.Unlock()
 
 	m.client.Logger.Println("spawned; ready")
 
@@ -264,7 +562,7 @@ func (m *Module) handleLogin(pkt *jp.WirePacket) {
 
 	_ = m.client.WritePacket(&packets.C2SPlayerLoaded{})
 
-	if m.AutoRespawn {
+	if autoRespawn {
 		m.Respawn()
 	}
 
@@ -280,30 +578,34 @@ func (m *Module) handleRespawn(pkt *jp.WirePacket) {
 		return
 	}
 
-	// update dimension/world state (DataKept bit 0 = keep attributes)
-	m.DimensionType = int32(d.DimensionType)
-	m.DimensionName = string(d.DimensionName)
-	m.HashedSeed = int64(d.HashedSeed)
-	m.Gamemode = d.GameMode
-	m.PreviousGameMode = int8(d.PreviousGameMode)
-	m.IsDebug = bool(d.IsDebug)
-	m.IsFlat = bool(d.IsFlat)
-	m.PortalCooldown = int32(d.PortalCooldown)
-	m.SeaLevel = int32(d.SeaLevel)
+	m.mu.Lock()
+	oldDim := m.dimensionName
+	oldGamemode := m.gamemode
 
-	// reset position (server will send a new S2CPlayerPosition)
-	m.X = 0
-	m.Y = 0
-	m.Z = 0
+	m.dimensionType = int32(d.DimensionType)
+	m.dimensionName = string(d.DimensionName)
+	m.hashedSeed = int64(d.HashedSeed)
+	m.gamemode = uint8(d.GameMode)
+	m.previousGameMode = int8(d.PreviousGameMode)
+	m.isDebug = bool(d.IsDebug)
+	m.isFlat = bool(d.IsFlat)
+	m.portalCooldown = int32(d.PortalCooldown)
+	m.seaLevel = int32(d.SeaLevel)
 
-	// reset health/food unless kept (DataKept bit 0)
+	m.x = 0
+	m.y = 0
+	m.z = 0
+
 	if d.DataKept&0x01 == 0 {
-		m.Health = 20
-		m.Food = 20
-		m.FoodSaturation = 5
+		m.health = 20
+		m.food = 20
+		m.foodSaturation = 5
 	}
 
-	// clear effects
+	newDim := m.dimensionName
+	newGamemode := m.gamemode
+	m.mu.Unlock()
+
 	m.effectsMu.Lock()
 	clear(m.activeEffects)
 	m.effectsMu.Unlock()
@@ -313,6 +615,16 @@ func (m *Module) handleRespawn(pkt *jp.WirePacket) {
 	for _, cb := range m.onRespawn {
 		cb()
 	}
+	if newDim != oldDim {
+		for _, cb := range m.onDimensionChange {
+			cb(newDim)
+		}
+	}
+	if newGamemode != oldGamemode {
+		for _, cb := range m.onGamemodeChange {
+			cb(newGamemode)
+		}
+	}
 }
 
 func (m *Module) handleSetHealth(pkt *jp.WirePacket) {
@@ -320,16 +632,21 @@ func (m *Module) handleSetHealth(pkt *jp.WirePacket) {
 	if err := pkt.ReadInto(&d); err != nil {
 		return
 	}
-	wasDead := m.IsDead()
-	m.Health = d.Health
-	m.Food = d.Food
-	m.FoodSaturation = d.FoodSaturation
+
+	m.mu.Lock()
+	wasDead := m.health <= 0
+	m.health = float32(d.Health)
+	m.food = int32(d.Food)
+	m.foodSaturation = float32(d.FoodSaturation)
+	isDead := m.health <= 0
+	health, food := m.health, float32(m.food)
+	m.mu.Unlock()
 
 	for _, cb := range m.onHealthSet {
-		cb(float32(d.Health), float32(d.Food))
+		cb(health, food)
 	}
 
-	if m.IsDead() && !wasDead {
+	if isDead && !wasDead {
 		for _, cb := range m.onDeath {
 			cb()
 		}
@@ -341,9 +658,17 @@ func (m *Module) handleSetExperience(pkt *jp.WirePacket) {
 	if err := pkt.ReadInto(&d); err != nil {
 		return
 	}
-	m.ExperienceBar = d.ExperienceBar
-	m.Level = d.Level
-	m.TotalExperience = d.TotalExperience
+
+	m.mu.Lock()
+	m.experienceBar = float32(d.ExperienceBar)
+	m.level = int32(d.Level)
+	m.totalExperience = int32(d.TotalExperience)
+	bar, level, total := m.experienceBar, m.level, m.totalExperience
+	m.mu.Unlock()
+
+	for _, cb := range m.onExperienceChange {
+		cb(bar, level, total)
+	}
 }
 
 func (m *Module) handlePlayerPosition(pkt *jp.WirePacket) {
@@ -354,47 +679,51 @@ func (m *Module) handlePlayerPosition(pkt *jp.WirePacket) {
 
 	flags := int32(d.Flags)
 
-	// apply position (absolute or relative based on flags)
+	m.mu.Lock()
 	if flags&0x01 != 0 {
-		m.X += d.X
+		m.x += float64(d.X)
 	} else {
-		m.X = d.X
+		m.x = float64(d.X)
 	}
 	if flags&0x02 != 0 {
-		m.Y += d.Y
+		m.y += float64(d.Y)
 	} else {
-		m.Y = d.Y
+		m.y = float64(d.Y)
 	}
 	if flags&0x04 != 0 {
-		m.Z += d.Z
+		m.z += float64(d.Z)
 	} else {
-		m.Z = d.Z
+		m.z = float64(d.Z)
 	}
 	if flags&0x08 != 0 {
-		m.Yaw += d.Yaw
+		m.yaw += float32(d.Yaw)
 	} else {
-		m.Yaw = d.Yaw
+		m.yaw = float32(d.Yaw)
 	}
 	if flags&0x10 != 0 {
-		m.Pitch += d.Pitch
+		m.pitch += float32(d.Pitch)
 	} else {
-		m.Pitch = d.Pitch
+		m.pitch = float32(d.Pitch)
 	}
 
-	if !m.SuppressPositionEcho {
-		// confirm teleport + echo position (as vanilla client does)
+	suppress := m.suppressPositionEcho
+	x, y, z := m.x, m.y, m.z
+	yaw, pitch := m.yaw, m.pitch
+	m.mu.Unlock()
+
+	if !suppress {
 		_ = m.client.WritePacket(&packets.C2SAcceptTeleportation{
 			TeleportId: d.TeleportId,
 		})
 		_ = m.client.WritePacket(&packets.C2SMovePlayerPosRot{
-			X: m.X, FeetY: m.Y, Z: m.Z,
-			Yaw: ns.Float32(m.Yaw), Pitch: ns.Float32(m.Pitch),
+			X: ns.Float64(x), FeetY: ns.Float64(y), Z: ns.Float64(z),
+			Yaw: ns.Float32(yaw), Pitch: ns.Float32(pitch),
 			Flags: 0,
 		})
 	}
 
 	for _, cb := range m.onPosition {
-		cb(float64(m.X), float64(m.Y), float64(m.Z))
+		cb(x, y, z)
 	}
 }
 
@@ -404,8 +733,30 @@ func (m *Module) handleGameEvent(pkt *jp.WirePacket) {
 		return
 	}
 
+	event := uint8(d.Event)
+	value := float32(d.Value)
+
+	// game mode change (event 3)
+	var gamemodeChanged bool
+	var newMode uint8
+	if event == 3 {
+		newMode = uint8(d.Value)
+		m.mu.Lock()
+		if newMode != m.gamemode {
+			m.gamemode = newMode
+			gamemodeChanged = true
+		}
+		m.mu.Unlock()
+	}
+
+	if gamemodeChanged {
+		for _, cb := range m.onGamemodeChange {
+			cb(newMode)
+		}
+	}
+
 	for _, cb := range m.onGameEvent {
-		cb(uint8(d.Event), float32(d.Value))
+		cb(event, value)
 	}
 }
 
@@ -415,12 +766,18 @@ func (m *Module) handleCombatKill(pkt *jp.WirePacket) {
 		m.client.Logger.Printf("failed to parse player combat kill data: %s", err)
 		return
 	}
-	if d.PlayerId == m.EntityID {
+
+	m.mu.RLock()
+	isUs := int32(d.PlayerId) == m.entityID
+	autoRespawn := m.autoRespawn
+	m.mu.RUnlock()
+
+	if isUs {
 		m.client.Logger.Printf("died: %++v", d.Message)
 		for _, cb := range m.onDeath {
 			cb()
 		}
-		if m.AutoRespawn {
+		if autoRespawn {
 			m.Respawn()
 		}
 	}
@@ -431,8 +788,16 @@ func (m *Module) handleChangeDifficulty(pkt *jp.WirePacket) {
 	if err := pkt.ReadInto(&d); err != nil {
 		return
 	}
-	m.Difficulty = uint8(d.Difficulty)
-	m.DifficultyLocked = bool(d.DifficultyLocked)
+
+	m.mu.Lock()
+	m.difficulty = uint8(d.Difficulty)
+	m.difficultyLocked = bool(d.DifficultyLocked)
+	diff, locked := m.difficulty, m.difficultyLocked
+	m.mu.Unlock()
+
+	for _, cb := range m.onDifficultyChange {
+		cb(diff, locked)
+	}
 }
 
 func (m *Module) handlePlayerAbilities(pkt *jp.WirePacket) {
@@ -440,9 +805,17 @@ func (m *Module) handlePlayerAbilities(pkt *jp.WirePacket) {
 	if err := pkt.ReadInto(&d); err != nil {
 		return
 	}
-	m.AbilityFlags = int8(d.Flags)
-	m.FlyingSpeed = float32(d.FlyingSpeed)
-	m.FOVModifier = float32(d.FieldOfViewModifier)
+
+	m.mu.Lock()
+	m.abilityFlags = int8(d.Flags)
+	m.flyingSpeed = float32(d.FlyingSpeed)
+	m.fovModifier = float32(d.FieldOfViewModifier)
+	flags, flySpeed, fovMod := m.abilityFlags, m.flyingSpeed, m.fovModifier
+	m.mu.Unlock()
+
+	for _, cb := range m.onAbilitiesChange {
+		cb(flags, flySpeed, fovMod)
+	}
 }
 
 func (m *Module) handleSetDefaultSpawnPosition(pkt *jp.WirePacket) {
@@ -450,10 +823,13 @@ func (m *Module) handleSetDefaultSpawnPosition(pkt *jp.WirePacket) {
 	if err := pkt.ReadInto(&d); err != nil {
 		return
 	}
-	m.SpawnDimension = string(d.DimensionName)
-	m.SpawnPosition = d.Location
-	m.SpawnYaw = float32(d.Yaw)
-	m.SpawnPitch = float32(d.Pitch)
+
+	m.mu.Lock()
+	m.spawnDimension = string(d.DimensionName)
+	m.spawnPosition = d.Location
+	m.spawnYaw = float32(d.Yaw)
+	m.spawnPitch = float32(d.Pitch)
+	m.mu.Unlock()
 }
 
 func (m *Module) handleSetTime(pkt *jp.WirePacket) {
@@ -461,21 +837,29 @@ func (m *Module) handleSetTime(pkt *jp.WirePacket) {
 	if err := pkt.ReadInto(&d); err != nil {
 		return
 	}
-	m.WorldAge = int64(d.WorldAge)
-	m.TimeOfDay = int64(d.TimeOfDay)
-	m.TimeIncreasing = bool(d.TimeOfDayIncreasing)
+
+	m.mu.Lock()
+	m.worldAge = int64(d.WorldAge)
+	m.timeOfDay = int64(d.TimeOfDay)
+	m.timeIncreasing = bool(d.TimeOfDayIncreasing)
+	age, tod := m.worldAge, m.timeOfDay
+	m.mu.Unlock()
+
+	for _, cb := range m.onTimeUpdate {
+		cb(age, tod)
+	}
 }
 
 func (m *Module) handleEntityEvent(pkt *jp.WirePacket) {
-	// entity event is a fixed-size packet: Int32 entity ID + Int8 status
 	if len(pkt.Data) < 5 {
 		return
 	}
 	eid := int32(binary.BigEndian.Uint32(pkt.Data[0:4]))
 	status := int8(pkt.Data[4])
 
-	// status 24-28 = op permission levels 0-4
-	if eid == int32(m.EntityID) && status >= 24 && status <= 28 {
-		m.OpLevel = status - 24
+	m.mu.Lock()
+	if eid == m.entityID && status >= 24 && status <= 28 {
+		m.opLevel = status - 24
 	}
+	m.mu.Unlock()
 }
