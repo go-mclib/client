@@ -36,6 +36,7 @@ type Client struct {
 
 	Logger              *log.Logger
 	OutgoingPacketQueue chan jp.Packet
+	queueDone           chan struct{} // closed to stop the queue-drain goroutine
 
 	// auth/session (populated during connect)
 	LoginData     auth.LoginData
@@ -56,6 +57,9 @@ type Client struct {
 	// populated after Connect()
 	resolvedHost string
 	resolvedPort string
+
+	// block action sequence counter (matches vanilla SequencedPredictiveAction)
+	blockSequence int32
 
 	// private
 	swarm      *Swarm
@@ -133,6 +137,12 @@ func (c *Client) FireDisconnect() {
 // SendPacket queues a packet for outgoing transmission.
 func (c *Client) SendPacket(pkt jp.Packet) {
 	c.OutgoingPacketQueue <- pkt
+}
+
+// NextBISequence returns the next sequence number for block/item actions.
+func (c *Client) NextBISequence() int32 {
+	c.blockSequence++
+	return c.blockSequence
 }
 
 // SendChatMessage forwards to the chat module. Satisfies tui.ClientInterface.
@@ -262,7 +272,8 @@ func (c *Client) connectAndStartOnce(ctx context.Context) error {
 	c.TCPClient = jp.NewTCPClient()
 	c.TCPClient.EnableDebug(c.Verbose)
 
-	// reset all modules
+	// reset all modules and client state
+	c.blockSequence = 0
 	for _, m := range c.modules {
 		m.Reset()
 	}
@@ -283,11 +294,23 @@ func (c *Client) connectAndStartOnce(ctx context.Context) error {
 	// notify callbacks of connection
 	c.FireConnect()
 
+	// stop previous queue worker if any (reconnect case)
+	if c.queueDone != nil {
+		close(c.queueDone)
+	}
+	c.queueDone = make(chan struct{})
+	c.OutgoingPacketQueue = make(chan jp.Packet, 100)
+
 	// outgoing queue worker
 	go func() {
-		for pkt := range c.OutgoingPacketQueue {
-			if err := c.WritePacket(pkt); err != nil {
-				c.Logger.Println("error writing packet from queue:", err)
+		for {
+			select {
+			case pkt := <-c.OutgoingPacketQueue:
+				if err := c.WritePacket(pkt); err != nil {
+					c.Logger.Println("error writing packet from queue:", err)
+				}
+			case <-c.queueDone:
+				return
 			}
 		}
 	}()
@@ -298,6 +321,10 @@ func (c *Client) connectAndStartOnce(ctx context.Context) error {
 		if err != nil {
 			c.Logger.Println("read packet error:", err)
 			c.shouldReconnect = true
+			if c.queueDone != nil {
+				close(c.queueDone)
+				c.queueDone = nil
+			}
 			c.FireDisconnect()
 			return err
 		}

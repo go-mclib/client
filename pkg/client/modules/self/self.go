@@ -80,10 +80,10 @@ type Module struct {
 	// op level (0-4, derived from entity event status 24-28)
 	OpLevel int8
 
-	// SuppressPositionEcho prevents the module from echoing position
-	// back to the server after receiving S2CPlayerPosition. Useful when
-	// an external controller (e.g. pproxy) is handling movement.
-	// The teleport confirm is still sent.
+	// SuppressPositionEcho prevents the module from sending both the
+	// teleport confirm and position echo after S2CPlayerPosition.
+	// When true, an external controller (e.g. pproxy) is responsible
+	// for sending C2SAcceptTeleportation and position packets.
 	SuppressPositionEcho bool
 
 	// movement state flags (readable/settable by any module or user code)
@@ -95,6 +95,7 @@ type Module struct {
 
 	onDeath     []func()
 	onSpawn     []func()
+	onRespawn   []func()
 	onHealthSet []func(health, food float32)
 	onPosition  []func(x, y, z float64)
 	onGameEvent []func(event uint8, value float32)
@@ -117,6 +118,19 @@ func (m *Module) Name() string { return ModuleName }
 func (m *Module) Init(c *client.Client) {
 	m.client = c
 	c.OnTransfer(m.Reset)
+
+	// clear world and entity state on dimension change/respawn
+	m.OnRespawn(func() {
+		if w := c.Module("world"); w != nil {
+			type chunkClearer interface{ ClearChunks() }
+			if cc, ok := w.(chunkClearer); ok {
+				cc.ClearChunks()
+			}
+		}
+		if e := c.Module("entities"); e != nil {
+			e.Reset()
+		}
+	})
 }
 
 func (m *Module) Reset() {
@@ -162,41 +176,11 @@ func From(c *client.Client) *Module {
 
 func (m *Module) IsDead() bool { return m.Health <= 0 }
 
-// LoginPacket reconstructs the full S2CLogin packet from stored state.
-func (m *Module) LoginPacket() *packets.S2CLogin {
-	dims := make(ns.PrefixedArray[ns.Identifier], len(m.DimensionNames))
-	for i, name := range m.DimensionNames {
-		dims[i] = ns.Identifier(name)
-	}
-
-	return &packets.S2CLogin{
-		EntityId:            ns.Int32(m.EntityID),
-		IsHardcore:          ns.Boolean(m.IsHardcore),
-		DimensionNames:      dims,
-		MaxPlayers:          ns.VarInt(m.MaxPlayers),
-		ViewDistance:        ns.VarInt(m.ViewDistance),
-		SimulationDistance:  ns.VarInt(m.SimulationDistance),
-		ReducedDebugInfo:    ns.Boolean(m.ReducedDebugInfo),
-		EnableRespawnScreen: ns.Boolean(m.EnableRespawnScreen),
-		DoLimitedCrafting:   ns.Boolean(m.DoLimitedCrafting),
-		DimensionType:       ns.VarInt(m.DimensionType),
-		DimensionName:       ns.Identifier(m.DimensionName),
-		HashedSeed:          ns.Int64(m.HashedSeed),
-		GameMode:            m.Gamemode,
-		PreviousGameMode:    ns.Int8(m.PreviousGameMode),
-		IsDebug:             ns.Boolean(m.IsDebug),
-		IsFlat:              ns.Boolean(m.IsFlat),
-		DeathLocation:       m.DeathLocation,
-		PortalCooldown:      ns.VarInt(m.PortalCooldown),
-		SeaLevel:            ns.VarInt(m.SeaLevel),
-		EnforcesSecureChat:  ns.Boolean(m.EnforcesSecureChat),
-	}
-}
-
 // events
 
-func (m *Module) OnDeath(cb func()) { m.onDeath = append(m.onDeath, cb) }
-func (m *Module) OnSpawn(cb func()) { m.onSpawn = append(m.onSpawn, cb) }
+func (m *Module) OnDeath(cb func())   { m.onDeath = append(m.onDeath, cb) }
+func (m *Module) OnSpawn(cb func())   { m.onSpawn = append(m.onSpawn, cb) }
+func (m *Module) OnRespawn(cb func()) { m.onRespawn = append(m.onRespawn, cb) }
 func (m *Module) OnHealthSet(cb func(health, food float32)) {
 	m.onHealthSet = append(m.onHealthSet, cb)
 }
@@ -236,6 +220,8 @@ func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 		m.handleSetTime(pkt)
 	case packet_ids.S2CEntityEventID:
 		m.handleEntityEvent(pkt)
+	case packet_ids.S2CRespawnID:
+		m.handleRespawn(pkt)
 	}
 }
 
@@ -283,6 +269,48 @@ func (m *Module) handleLogin(pkt *jp.WirePacket) {
 	}
 
 	for _, cb := range m.onSpawn {
+		cb()
+	}
+}
+
+func (m *Module) handleRespawn(pkt *jp.WirePacket) {
+	var d packets.S2CRespawn
+	if err := pkt.ReadInto(&d); err != nil {
+		m.client.Logger.Println("failed to parse respawn data:", err)
+		return
+	}
+
+	// update dimension/world state (DataKept bit 0 = keep attributes)
+	m.DimensionType = int32(d.DimensionType)
+	m.DimensionName = string(d.DimensionName)
+	m.HashedSeed = int64(d.HashedSeed)
+	m.Gamemode = d.GameMode
+	m.PreviousGameMode = int8(d.PreviousGameMode)
+	m.IsDebug = bool(d.IsDebug)
+	m.IsFlat = bool(d.IsFlat)
+	m.PortalCooldown = int32(d.PortalCooldown)
+	m.SeaLevel = int32(d.SeaLevel)
+
+	// reset position (server will send a new S2CPlayerPosition)
+	m.X = 0
+	m.Y = 0
+	m.Z = 0
+
+	// reset health/food unless kept (DataKept bit 0)
+	if d.DataKept&0x01 == 0 {
+		m.Health = 20
+		m.Food = 20
+		m.FoodSaturation = 5
+	}
+
+	// clear effects
+	m.effectsMu.Lock()
+	clear(m.activeEffects)
+	m.effectsMu.Unlock()
+
+	m.client.Logger.Printf("respawned in %s", d.DimensionName)
+
+	for _, cb := range m.onRespawn {
 		cb()
 	}
 }

@@ -71,7 +71,7 @@ func (m *Module) Respawn() error {
 func (m *Module) UseAt(hand int8, yaw, pitch float64) error {
 	return m.client.WritePacket(&packets.C2SUseItem{
 		Hand:     ns.VarInt(hand),
-		Sequence: 0,
+		Sequence: ns.VarInt(m.client.NextBISequence()),
 		Yaw:      ns.Float32(yaw),
 		Pitch:    ns.Float32(pitch),
 	})
@@ -119,24 +119,28 @@ func (m *Module) Eat(foodItemIDs []int32) error {
 	defer inv.SetHeldSlot(prevSlot)
 	time.Sleep(50 * time.Millisecond)
 
+	// register a one-shot callback to detect food change
+	done := make(chan struct{}, 1)
 	prevFood := int32(m.Food)
+	m.OnHealthSet(func(_, food float32) {
+		if int32(food) != prevFood {
+			select {
+			case done <- struct{}{}:
+			default:
+			}
+		}
+	})
+
 	if err := m.Use(0); err != nil {
 		return fmt.Errorf("use item: %w", err)
 	}
 
 	// wait for food level to change (eating takes ~1.6s in vanilla)
-	deadline := time.After(4 * time.Second)
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			if int32(m.Food) != prevFood {
-				return nil
-			}
-		case <-deadline:
-			return errors.New("eating timed out")
-		}
+	select {
+	case <-done:
+		return nil
+	case <-time.After(4 * time.Second):
+		return errors.New("eating timed out")
 	}
 }
 

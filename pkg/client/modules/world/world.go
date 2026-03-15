@@ -39,13 +39,12 @@ type BlockEntityData struct {
 type Module struct {
 	client *client.Client
 
-	mu               sync.RWMutex
-	Chunks           map[int64]*chunks.ChunkColumn
-	chunkWirePackets map[int64]*jp.WirePacket
-	blockEntities    map[[3]int]*BlockEntityData // [x,y,z] -> data
-	CenterChunkX     int32
-	CenterChunkZ     int32
-	ViewDistance     int32
+	mu            sync.RWMutex
+	Chunks        map[int64]*chunks.ChunkColumn
+	blockEntities map[[3]int]*BlockEntityData // [x,y,z] -> data
+	CenterChunkX  int32
+	CenterChunkZ  int32
+	ViewDistance  int32
 
 	// border state (from S2CInitializeBorder)
 	border *packets.S2CInitializeBorder
@@ -57,10 +56,9 @@ type Module struct {
 
 func New() *Module {
 	return &Module{
-		Chunks:           make(map[int64]*chunks.ChunkColumn),
-		chunkWirePackets: make(map[int64]*jp.WirePacket),
-		blockEntities:    make(map[[3]int]*BlockEntityData),
-		ViewDistance:     10,
+		Chunks:        make(map[int64]*chunks.ChunkColumn),
+		blockEntities: make(map[[3]int]*BlockEntityData),
+		ViewDistance:  10,
 	}
 }
 
@@ -71,11 +69,19 @@ func (m *Module) Init(c *client.Client) {
 	c.OnTransfer(m.Reset)
 }
 
+// ClearChunks removes all loaded chunks and block entities.
+// Called on respawn/dimension change.
+func (m *Module) ClearChunks() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Chunks = make(map[int64]*chunks.ChunkColumn)
+	m.blockEntities = make(map[[3]int]*BlockEntityData)
+}
+
 func (m *Module) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.Chunks = make(map[int64]*chunks.ChunkColumn)
-	m.chunkWirePackets = make(map[int64]*jp.WirePacket)
 	m.blockEntities = make(map[[3]int]*BlockEntityData)
 	m.border = nil
 }
@@ -120,6 +126,10 @@ func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 		m.handleBlockEntityData(pkt)
 	case packet_ids.S2CInitializeBorderID:
 		m.handleInitializeBorder(pkt)
+	case packet_ids.S2CBlockChangedAckID:
+		// acknowledge block prediction — the server confirms our sequence.
+		// currently a no-op since we trust server state, but this prevents
+		// "unhandled packet" warnings in verbose mode.
 	}
 }
 
@@ -140,7 +150,6 @@ func (m *Module) handleChunkData(pkt *jp.WirePacket) {
 	key := ChunkKey(cx, cz)
 	m.mu.Lock()
 	m.Chunks[key] = column
-	m.chunkWirePackets[key] = pkt.Clone()
 	// store block entities from chunk data
 	for _, be := range column.BlockEntities {
 		x := int(cx)*16 + be.X()
@@ -171,7 +180,6 @@ func (m *Module) handleUnloadChunk(pkt *jp.WirePacket) {
 	baseX, baseZ := int(cx)*16, int(cz)*16
 	m.mu.Lock()
 	delete(m.Chunks, key)
-	delete(m.chunkWirePackets, key)
 	for key := range m.blockEntities {
 		if key[0] >= baseX && key[0] < baseX+16 && key[2] >= baseZ && key[2] < baseZ+16 {
 			delete(m.blockEntities, key)
@@ -295,13 +303,13 @@ func (m *Module) handleInitializeBorder(pkt *jp.WirePacket) {
 	m.mu.Unlock()
 }
 
-// ChunkWirePackets returns a snapshot of all stored chunk wire packets.
-func (m *Module) ChunkWirePackets() []*jp.WirePacket {
+// GetChunks returns a snapshot of all loaded chunk columns.
+func (m *Module) GetChunks() []*chunks.ChunkColumn {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	result := make([]*jp.WirePacket, 0, len(m.chunkWirePackets))
-	for _, pkt := range m.chunkWirePackets {
-		result = append(result, pkt)
+	result := make([]*chunks.ChunkColumn, 0, len(m.Chunks))
+	for _, col := range m.Chunks {
+		result = append(result, col)
 	}
 	return result
 }

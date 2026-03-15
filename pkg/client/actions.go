@@ -19,7 +19,7 @@ func (c *Client) BreakBlock(x, y, z int, face int8, start bool) error {
 		Status:   status,
 		Location: ns.Position{X: x, Y: y, Z: z},
 		Face:     ns.Int8(face),
-		Sequence: 0,
+		Sequence: ns.VarInt(c.NextBISequence()),
 	})
 }
 
@@ -29,7 +29,7 @@ func (c *Client) CancelBreakBlock(x, y, z int, face int8) error {
 		Status:   1, // cancelled digging
 		Location: ns.Position{X: x, Y: y, Z: z},
 		Face:     ns.Int8(face),
-		Sequence: 0,
+		Sequence: ns.VarInt(c.NextBISequence()),
 	})
 }
 
@@ -45,7 +45,7 @@ func (c *Client) PlaceBlock(x, y, z int, face int8, hand int8, cursorX, cursorY,
 		CursorPositionZ: ns.Float32(cursorZ),
 		InsideBlock:     false,
 		WorldBorderHit:  false,
-		Sequence:        0,
+		Sequence:        ns.VarInt(c.NextBISequence()),
 	})
 }
 

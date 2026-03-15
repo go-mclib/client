@@ -25,21 +25,15 @@ type Module struct {
 	// as a disconnect instead of transitioning back to configuration.
 	TreatTransferAsDisconnect bool
 
-	// recorded config-phase packets (for proxy replay)
-	configPackets []*jp.WirePacket
-	configDone    bool
-
-	// recorded play-phase opaque packets
-	commandsPacket    *jp.WirePacket
-	playerInfoPackets []*jp.WirePacket
-	waypointPackets   []*jp.WirePacket
-	bossEventPackets  map[ns.UUID]*jp.WirePacket // keyed by boss bar UUID
+	// typed config-phase state
+	registryData []packets.S2CRegistryData
+	tags         *packets.S2CUpdateTagsConfiguration
+	featureFlags []ns.Identifier
+	knownPacks   []packets.KnownPack
 }
 
 func New() *Module {
-	return &Module{
-		bossEventPackets: make(map[ns.UUID]*jp.WirePacket),
-	}
+	return &Module{}
 }
 
 func (m *Module) Name() string { return ModuleName }
@@ -51,12 +45,10 @@ func (m *Module) Init(c *client.Client) {
 }
 
 func (m *Module) Reset() {
-	m.configPackets = nil
-	m.configDone = false
-	m.commandsPacket = nil
-	m.playerInfoPackets = nil
-	m.waypointPackets = nil
-	clear(m.bossEventPackets)
+	m.registryData = nil
+	m.tags = nil
+	m.featureFlags = nil
+	m.knownPacks = nil
 }
 
 // From retrieves the protocol module from a client.
@@ -185,16 +177,27 @@ func (m *Module) handleEncryptionRequest(pkt *jp.WirePacket) {
 func (m *Module) handleConfiguration(pkt *jp.WirePacket) {
 	c := m.client
 
-	// record config packets for replay (skip protocol-level ones)
-	if !m.configDone {
-		switch pkt.PacketID {
-		case packet_ids.S2CFinishConfigurationID,
-			packet_ids.S2CKeepAliveConfigurationID,
-			packet_ids.S2CPingConfigurationID,
-			packet_ids.S2CDisconnectConfigurationID:
-			// don't record
-		default:
-			m.configPackets = append(m.configPackets, pkt.Clone())
+	// parse and store typed config state
+	switch pkt.PacketID {
+	case packet_ids.S2CRegistryDataID:
+		var d packets.S2CRegistryData
+		if err := pkt.ReadInto(&d); err == nil {
+			m.registryData = append(m.registryData, d)
+		}
+	case packet_ids.S2CUpdateTagsConfigurationID:
+		var d packets.S2CUpdateTagsConfiguration
+		if err := pkt.ReadInto(&d); err == nil {
+			m.tags = &d
+		}
+	case packet_ids.S2CUpdateEnabledFeaturesID:
+		var d packets.S2CUpdateEnabledFeatures
+		if err := pkt.ReadInto(&d); err == nil {
+			m.featureFlags = d.FeatureFlags
+		}
+	case packet_ids.S2CSelectKnownPacksID:
+		var d packets.S2CSelectKnownPacks
+		if err := pkt.ReadInto(&d); err == nil {
+			m.knownPacks = d.KnownPacks
 		}
 	}
 
@@ -248,23 +251,6 @@ func (m *Module) handleConfiguration(pkt *jp.WirePacket) {
 func (m *Module) handlePlay(pkt *jp.WirePacket) {
 	c := m.client
 
-	// mark config as done on first play packet
-	if !m.configDone {
-		m.configDone = true
-	}
-
-	// record opaque play-state packets
-	switch pkt.PacketID {
-	case packet_ids.S2CCommandsID:
-		m.commandsPacket = pkt.Clone()
-	case packet_ids.S2CPlayerInfoUpdateID, packet_ids.S2CPlayerInfoRemoveID:
-		m.playerInfoPackets = append(m.playerInfoPackets, pkt.Clone())
-	case packet_ids.S2CWaypointID:
-		m.waypointPackets = append(m.waypointPackets, pkt.Clone())
-	case packet_ids.S2CBossEventID:
-		m.recordBossEvent(pkt)
-	}
-
 	switch pkt.PacketID {
 	case packet_ids.S2CDisconnectPlayID:
 		var d packets.S2CDisconnectPlay
@@ -313,54 +299,24 @@ func (m *Module) sendClientInformation() {
 	})
 }
 
-// ConfigDone returns whether configuration phase has completed.
-func (m *Module) ConfigDone() bool { return m.configDone }
-
-// ConfigPackets returns the recorded configuration-phase packets.
-func (m *Module) ConfigPackets() []*jp.WirePacket {
-	result := make([]*jp.WirePacket, len(m.configPackets))
-	copy(result, m.configPackets)
-	return result
+// RegistryData returns the parsed registry data received during configuration.
+func (m *Module) RegistryData() []packets.S2CRegistryData {
+	return m.registryData
 }
 
-// CommandsPacket returns the last recorded commands packet, or nil.
-func (m *Module) CommandsPacket() *jp.WirePacket { return m.commandsPacket }
-
-// PlayerInfoPackets returns all recorded player info update/remove packets.
-func (m *Module) PlayerInfoPackets() []*jp.WirePacket {
-	result := make([]*jp.WirePacket, len(m.playerInfoPackets))
-	copy(result, m.playerInfoPackets)
-	return result
+// Tags returns the parsed tags received during configuration.
+func (m *Module) Tags() *packets.S2CUpdateTagsConfiguration {
+	return m.tags
 }
 
-// WaypointPackets returns all recorded waypoint packets.
-func (m *Module) WaypointPackets() []*jp.WirePacket {
-	result := make([]*jp.WirePacket, len(m.waypointPackets))
-	copy(result, m.waypointPackets)
-	return result
+// FeatureFlags returns the feature flags received during configuration.
+func (m *Module) FeatureFlags() []ns.Identifier {
+	return m.featureFlags
 }
 
-// recordBossEvent tracks boss bar add/remove for proxy replay.
-func (m *Module) recordBossEvent(pkt *jp.WirePacket) {
-	var d packets.S2CBossEvent
-	if err := pkt.ReadInto(&d); err != nil {
-		return
-	}
-	switch d.Action {
-	case packets.BossEventActionAdd:
-		m.bossEventPackets[d.Uuid] = pkt.Clone()
-	case packets.BossEventActionRemove:
-		delete(m.bossEventPackets, d.Uuid)
-	}
-}
-
-// BossEventPackets returns stored boss bar "add" packets for replay.
-func (m *Module) BossEventPackets() []*jp.WirePacket {
-	result := make([]*jp.WirePacket, 0, len(m.bossEventPackets))
-	for _, pkt := range m.bossEventPackets {
-		result = append(result, pkt)
-	}
-	return result
+// KnownPacks returns the negotiated known packs from configuration.
+func (m *Module) KnownPacks() []packets.KnownPack {
+	return m.knownPacks
 }
 
 func (m *Module) sendBrandPluginMessage() {

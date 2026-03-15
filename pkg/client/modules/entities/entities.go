@@ -387,34 +387,6 @@ func (m *Module) handleHurtAnimation(pkt *jp.WirePacket) {
 	}
 }
 
-// SpawnWirePackets reconstructs S2CAddEntity wire packets from stored entity data.
-func (m *Module) SpawnWirePackets() []*jp.WirePacket {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	result := make([]*jp.WirePacket, 0, len(m.entities))
-	for _, e := range m.entities {
-		pkt := &packets.S2CAddEntity{
-			EntityId:   ns.VarInt(e.ID),
-			EntityUuid: ns.UUID(e.UUID),
-			Type:       ns.VarInt(e.TypeID),
-			X:          ns.Float64(e.X),
-			Y:          ns.Float64(e.Y),
-			Z:          ns.Float64(e.Z),
-			Velocity:   ns.LpVec3{X: e.VelX, Y: e.VelY, Z: e.VelZ},
-			Pitch:      ns.AngleFromDegrees(float64(e.Pitch)),
-			Yaw:        ns.AngleFromDegrees(float64(e.Yaw)),
-			HeadYaw:    ns.AngleFromDegrees(float64(e.HeadYaw)),
-			Data:       ns.VarInt(e.SpawnData),
-		}
-		wire, err := jp.ToWire(pkt)
-		if err != nil {
-			continue
-		}
-		result = append(result, wire)
-	}
-	return result
-}
-
 // ownEntityID returns the player's own entity ID, or -1 if self module is not registered.
 func (m *Module) ownEntityID() int32 {
 	s := self.From(m.client)
