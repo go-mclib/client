@@ -14,7 +14,7 @@ import (
 
 const (
 	ModuleName      = "protocol"
-	protocolVersion = 774 // 1.21.11
+	ProtocolVersion = 774 // 1.21.11
 )
 
 // Module drives the client through login -> configuration -> play.
@@ -67,7 +67,7 @@ func (m *Module) onConnect() {
 	portNum, _ := strconv.Atoi(port)
 
 	_ = c.WritePacket(&packets.C2SIntention{
-		ProtocolVersion: protocolVersion,
+		ProtocolVersion: ProtocolVersion,
 		ServerAddress:   ns.String(host),
 		ServerPort:      ns.Uint16(portNum),
 		Intent:          2,
