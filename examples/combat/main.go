@@ -66,10 +66,8 @@ func main() {
 			s.LookAt(closest.X, closest.Y+closest.EyeHeight, closest.Z)
 		}
 
-		c.SendPacket(&packets.C2SInteract{
-			EntityId:        ns.VarInt(closest.ID),
-			Type:            1,
-			SneakKeyPressed: ns.Boolean(s.Sneaking()),
+		c.SendPacket(&packets.C2SAttack{
+			EntityId: ns.VarInt(closest.ID),
 		})
 		c.SendPacket(&packets.C2SSwing{Hand: 0})
 		ticksSinceAttack = 0

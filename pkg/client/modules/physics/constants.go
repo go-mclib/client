@@ -6,7 +6,7 @@ import (
 	"github.com/go-mclib/data/pkg/data/registries"
 )
 
-// physics constants from the Minecraft Java Edition source code (1.21.11).
+// physics constants from the Minecraft Java Edition source code.
 //
 // Java uses float (32-bit) for many physics values. When widened to double (64-bit),
 // the bit patterns differ from Go's native float64. Constants that are float in vanilla

@@ -14,7 +14,7 @@ import (
 
 const (
 	ModuleName      = "protocol"
-	ProtocolVersion = 774 // 1.21.11
+	ProtocolVersion = 775 // 26.1
 )
 
 // Module drives the client through login -> configuration -> play.

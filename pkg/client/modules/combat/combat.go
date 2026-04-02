@@ -159,10 +159,8 @@ func (m *Module) performAttack(e *entities.Entity) error {
 	s.LookAt(e.X, e.Y+e.EyeHeight, e.Z)
 
 	// send attack packet
-	m.client.SendPacket(&packets.C2SInteract{
-		EntityId:        ns.VarInt(e.ID),
-		Type:            1, // attack
-		SneakKeyPressed: ns.Boolean(s.Sneaking()),
+	m.client.SendPacket(&packets.C2SAttack{
+		EntityId: ns.VarInt(e.ID),
 	})
 
 	// swing arm

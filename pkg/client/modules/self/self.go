@@ -840,8 +840,11 @@ func (m *Module) handleSetTime(pkt *jp.WirePacket) {
 
 	m.mu.Lock()
 	m.worldAge = int64(d.WorldAge)
-	m.timeOfDay = int64(d.TimeOfDay)
-	m.timeIncreasing = bool(d.TimeOfDayIncreasing)
+	// extract day time from the first clock update (overworld)
+	if len(d.ClockUpdates) > 0 {
+		m.timeOfDay = int64(d.ClockUpdates[0].TotalTicks)
+		m.timeIncreasing = d.ClockUpdates[0].Rate > 0
+	}
 	age, tod := m.worldAge, m.timeOfDay
 	m.mu.Unlock()
 
