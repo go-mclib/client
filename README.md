@@ -42,7 +42,7 @@ See the [`examples`](./examples) directory for some sample bots/inspiration.
 For example, to run the [`afkbot`](./examples/afkbot) example:
 
 ```bash
-go run examples/afkbot/afkbot.go -s <your_server_ip> -u "<username (omit this parameter for Microsoft auth)>"
+go run examples/afkbot/main.go -s <your_server_ip> -u "<username>"
 ```
 
 ## License
