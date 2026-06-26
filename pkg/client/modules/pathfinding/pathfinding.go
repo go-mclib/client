@@ -229,7 +229,7 @@ func (m *Module) navigationTick() {
 			if i == len(m.path)-1 {
 				break // don't check goal
 			}
-			cost, _ := moveCost(w, col, nil, node.X, node.Y, node.Z)
+			cost, _, _ := moveCost(w, col, nil, node.X, node.Y, node.Z)
 			if cost < 0 {
 				if m.tryRepath() {
 					return
@@ -256,7 +256,7 @@ func (m *Module) navigationTick() {
 		wpX, wpY, wpZ = m.goalX, m.goalY, m.goalZ
 	} else {
 		wpX = float64(wp.X) + 0.5
-		wpY = float64(wp.Y)
+		wpY = waypointTargetY(col, wp)
 		wpZ = float64(wp.Z) + 0.5
 	}
 
@@ -293,7 +293,7 @@ func (m *Module) navigationTick() {
 			wpX, wpY, wpZ = m.goalX, m.goalY, m.goalZ
 		} else {
 			wpX = float64(wp.X) + 0.5
-			wpY = float64(wp.Y)
+			wpY = waypointTargetY(col, wp)
 			wpZ = float64(wp.Z) + 0.5
 		}
 		dx = wpX - x
@@ -320,18 +320,27 @@ func (m *Module) navigationTick() {
 		}
 	}
 
+	// step-up: physics auto-steps surface rises up to StepUpHeight (0.6) — slabs,
+	// stairs, paths. A larger rise (e.g. a full block) needs an actual jump while
+	// pressing forward into it.
+	ascending := !wp.Jump && (wpY-y) > collisions.StepUpHeight
+
 	// wall-slide and retreat logic
 	lookX, lookZ := wpX, wpZ
-	if m.retreatTicks > 0 {
+	switch {
+	case ascending:
+		// press straight into the block to climb it — never wall-slide here,
+		// the horizontal collision IS the block we're jumping onto.
+	case m.retreatTicks > 0:
 		lookX = x - dx
 		lookZ = z - dz
 		m.retreatTicks--
-	} else if p.HasHorizontalCollision() && m.stuckTicks > 3 {
+	case p.HasHorizontalCollision() && m.stuckTicks > 3:
 		m.retreatTicks = 8
 		m.retreatCycles++
 		lookX = x - dx
 		lookZ = z - dz
-	} else if p.HasHorizontalCollision() {
+	case p.HasHorizontalCollision():
 		xCol, zCol := p.CollisionAxes()
 		if xCol && zCol {
 			m.retreatTicks = 8
@@ -358,14 +367,18 @@ func (m *Module) navigationTick() {
 		// edge-jumping: wait until near the edge of the block before jumping
 		distFromEdge := distToBlockEdge(x, z, dx, dz)
 		jumping = p.IsOnGround() && distFromEdge < 0.3
-	} else {
-		// no jumping for regular movement — step-ups are handled by physics
-		jumping = false
-
+	} else if ascending {
+		// sprint-jump so the takeoff boost carries the bot forward onto the
+		// block. Jump with a small gap before the block face (not flush against
+		// it) so the retained forward momentum clears the ledge — jumping flush
+		// just bonks the face and falls back.
+		sprinting = true
+		sneaking = false // can't climb while crouching
+		distFromEdge := distToBlockEdge(x, z, dx, dz)
+		jumping = p.IsOnGround() && distFromEdge < 0.45
+	} else if !sneaking && horizDist > 2.0 {
 		// sprint when moving straight and far enough ahead
-		if !sneaking && horizDist > 2.0 {
-			sprinting = shouldSprint(m.path, m.pathIndex, x, z)
-		}
+		sprinting = shouldSprint(m.path, m.pathIndex, x, z)
 	}
 
 	s.SetSneaking(sneaking)
@@ -455,6 +468,16 @@ func (m *Module) completeNavigation(reached bool) {
 	for _, cb := range m.onNavigationComplete {
 		cb(reached)
 	}
+}
+
+// waypointTargetY returns the feet height the bot should aim for at a waypoint,
+// resolving partial-block support surfaces (slabs, stairs, snow) instead of the
+// integer block floor.
+func waypointTargetY(col *collisions.Module, wp PathNode) float64 {
+	if col != nil {
+		return nodeSurfaceY(col, wp.X, wp.Y, wp.Z)
+	}
+	return float64(wp.Y)
 }
 
 // distToBlockEdge returns the distance from (x,z) to the block edge in the

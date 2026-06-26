@@ -78,16 +78,30 @@ func (m *Module) CollideMovement(x, y, z, width, height float64, dx, dy, dz floa
 	horizontalCollision = dx != adjX || dz != adjZ
 	verticalCollision = dy != adjY
 
-	// step-up: if horizontal collision while on ground (or about to land), try stepping up
-	// vanilla Entity.collide: only uses step-up if it gives strictly more horizontal distance
+	// step-up (vanilla Entity.collide): on a horizontal collision while on the
+	// ground (or about to land), try stepping over the obstacle. Crucially the
+	// step is measured from the LANDING box when descending, otherwise from the
+	// ORIGINAL box — never from the post-Y position. Stepping from post-Y would
+	// let an upward velocity (a jump or knockback) stack with the 0.6 step and
+	// climb a full block in a single tick, which the server rejects as moving
+	// into the wall (rubberband) and which clobbers normal wall-sliding. With
+	// the original box, a single step is capped at maxUpStep, so a full block
+	// must be cleared by the jump arc over several ticks.
 	onGroundAfterCollision := verticalCollision && dy < 0
 	if StepUpHeight > 0 && horizontalCollision && (onGroundAfterCollision || m.IsOnGround(x, y, z, width)) {
-		stepResult := m.tryStepUp(x, y+float64(adjY), z, width, height, dx, dz, shapes)
+		originY := y
+		if onGroundAfterCollision {
+			originY = y + adjY // step from the landing position
+		}
+		stepResult := m.tryStepUp(x, originY, z, width, height, dx, dz, shapes)
 		if stepResult != nil {
 			stepHorizSq := stepResult[0]*stepResult[0] + stepResult[2]*stepResult[2]
 			currHorizSq := adjX*adjX + adjZ*adjZ
 			if stepHorizSq > currHorizSq {
-				adjX, adjY, adjZ = stepResult[0], float64(adjY)+stepResult[1], stepResult[2]
+				// distanceToGround = aabb.minY - groundedAABB.minY = y - originY
+				adjX = stepResult[0]
+				adjY = stepResult[1] + (originY - y)
+				adjZ = stepResult[2]
 				horizontalCollision = dx != adjX || dz != adjZ
 			}
 		}
@@ -190,6 +204,62 @@ func (m *Module) getBlockCollisions(region AABB) []AABB {
 	return result
 }
 
+// blockShapesWorld returns the collision AABBs of a single block in world coords.
+func (m *Module) blockShapesWorld(bx, by, bz int) []AABB {
+	w := world.From(m.client)
+	if w == nil {
+		return nil
+	}
+	stateID := w.GetBlock(bx, by, bz)
+	if stateID == 0 {
+		return nil
+	}
+	shapes := block_shapes.CollisionShape(stateID)
+	out := make([]AABB, 0, len(shapes))
+	for _, s := range shapes {
+		out = append(out, AABB{
+			MinX: s.MinX + float64(bx), MinY: s.MinY + float64(by), MinZ: s.MinZ + float64(bz),
+			MaxX: s.MaxX + float64(bx), MaxY: s.MaxY + float64(by), MaxZ: s.MaxZ + float64(bz),
+		})
+	}
+	return out
+}
+
+// SupportSurfaceY returns the height at which a player of the given width standing
+// in the block column at (bx,by,bz) rests its feet: the highest collision-shape
+// top that overlaps the player's footprint and lies in [by, by+1). A full block
+// below yields by; a slab/stair/snow/path yields a fractional height; a tall
+// shape in the block below (e.g. a fence top at by+0.5) is also a valid surface.
+// ok is false when nothing supports the player at this level.
+func (m *Module) SupportSurfaceY(bx, by, bz int, width float64) (surfaceY float64, ok bool) {
+	hw := width / 2
+	cx, cz := float64(bx)+0.5, float64(bz)+0.5
+	fpMinX, fpMaxX := cx-hw, cx+hw
+	fpMinZ, fpMaxZ := cz-hw, cz+hw
+	lo, hi := float64(by), float64(by)+1.0
+
+	best := math.Inf(-1)
+	// scan the feet block and the block below (a tall shape there can reach up
+	// into this node's [by, by+1) range)
+	for _, dy := range [2]int{0, -1} {
+		for _, s := range m.blockShapesWorld(bx, by+dy, bz) {
+			if s.MaxY < lo-Epsilon || s.MaxY >= hi {
+				continue // top must rest within this node's vertical range
+			}
+			if s.MaxX <= fpMinX || s.MinX >= fpMaxX || s.MaxZ <= fpMinZ || s.MinZ >= fpMaxZ {
+				continue // shape doesn't overlap the player's footprint
+			}
+			if s.MaxY > best {
+				best = s.MaxY
+			}
+		}
+	}
+	if math.IsInf(best, -1) {
+		return 0, false
+	}
+	return best, true
+}
+
 // IsOnGround checks if an entity at the given position would be on the ground.
 func (m *Module) IsOnGround(x, y, z, width float64) bool {
 	hw := width / 2
@@ -211,4 +281,9 @@ func (m *Module) CanFitAt(x, y, z, width, height float64) bool {
 // GetBlockCollisions returns all block collision AABBs within the given region (public).
 func (m *Module) GetBlockCollisions(region AABB) []AABB {
 	return m.getBlockCollisions(region)
+}
+
+// CollidesWith reports whether any block collision shape overlaps the given box.
+func (m *Module) CollidesWith(box AABB) bool {
+	return slices.ContainsFunc(m.getBlockCollisions(box), box.Intersects)
 }

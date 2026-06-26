@@ -7,7 +7,6 @@ import (
 	"github.com/go-mclib/client/pkg/client/modules/entities"
 	"github.com/go-mclib/client/pkg/client/modules/world"
 	"github.com/go-mclib/data/pkg/data/blocks"
-	block_shapes "github.com/go-mclib/data/pkg/data/hitboxes/blocks"
 )
 
 // PathNode represents a node in the A* search.
@@ -26,40 +25,61 @@ type PathNode struct {
 	index  int // for heap
 }
 
-// canStandAt checks if the player can stand at the given block position.
-// Uses AABB-based ground check for partial blocks (chests, slabs, etc.).
+// standSurface returns the height at which the player's feet rest when standing
+// at node (x,y,z), or ok=false if the node isn't standable. The surface may be
+// fractional for partial blocks (slabs, stairs, snow layers, dirt paths).
+func standSurface(col *collisions.Module, x, y, z int, height float64) (float64, bool) {
+	fy, ok := col.SupportSurfaceY(x, y, z, playerWidth)
+	if !ok {
+		return 0, false
+	}
+	// feet (resting on the surface) and head must fit above it
+	if !col.CanFitAt(float64(x)+0.5, fy, float64(z)+0.5, playerWidth, height) {
+		return 0, false
+	}
+	return fy, true
+}
+
+// nodeSurfaceY returns the feet surface height for an (assumed standable) node,
+// falling back to the integer block Y if it isn't standable.
+func nodeSurfaceY(col *collisions.Module, x, y, z int) float64 {
+	if fy, ok := standSurface(col, x, y, z, playerHeight); ok {
+		return fy
+	}
+	if fy, ok := standSurface(col, x, y, z, playerSneakingHeight); ok {
+		return fy
+	}
+	return float64(y)
+}
+
+// canStandAt checks if the player can stand at the given block position,
+// accounting for partial-block support surfaces (slabs, stairs, etc.).
 func canStandAt(_ *world.Module, col *collisions.Module, x, y, z int) bool {
-	return canStandAtHeight(col, x, y, z, playerHeight)
+	_, ok := standSurface(col, x, y, z, playerHeight)
+	return ok
 }
 
 func canStandAtSneaking(_ *world.Module, col *collisions.Module, x, y, z int) bool {
-	return canStandAtHeight(col, x, y, z, playerSneakingHeight)
+	_, ok := standSurface(col, x, y, z, playerSneakingHeight)
+	return ok
 }
 
 func canStandAtHeight(col *collisions.Module, x, y, z int, height float64) bool {
-	cx := float64(x) + 0.5
-	cy := float64(y)
-	cz := float64(z) + 0.5
-
-	// need solid ground below: use AABB probe to handle partial blocks
-	if !col.IsOnGround(cx, cy, cz, playerWidth) {
-		return false
-	}
-
-	// feet and head must be passable
-	return col.CanFitAt(cx, cy, cz, playerWidth, height)
+	_, ok := standSurface(col, x, y, z, height)
+	return ok
 }
 
-// moveCost returns the cost of moving to the given position.
-// Returns -1 if impassable. Sets sneaking to true if crouching is required.
-func moveCost(w *world.Module, col *collisions.Module, ents *entities.Module, x, y, z int) (float64, bool) {
-	if canStandAt(w, col, x, y, z) {
-		return moveCostInner(w, ents, x, y, z, false), false
+// moveCost returns the cost of moving to the given position, plus the surface
+// height the player would rest at. Returns cost -1 if impassable. Sets sneaking
+// to true if crouching is required.
+func moveCost(w *world.Module, col *collisions.Module, ents *entities.Module, x, y, z int) (cost float64, sneaking bool, surfaceY float64) {
+	if fy, ok := standSurface(col, x, y, z, playerHeight); ok {
+		return moveCostInner(w, ents, x, y, z, false), false, fy
 	}
-	if canStandAtSneaking(w, col, x, y, z) {
-		return moveCostInner(w, ents, x, y, z, true), true
+	if fy, ok := standSurface(col, x, y, z, playerSneakingHeight); ok {
+		return moveCostInner(w, ents, x, y, z, true), true, fy
 	}
-	return -1, false
+	return -1, false, 0
 }
 
 func moveCostInner(w *world.Module, ents *entities.Module, x, y, z int, sneaking bool) float64 {
@@ -96,48 +116,30 @@ func moveCostInner(w *world.Module, ents *entities.Module, x, y, z int, sneaking
 	return cost
 }
 
-// canPassBetween checks if the player can physically move between two adjacent blocks.
-// Checks both the midpoint (for thin blocks at edges) and the destination center.
-func canPassBetween(col *collisions.Module, cx, cz, nx, ny, nz int, height float64) bool {
-	// check at destination center
-	if !col.CanFitAt(float64(nx)+0.5, float64(ny), float64(nz)+0.5, playerWidth, height) {
+// canPassBetween checks if the player can physically move from a surface at
+// srcFy to stand at the destination column at destFy. Checks the destination
+// center and the midpoint (catches doors, fence gates, partial shapes at edges)
+// at the higher of the two surfaces so a raised edge is cleared.
+func canPassBetween(col *collisions.Module, cx, cz, nx, nz int, srcFy, destFy, height float64) bool {
+	if !col.CanFitAt(float64(nx)+0.5, destFy, float64(nz)+0.5, playerWidth, height) {
 		return false
 	}
-	// check at midpoint between source and destination (catches doors, fence gates at block edges)
+	midFy := math.Max(srcFy, destFy)
 	midX := float64(cx+nx)/2.0 + 0.5
 	midZ := float64(cz+nz)/2.0 + 0.5
-	return col.CanFitAt(midX, float64(ny), midZ, playerWidth, height)
+	return col.CanFitAt(midX, midFy, midZ, playerWidth, height)
 }
 
-// canStepUp checks if the player can step up from cy to cy+1 at block (nx, nz).
-func canStepUp(w *world.Module, col *collisions.Module, nx, cy, nz int) bool {
-	stepState := w.GetBlock(nx, cy, nz)
-	if !block_shapes.HasCollision(stepState) {
-		return true
-	}
-
-	// check max collision height of the step block
-	shapes := block_shapes.CollisionShape(stepState)
-	maxY := 0.0
-	for _, s := range shapes {
-		if s.MaxY > maxY {
-			maxY = s.MaxY
-		}
-	}
-
-	if maxY <= collisions.StepUpHeight {
-		return true // short enough to step over
-	}
-
-	// too tall for step-up — needs a jump
-	// reject if the block above also has collision (2-block obstacle like closed door)
-	aboveState := w.GetBlock(nx, cy+1, nz)
-	if block_shapes.HasCollision(aboveState) {
+// canStepUp checks if the player can climb from a surface at srcFy to stand on
+// node (nx, cy+1, nz). The rise must be within jump reach (taller obstacles are
+// unreachable) and the destination must be standable with headroom.
+func canStepUp(_ *world.Module, col *collisions.Module, nx, cy, nz int, srcFy float64) bool {
+	destFy, ok := standSurface(col, nx, cy+1, nz, playerHeight)
+	if !ok {
 		return false
 	}
-
-	// verify player fits at the destination above
-	return col.CanFitAt(float64(nx)+0.5, float64(cy+1), float64(nz)+0.5, playerWidth, playerHeight)
+	rise := destFy - srcFy
+	return rise > collisions.Epsilon && rise <= maxStepUpRise
 }
 
 // canDiagonalTraverse checks if diagonal movement is safe.
@@ -167,10 +169,10 @@ func canDiagonalTraverse(w *world.Module, col *collisions.Module, cx, cy, cz, ox
 		}
 	}
 
-	// verify AABB fits at the diagonal midpoint
+	// verify AABB fits at the diagonal midpoint, at the player's standing surface
 	midX := float64(cx) + float64(ox)*0.5 + 0.5
 	midZ := float64(cz) + float64(oz)*0.5 + 0.5
-	return col.CanFitAt(midX, float64(cy), midZ, playerWidth, playerHeight)
+	return col.CanFitAt(midX, nodeSurfaceY(col, cx, cy, cz), midZ, playerWidth, playerHeight)
 }
 
 // FindReachablePosition finds the standable position closest to (fromX, fromY, fromZ)
@@ -221,7 +223,7 @@ func FindBestReachPosition(col *collisions.Module,
 
 	for pos := range candidates {
 		eyeX := float64(pos[0]) + 0.5
-		eyeY := float64(pos[1]) + eyeHeight
+		eyeY := nodeSurfaceY(col, pos[0], pos[1], pos[2]) + eyeHeight
 		eyeZ := float64(pos[2]) + 0.5
 
 		// count reachable targets from this position
@@ -252,7 +254,7 @@ func FindBestReachPosition(col *collisions.Module,
 
 	// collect which targets are reachable from the chosen position
 	eyeX := float64(standX) + 0.5
-	eyeY := float64(standY) + eyeHeight
+	eyeY := nodeSurfaceY(col, standX, standY, standZ) + eyeHeight
 	eyeZ := float64(standZ) + 0.5
 	for _, t := range targets {
 		if canReachBlock(col, eyeX, eyeY, eyeZ, t[0], t[1], t[2], reach) {

@@ -337,6 +337,15 @@ func (m *Module) tick() {
 		m.velY = 0
 	}
 
+	// nudge out of any block corner the body is penetrating, matching
+	// LocalPlayer.moveTowardsClosestSpace (runs for the 4 body corners each tick
+	// before travel). Without it the player snags on block corners/walls.
+	const cornerInset = PlayerWidth * 0.35
+	m.moveTowardsClosestSpace(col, x-cornerInset, z+cornerInset, y, y+playerHeight)
+	m.moveTowardsClosestSpace(col, x-cornerInset, z-cornerInset, y, y+playerHeight)
+	m.moveTowardsClosestSpace(col, x+cornerInset, z-cornerInset, y, y+playerHeight)
+	m.moveTowardsClosestSpace(col, x+cornerInset, z+cornerInset, y, y+playerHeight)
+
 	// jump (after threshold zeroing, before travel)
 	if m.jumping && m.onGround {
 		m.jump(s, float64(yaw))
@@ -505,6 +514,50 @@ func (m *Module) applyLavaPhysics() {
 	m.velY *= LavaVerticalDrag
 	m.velZ *= LavaSlowdown
 	m.velY -= Gravity * LavaGravityFactor
+}
+
+// moveTowardsClosestSpace nudges the player out of a block it is penetrating at
+// the given (x,z) body corner — a port of LocalPlayer.moveTowardsClosestSpace.
+// If the corner's block column is solid, it sets horizontal velocity 0.1 toward
+// the nearest non-solid neighbour so the player slides free instead of snagging.
+func (m *Module) moveTowardsClosestSpace(col *collisions.Module, x, z, minY, maxY float64) {
+	bx := int(math.Floor(x))
+	bz := int(math.Floor(z))
+	if !suffocatesAt(col, bx, bz, minY, maxY) {
+		return
+	}
+
+	xd := x - float64(bx)
+	zd := z - float64(bz)
+	closest := math.MaxFloat64
+	pushAxisX := false
+	pushStep := 0.0
+	found := false
+	consider := func(axisX bool, step, edgeDist float64, nbx, nbz int) {
+		if edgeDist < closest && !suffocatesAt(col, nbx, nbz, minY, maxY) {
+			closest, pushAxisX, pushStep, found = edgeDist, axisX, step, true
+		}
+	}
+	consider(true, -1, xd, bx-1, bz)     // west (-X)
+	consider(true, 1, 1.0-xd, bx+1, bz)  // east (+X)
+	consider(false, -1, zd, bx, bz-1)    // north (-Z)
+	consider(false, 1, 1.0-zd, bx, bz+1) // south (+Z)
+	if !found {
+		return
+	}
+	if pushAxisX {
+		m.velX = 0.1 * pushStep
+	} else {
+		m.velZ = 0.1 * pushStep
+	}
+}
+
+// suffocatesAt reports whether the player's body column at block (bx,bz) is
+// inside a colliding block (penetrating it), matching LocalPlayer.suffocatesAt.
+func suffocatesAt(col *collisions.Module, bx, bz int, minY, maxY float64) bool {
+	test := collisions.NewAABB(float64(bx), minY, float64(bz), float64(bx)+1, maxY, float64(bz)+1).
+		Inflate(-collisions.Epsilon, -collisions.Epsilon, -collisions.Epsilon)
+	return col.CollidesWith(test)
 }
 
 // jump applies jump velocity (LivingEntity.jumpFromGround).

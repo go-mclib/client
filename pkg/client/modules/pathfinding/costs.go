@@ -22,6 +22,11 @@ const (
 	playerSneakingHeight = 1.5
 	eyeHeight            = 1.62
 	safeFallDistance     = 4
+
+	// maxStepUpRise is the greatest height (in blocks) the player can gain in a
+	// single step-up. A standing jump clears ~1.25 blocks; full-block climbs
+	// (rise 1.0) are fine, a block topped with a slab (rise 1.5) is not.
+	maxStepUpRise = 1.2
 )
 
 // pre-computed costs

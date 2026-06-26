@@ -74,16 +74,17 @@ func tryCardinalMoves(w *world.Module, col *collisions.Module, ents *entities.Mo
 	gScore map[[3]int]float64, openSet *nodeHeap,
 ) {
 	cx, cy, cz := current.X, current.Y, current.Z
+	srcFy := nodeSurfaceY(col, cx, cy, cz)
 
 	for _, off := range cardinalOffsets {
 		nx, nz := cx+off[0], cz+off[1]
 
 		// 1. walk (dy=0)
-		tryMove(w, col, ents, current, nx, cy, nz, 0, goalX, goalY, goalZ, gScore, openSet)
+		tryMove(w, col, ents, current, srcFy, nx, cy, nz, 0, goalX, goalY, goalZ, gScore, openSet)
 
 		// 2. step-up (dy=+1)
-		if canStepUp(w, col, nx, cy, nz) {
-			tryMove(w, col, ents, current, nx, cy+1, nz, 1, goalX, goalY, goalZ, gScore, openSet)
+		if canStepUp(w, col, nx, cy, nz, srcFy) {
+			tryMove(w, col, ents, current, srcFy, nx, cy+1, nz, 1, goalX, goalY, goalZ, gScore, openSet)
 		}
 
 		// 3. descend/fall (dy=-1 to -safeFall)
@@ -96,7 +97,7 @@ func tryCardinalMoves(w *world.Module, col *collisions.Module, ents *entities.Mo
 			ny := cy + dy
 			isGoal := nx == goalX && ny == goalY && nz == goalZ
 
-			cost, sneaking := moveCost(w, col, ents, nx, ny, nz)
+			cost, sneaking, _ := moveCost(w, col, ents, nx, ny, nz)
 			if cost < 0 && !isGoal {
 				if dy == -1 {
 					continue // -1 might just be impassable, try deeper
@@ -113,8 +114,8 @@ func tryCardinalMoves(w *world.Module, col *collisions.Module, ents *entities.Mo
 			}
 
 			if !isGoal {
-				// check passability at source height
-				if !canPassBetween(col, cx, cz, nx, cy, nz, height) {
+				// check we can walk off the source edge into this column
+				if !canPassBetween(col, cx, cz, nx, nz, srcFy, srcFy, height) {
 					break
 				}
 				if dy <= -2 {
@@ -169,19 +170,20 @@ func tryCardinalMoves(w *world.Module, col *collisions.Module, ents *entities.Mo
 
 // tryMove attempts to add a walk or step-up node.
 func tryMove(w *world.Module, col *collisions.Module, ents *entities.Module,
-	current *PathNode, nx, ny, nz, dy int,
+	current *PathNode, srcFy float64, nx, ny, nz, dy int,
 	goalX, goalY, goalZ int,
 	gScore map[[3]int]float64, openSet *nodeHeap,
 ) {
 	cx, cz := current.X, current.Z
 	isGoal := nx == goalX && ny == goalY && nz == goalZ
 
-	cost, sneaking := moveCost(w, col, ents, nx, ny, nz)
+	cost, sneaking, destFy := moveCost(w, col, ents, nx, ny, nz)
 	if cost < 0 && !isGoal {
 		return
 	}
 	if cost < 0 {
 		cost = SprintOneBlockCost
+		destFy = float64(ny)
 	}
 
 	height := playerHeight
@@ -190,13 +192,15 @@ func tryMove(w *world.Module, col *collisions.Module, ents *entities.Module,
 	}
 
 	if !isGoal {
-		if !canPassBetween(col, cx, cz, nx, ny, nz, height) {
+		if !canPassBetween(col, cx, cz, nx, nz, srcFy, destFy, height) {
 			return
 		}
 	}
 
 	edgeCost := cost
-	if dy == 1 {
+	// only a rise beyond auto-step height costs a jump; small rises (stair backs,
+	// slabs) are stepped over for free
+	if dy == 1 && (destFy-srcFy) > collisions.StepUpHeight {
 		edgeCost += JumpOneBlockCost
 	}
 
@@ -258,6 +262,7 @@ func tryDiagonalMoves(w *world.Module, col *collisions.Module, ents *entities.Mo
 	gScore map[[3]int]float64, openSet *nodeHeap,
 ) {
 	cx, cy, cz := current.X, current.Y, current.Z
+	srcFy := nodeSurfaceY(col, cx, cy, cz)
 
 	for _, off := range diagonalOffsets {
 		nx, nz := cx+off[0], cz+off[1]
@@ -272,12 +277,13 @@ func tryDiagonalMoves(w *world.Module, col *collisions.Module, ents *entities.Mo
 
 			isGoal := nx == goalX && ny == goalY && nz == goalZ
 
-			cost, sneaking := moveCost(w, col, ents, nx, ny, nz)
+			cost, sneaking, destFy := moveCost(w, col, ents, nx, ny, nz)
 			if cost < 0 && !isGoal {
 				continue
 			}
 			if cost < 0 {
 				cost = SprintOneBlockCost
+				destFy = float64(ny)
 			}
 
 			height := playerHeight
@@ -286,12 +292,12 @@ func tryDiagonalMoves(w *world.Module, col *collisions.Module, ents *entities.Mo
 			}
 
 			if !isGoal && dy == 0 {
-				if !canPassBetween(col, cx, cz, nx, ny, nz, height) {
+				if !canPassBetween(col, cx, cz, nx, nz, srcFy, destFy, height) {
 					continue
 				}
 			} else if !isGoal && dy == -1 {
-				// check passability at source height
-				if !canPassBetween(col, cx, cz, nx, cy, nz, height) {
+				// check we can walk off the source edge into this column
+				if !canPassBetween(col, cx, cz, nx, nz, srcFy, srcFy, height) {
 					continue
 				}
 			}
@@ -328,17 +334,8 @@ func tryParkourMoves(w *world.Module, col *collisions.Module,
 ) {
 	cx, cy, cz := current.X, current.Y, current.Z
 
-	// like Baritone: don't parkour if we could just traverse
-	// check if any cardinal neighbor at same level is walkable
-	for _, off := range cardinalOffsets {
-		nx, nz := cx+off[0], cz+off[1]
-		if canStandAt(w, col, nx, cy, nz) {
-			// passable adjacent block exists in this direction — no need to jump this way
-			// but other directions might still need jumps, so continue checking
-		}
-	}
-
-	// simulate jumps from current position
+	// simulate jumps from current position (per-landing direction checks below
+	// skip jumps where a plain walk would do)
 	landings := SimulateJumps(col, w, cx, cy, cz, jumpPower, effectiveSpeed)
 	for _, landing := range landings {
 		nx, ny, nz := landing.X, landing.Y, landing.Z
