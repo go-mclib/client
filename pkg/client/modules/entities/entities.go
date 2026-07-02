@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/go-mclib/client/pkg/client"
+	"github.com/go-mclib/client/pkg/client/modules/collisions"
 	"github.com/go-mclib/client/pkg/client/modules/self"
 	"github.com/go-mclib/data/pkg/data/entities"
 	entity_hitboxes "github.com/go-mclib/data/pkg/data/hitboxes/entities"
@@ -36,6 +37,10 @@ type Entity struct {
 type Module struct {
 	client *client.Client
 
+	// optional deps (entities degrades gracefully without them)
+	self       *self.Module
+	collisions *collisions.Module
+
 	mu       sync.RWMutex
 	entities map[int32]*Entity
 
@@ -64,6 +69,12 @@ func (m *Module) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.entities = make(map[int32]*Entity)
+}
+
+func (m *Module) Wire() error {
+	m.self = self.From(m.client)
+	m.collisions = collisions.From(m.client)
+	return nil
 }
 
 func From(c *client.Client) *Module {
@@ -389,9 +400,8 @@ func (m *Module) handleHurtAnimation(pkt *jp.WirePacket) {
 
 // ownEntityID returns the player's own entity ID, or -1 if self module is not registered.
 func (m *Module) ownEntityID() int32 {
-	s := self.From(m.client)
-	if s == nil {
+	if m.self == nil {
 		return -1
 	}
-	return s.EntityID()
+	return m.self.EntityID()
 }

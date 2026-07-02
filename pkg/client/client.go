@@ -108,6 +108,19 @@ func (c *Client) Module(name string) Module {
 	return c.modulesByName[name]
 }
 
+// wireModules resolves inter-module dependencies after all modules are
+// registered. Order-independent: every module sees the full registry.
+func (c *Client) wireModules() error {
+	for _, m := range c.modules {
+		if w, ok := m.(Wirer); ok {
+			if err := w.Wire(); err != nil {
+				return fmt.Errorf("module %q: %w", m.Name(), err)
+			}
+		}
+	}
+	return nil
+}
+
 // RegisterHandler appends a lightweight packet callback (escape hatch).
 func (c *Client) RegisterHandler(h Handler) {
 	c.handlers = append(c.handlers, h)
@@ -197,6 +210,10 @@ func (c *Client) Swarm() *Swarm { return c.swarm }
 
 // ConnectAndStart connects, performs auth, and enters the module dispatch loop.
 func (c *Client) ConnectAndStart(ctx context.Context) error {
+	if err := c.wireModules(); err != nil {
+		return err
+	}
+
 	if c.Interactive {
 		tuiProgram, writer := tui.Start(c)
 		c.tuiProgram = tuiProgram

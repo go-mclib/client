@@ -20,8 +20,8 @@ import (
 	"github.com/go-mclib/data/pkg/data/blocks"
 	dataEntities "github.com/go-mclib/data/pkg/data/entities"
 	"github.com/go-mclib/data/pkg/data/items"
+	"github.com/go-mclib/nbt"
 	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
-	"github.com/go-mclib/protocol/nbt"
 )
 
 var containerBlockIDs = []int32{

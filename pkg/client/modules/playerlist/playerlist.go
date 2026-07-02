@@ -5,9 +5,10 @@ import (
 
 	"github.com/go-mclib/client/pkg/client"
 	"github.com/go-mclib/data/pkg/data/packet_ids"
+	"github.com/go-mclib/data/pkg/packets"
+	"github.com/go-mclib/nbt"
 	jp "github.com/go-mclib/protocol/java_protocol"
 	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
-	"github.com/go-mclib/protocol/nbt"
 )
 
 const ModuleName = "playerlist"
@@ -24,13 +25,23 @@ const (
 	actionUpdateHat       = 0x80
 )
 
+// Property is a profile property (e.g. the "textures" skin/cape blob with its
+// Mojang signature). Kept so a proxy can replay the tab list with skins intact.
+type Property struct {
+	Name         string
+	Value        string
+	Signature    string
+	HasSignature bool
+}
+
 // Player represents a player in the server's player list (tab list).
 type Player struct {
-	UUID     [16]byte
-	Name     string
-	Gamemode int32
-	Ping     int32
-	Listed   bool
+	UUID       [16]byte
+	Name       string
+	Gamemode   int32
+	Ping       int32
+	Listed     bool
+	Properties []Property
 }
 
 type Module struct {
@@ -155,6 +166,7 @@ func (m *Module) handlePlayerInfoUpdate(pkt *jp.WirePacket) {
 		}
 
 		var name string
+		var props []Property
 		var gamemode, ping ns.VarInt
 		var listed bool
 		gotGamemode := false
@@ -178,21 +190,25 @@ func (m *Module) handlePlayerInfoUpdate(pkt *jp.WirePacket) {
 				return
 			}
 			for range int(propCount) {
-				if _, err := buf.ReadString(64); err != nil { // property name
+				pname, err := buf.ReadString(64)
+				if err != nil {
 					return
 				}
-				if _, err := buf.ReadString(32767); err != nil { // property value
+				pval, err := buf.ReadString(32767)
+				if err != nil {
 					return
 				}
 				hasSig, err := buf.ReadBool()
 				if err != nil {
 					return
 				}
+				var sig ns.String
 				if hasSig {
-					if _, err := buf.ReadString(1024); err != nil { // signature
+					if sig, err = buf.ReadString(1024); err != nil {
 						return
 					}
 				}
+				props = append(props, Property{Name: string(pname), Value: string(pval), Signature: string(sig), HasSignature: bool(hasSig)})
 			}
 		}
 
@@ -275,11 +291,12 @@ func (m *Module) handlePlayerInfoUpdate(pkt *jp.WirePacket) {
 		// apply to player map
 		if isNew {
 			p := &Player{
-				UUID:     [16]byte(uuid),
-				Name:     name,
-				Gamemode: int32(gamemode),
-				Ping:     int32(ping),
-				Listed:   listed,
+				UUID:       [16]byte(uuid),
+				Name:       name,
+				Gamemode:   int32(gamemode),
+				Ping:       int32(ping),
+				Listed:     listed,
+				Properties: props,
 			}
 
 			m.mu.Lock()
@@ -350,4 +367,43 @@ func (m *Module) handlePlayerInfoRemove(pkt *jp.WirePacket) {
 			cb(p)
 		}
 	}
+}
+
+// BuildSnapshot synthesizes a single player_info_update carrying every known
+// player with their profile properties (skins), game mode, listed flag and
+// latency. A proxy replays this so a freshly-connected client sees the full tab
+// list — including skins — that it missed by joining mid-session.
+func (m *Module) BuildSnapshot() *packets.S2CPlayerInfoUpdate {
+	m.mu.RLock()
+	players := make([]*Player, 0, len(m.players))
+	for _, p := range m.players {
+		players = append(players, p)
+	}
+	m.mu.RUnlock()
+	if len(players) == 0 {
+		return nil
+	}
+
+	// action order is enum-ordinal: add_player, update_game_mode, update_listed, update_latency
+	const actions = actionAddPlayer | actionUpdateGameMode | actionUpdateListed | actionUpdateLatency
+	buf := ns.NewWriter()
+	_ = buf.WriteByte(actions)
+	_ = buf.WriteVarInt(ns.VarInt(len(players)))
+	for _, p := range players {
+		_ = buf.WriteUUID(ns.UUID(p.UUID))
+		_ = buf.WriteString(ns.String(p.Name))
+		_ = buf.WriteVarInt(ns.VarInt(len(p.Properties)))
+		for _, prop := range p.Properties {
+			_ = buf.WriteString(ns.String(prop.Name))
+			_ = buf.WriteString(ns.String(prop.Value))
+			_ = buf.WriteBool(ns.Boolean(prop.HasSignature))
+			if prop.HasSignature {
+				_ = buf.WriteString(ns.String(prop.Signature))
+			}
+		}
+		_ = buf.WriteVarInt(ns.VarInt(p.Gamemode))
+		_ = buf.WriteBool(ns.Boolean(p.Listed))
+		_ = buf.WriteVarInt(ns.VarInt(p.Ping))
+	}
+	return &packets.S2CPlayerInfoUpdate{Data: ns.ByteArray(buf.Bytes())}
 }

@@ -25,6 +25,9 @@ const (
 type Module struct {
 	client *client.Client
 
+	self     *self.Module
+	entities *entities.Module
+
 	targetID             int32
 	attacking            bool
 	ticksSinceLastAttack int
@@ -39,10 +42,17 @@ func (m *Module) Name() string { return ModuleName }
 func (m *Module) Init(c *client.Client) {
 	m.client = c
 	c.OnTransfer(m.Reset)
+}
 
-	// register tick callback for continuous attacking
-	p := physics.From(c)
-	if p != nil {
+func (m *Module) Wire() error {
+	m.self = self.From(m.client)
+	m.entities = entities.From(m.client)
+	if m.self == nil || m.entities == nil {
+		return fmt.Errorf("requires self and entities modules")
+	}
+
+	// optional: physics enables continuous (per-tick) attacking
+	if p := physics.From(m.client); p != nil {
 		p.OnTick(func() {
 			m.ticksSinceLastAttack++
 			if m.attacking {
@@ -50,6 +60,7 @@ func (m *Module) Init(c *client.Client) {
 			}
 		})
 	}
+	return nil
 }
 
 func (m *Module) HandlePacket(_ *jp.WirePacket) {}
@@ -76,11 +87,7 @@ func (m *Module) OnAttack(cb func(entityID int32)) {
 
 // Attack performs a single attack on the given entity.
 func (m *Module) Attack(entityID int32) error {
-	ents := entities.From(m.client)
-	if ents == nil {
-		return fmt.Errorf("entities module not registered")
-	}
-	e := ents.GetEntity(entityID)
+	e := m.entities.GetEntity(entityID)
 	if e == nil {
 		return fmt.Errorf("entity %d not found", entityID)
 	}
@@ -111,11 +118,7 @@ func (m *Module) StopAttacking() {
 
 // IsWithinReach returns true if the entity is within attack range.
 func (m *Module) IsWithinReach(entityID int32) bool {
-	ents := entities.From(m.client)
-	if ents == nil {
-		return false
-	}
-	e := ents.GetEntity(entityID)
+	e := m.entities.GetEntity(entityID)
 	if e == nil {
 		return false
 	}
@@ -135,28 +138,19 @@ func (m *Module) tryAttack() {
 	if m.GetAttackCooldown() < 0.9 {
 		return
 	}
-	ents := entities.From(m.client)
-	if ents == nil {
-		return
-	}
-	e := ents.GetEntity(m.targetID)
+	e := m.entities.GetEntity(m.targetID)
 	if e == nil {
 		m.StopAttacking()
 		return
 	}
-	if !m.isWithinReach(e) || !ents.CanSee(m.targetID) {
+	if !m.isWithinReach(e) || !m.entities.CanSee(m.targetID) {
 		return
 	}
 	_ = m.performAttack(e)
 }
 
 func (m *Module) performAttack(e *entities.Entity) error {
-	s := self.From(m.client)
-	if s == nil {
-		return fmt.Errorf("self module not registered")
-	}
-
-	s.LookAt(e.X, e.Y+e.EyeHeight, e.Z)
+	m.self.LookAt(e.X, e.Y+e.EyeHeight, e.Z)
 
 	// send attack packet
 	m.client.SendPacket(&packets.C2SAttack{
@@ -177,12 +171,7 @@ func (m *Module) performAttack(e *entities.Entity) error {
 
 // isWithinReach checks distance from player eye position to the closest point on entity AABB.
 func (m *Module) isWithinReach(e *entities.Entity) bool {
-	s := self.From(m.client)
-	if s == nil {
-		return false
-	}
-
-	sx, sy, sz := s.Position()
+	sx, sy, sz := m.self.Position()
 	eyeX := sx
 	eyeY := sy + self.EyeHeight
 	eyeZ := sz

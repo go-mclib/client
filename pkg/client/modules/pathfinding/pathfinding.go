@@ -1,6 +1,7 @@
 package pathfinding
 
 import (
+	"fmt"
 	"math"
 	"sync"
 
@@ -17,6 +18,13 @@ const ModuleName = "pathfinding"
 
 type Module struct {
 	client *client.Client
+
+	// deps (self/world/collisions/physics required, entities optional)
+	self       *self.Module
+	world      *world.Module
+	collisions *collisions.Module
+	physics    *physics.Module
+	entities   *entities.Module
 
 	MaxNodes int // maximum A* nodes to explore (default: 10000)
 
@@ -57,13 +65,22 @@ func (m *Module) HandlePacket(_ *jp.WirePacket) {}
 func (m *Module) Init(c *client.Client) {
 	m.client = c
 	c.OnTransfer(m.Reset)
+}
 
-	p := physics.From(c)
-	if p != nil {
-		p.OnTick(func() {
-			m.navigationTick()
-		})
+func (m *Module) Wire() error {
+	m.self = self.From(m.client)
+	m.world = world.From(m.client)
+	m.collisions = collisions.From(m.client)
+	m.physics = physics.From(m.client)
+	if m.self == nil || m.world == nil || m.collisions == nil || m.physics == nil {
+		return fmt.Errorf("requires self, world, collisions and physics modules")
 	}
+	m.entities = entities.From(m.client) // optional: avoids pathing through entities
+
+	m.physics.OnTick(func() {
+		m.navigationTick()
+	})
+	return nil
 }
 
 func (m *Module) Reset() {
@@ -99,14 +116,11 @@ func (m *Module) OnNavigationComplete(cb func(reached bool)) {
 
 // FindPath computes a path from the player's current position to the goal.
 func (m *Module) FindPath(goalX, goalY, goalZ float64) ([]PathNode, error) {
-	s := self.From(m.client)
-	w := world.From(m.client)
-	col := collisions.From(m.client)
-	ents := entities.From(m.client)
-	p := physics.From(m.client)
-	if s == nil || w == nil || col == nil {
-		return nil, nil
-	}
+	s := m.self
+	w := m.world
+	col := m.collisions
+	ents := m.entities
+	p := m.physics
 
 	sx, sy, sz := s.Position()
 	startX := int(math.Floor(sx))
@@ -123,11 +137,8 @@ func (m *Module) FindPath(goalX, goalY, goalZ float64) ([]PathNode, error) {
 	}
 
 	// get current physics params for jump simulation
-	var jumpPower, effectiveSpeed float64
-	if p != nil {
-		jumpPower = p.GetJumpPower()
-		effectiveSpeed = p.GetEffectiveSpeed()
-	}
+	jumpPower := p.GetJumpPower()
+	effectiveSpeed := p.GetEffectiveSpeed()
 
 	path, err := findPath(w, col, ents, startX, startY, startZ, gx, gy, gz, maxNodes, jumpPower, effectiveSpeed)
 	if err != nil {
@@ -148,8 +159,6 @@ func (m *Module) NavigateTo(goalX, goalY, goalZ float64) error {
 		return err
 	}
 
-	s := self.From(m.client)
-
 	m.mu.Lock()
 	m.path = path
 	m.pathIndex = 0
@@ -162,10 +171,8 @@ func (m *Module) NavigateTo(goalX, goalY, goalZ float64) error {
 	m.goalX = goalX
 	m.goalY = goalY
 	m.goalZ = goalZ
-	if s != nil {
-		m.savedSprinting = s.Sprinting()
-		m.savedSneaking = s.Sneaking()
-	}
+	m.savedSprinting = m.self.Sprinting()
+	m.savedSneaking = m.self.Sneaking()
 	m.mu.Unlock()
 
 	return nil
@@ -180,15 +187,9 @@ func (m *Module) Stop() {
 		m.navigating = false
 		m.path = nil
 
-		p := physics.From(m.client)
-		if p != nil {
-			p.SetInput(0, 0, false)
-		}
-		s := self.From(m.client)
-		if s != nil {
-			s.SetSprinting(m.savedSprinting)
-			s.SetSneaking(m.savedSneaking)
-		}
+		m.physics.SetInput(0, 0, false)
+		m.self.SetSprinting(m.savedSprinting)
+		m.self.SetSneaking(m.savedSneaking)
 	}
 }
 
@@ -207,13 +208,10 @@ func (m *Module) navigationTick() {
 		return
 	}
 
-	s := self.From(m.client)
-	p := physics.From(m.client)
-	w := world.From(m.client)
-	col := collisions.From(m.client)
-	if s == nil || p == nil {
-		return
-	}
+	s := m.self
+	p := m.physics
+	w := m.world
+	col := m.collisions
 
 	x, y, z := s.Position()
 
@@ -223,20 +221,18 @@ func (m *Module) navigationTick() {
 	}
 
 	// proactive obstruction check: verify upcoming waypoints are still passable
-	if w != nil && col != nil {
-		for i := m.pathIndex; i < len(m.path) && i < m.pathIndex+3; i++ {
-			node := m.path[i]
-			if i == len(m.path)-1 {
-				break // don't check goal
-			}
-			cost, _, _ := moveCost(w, col, nil, node.X, node.Y, node.Z)
-			if cost < 0 {
-				if m.tryRepath() {
-					return
-				}
-				m.completeNavigation(false)
+	for i := m.pathIndex; i < len(m.path) && i < m.pathIndex+3; i++ {
+		node := m.path[i]
+		if i == len(m.path)-1 {
+			break // don't check goal
+		}
+		cost, _, _ := moveCost(w, col, nil, node.X, node.Y, node.Z)
+		if cost < 0 {
+			if m.tryRepath() {
 				return
 			}
+			m.completeNavigation(false)
+			return
 		}
 	}
 
@@ -407,14 +403,11 @@ func (m *Module) navigationTick() {
 
 // tryRepath attempts to recompute a path to the current goal.
 func (m *Module) tryRepath() bool {
-	s := self.From(m.client)
-	w := world.From(m.client)
-	col := collisions.From(m.client)
-	ents := entities.From(m.client)
-	p := physics.From(m.client)
-	if s == nil || w == nil || col == nil {
-		return false
-	}
+	s := m.self
+	w := m.world
+	col := m.collisions
+	ents := m.entities
+	p := m.physics
 
 	sx, sy, sz := s.Position()
 	startX := int(math.Floor(sx))
@@ -430,11 +423,8 @@ func (m *Module) tryRepath() bool {
 		maxNodes = DefaultMaxNodes
 	}
 
-	var jumpPower, effectiveSpeed float64
-	if p != nil {
-		jumpPower = p.GetJumpPower()
-		effectiveSpeed = p.GetEffectiveSpeed()
-	}
+	jumpPower := p.GetJumpPower()
+	effectiveSpeed := p.GetEffectiveSpeed()
 
 	path, err := findPath(w, col, ents, startX, startY, startZ, gx, gy, gz, maxNodes, jumpPower, effectiveSpeed)
 	if err != nil {
@@ -455,15 +445,9 @@ func (m *Module) completeNavigation(reached bool) {
 	m.navigating = false
 	m.path = nil
 
-	p := physics.From(m.client)
-	if p != nil {
-		p.SetInput(0, 0, false)
-	}
-	s := self.From(m.client)
-	if s != nil {
-		s.SetSprinting(m.savedSprinting)
-		s.SetSneaking(m.savedSneaking)
-	}
+	m.physics.SetInput(0, 0, false)
+	m.self.SetSprinting(m.savedSprinting)
+	m.self.SetSneaking(m.savedSneaking)
 
 	for _, cb := range m.onNavigationComplete {
 		cb(reached)

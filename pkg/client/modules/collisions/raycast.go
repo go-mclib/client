@@ -3,7 +3,6 @@ package collisions
 import (
 	"math"
 
-	"github.com/go-mclib/client/pkg/client/modules/world"
 	block_shapes "github.com/go-mclib/data/pkg/data/hitboxes/blocks"
 )
 
@@ -11,10 +10,7 @@ import (
 // blocked by any block collision shape. Uses DDA grid traversal.
 // Returns whether a hit occurred and the hit point coordinates.
 func (m *Module) RaycastBlocks(fromX, fromY, fromZ, toX, toY, toZ float64) (hit bool, hitX, hitY, hitZ float64) {
-	w := world.From(m.client)
-	if w == nil {
-		return false, toX, toY, toZ
-	}
+	w := m.world
 
 	dx := toX - fromX
 	dy := toY - fromY

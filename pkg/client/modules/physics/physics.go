@@ -2,6 +2,7 @@ package physics
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"sync"
 	"time"
@@ -22,6 +23,12 @@ const ModuleName = "physics"
 type Module struct {
 	client *client.Client
 	mu     sync.RWMutex
+
+	// deps (self/world/collisions required, entities optional)
+	self       *self.Module
+	world      *world.Module
+	collisions *collisions.Module
+	entities   *entities.Module
 
 	// velocity (delta movement)
 	velX, velY, velZ float64
@@ -63,27 +70,36 @@ func (m *Module) Name() string { return ModuleName }
 func (m *Module) Init(c *client.Client) {
 	m.client = c
 	c.OnTransfer(m.Reset)
+}
 
-	s := self.From(c)
-	if s != nil {
-		// start tick loop when player spawns
-		s.OnSpawn(func() {
-			m.startTickLoop()
-		})
-
-		// sync last-sent tracking after server teleport so sendPosition
-		// doesn't re-send a flying packet for the same position
-		s.OnPosition(func(x, y, z float64) {
-			m.lastSentX = x
-			m.lastSentY = y
-			m.lastSentZ = z
-			yaw, pitch := s.Rotation()
-			m.lastSentYaw = yaw
-			m.lastSentPitch = pitch
-			m.lastSentOnGround = m.onGround
-			m.positionReminder = 0
-		})
+func (m *Module) Wire() error {
+	m.self = self.From(m.client)
+	m.world = world.From(m.client)
+	m.collisions = collisions.From(m.client)
+	if m.self == nil || m.world == nil || m.collisions == nil {
+		return fmt.Errorf("requires self, world and collisions modules")
 	}
+	m.entities = entities.From(m.client) // optional: enables entity pushing
+
+	s := m.self
+	// start tick loop when player spawns
+	s.OnSpawn(func() {
+		m.startTickLoop()
+	})
+
+	// sync last-sent tracking after server teleport so sendPosition
+	// doesn't re-send a flying packet for the same position
+	s.OnPosition(func(x, y, z float64) {
+		m.lastSentX = x
+		m.lastSentY = y
+		m.lastSentZ = z
+		yaw, pitch := s.Rotation()
+		m.lastSentYaw = yaw
+		m.lastSentPitch = pitch
+		m.lastSentOnGround = m.onGround
+		m.positionReminder = 0
+	})
+	return nil
 }
 
 func (m *Module) Reset() {
@@ -186,8 +202,7 @@ func (m *Module) handleDamageEvent(pkt *jp.WirePacket) {
 		return
 	}
 
-	s := self.From(m.client)
-	if s == nil || int32(d.EntityId) != s.EntityID() {
+	if int32(d.EntityId) != m.self.EntityID() {
 		return
 	}
 
@@ -204,8 +219,7 @@ func (m *Module) handleEntityMotion(pkt *jp.WirePacket) {
 		return
 	}
 
-	s := self.From(m.client)
-	if s == nil || int32(d.EntityId) != s.EntityID() {
+	if int32(d.EntityId) != m.self.EntityID() {
 		return
 	}
 
@@ -259,10 +273,7 @@ func (m *Module) startTickLoop() {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 
-	s := self.From(m.client)
-	if s == nil {
-		return
-	}
+	s := m.self
 
 	// initialize last sent position
 	x, y, z := s.Position()
@@ -291,12 +302,9 @@ func (m *Module) startTickLoop() {
 }
 
 func (m *Module) tick() {
-	s := self.From(m.client)
-	w := world.From(m.client)
-	col := collisions.From(m.client)
-	if s == nil || w == nil || col == nil {
-		return
-	}
+	s := m.self
+	w := m.world
+	col := m.collisions
 
 	// an external controller handles movement and position — skip physics
 	if s.SuppressPositionEcho() {
@@ -582,11 +590,7 @@ func (m *Module) getJumpPower(s *self.Module) float64 {
 
 // GetJumpPower returns current jump power from the tracked attribute.
 func (m *Module) GetJumpPower() float64 {
-	s := self.From(m.client)
-	if s == nil {
-		return JumpPower
-	}
-	return m.getJumpPower(s)
+	return m.getJumpPower(m.self)
 }
 
 // getEffectiveGravity returns gravity from the tracked attribute,
@@ -607,11 +611,7 @@ func (m *Module) getEffectiveSpeed(s *self.Module) float64 {
 
 // GetEffectiveSpeed returns current movement speed from the tracked attribute.
 func (m *Module) GetEffectiveSpeed() float64 {
-	s := self.From(m.client)
-	if s == nil {
-		return PlayerSpeed
-	}
-	return m.getEffectiveSpeed(s)
+	return m.getEffectiveSpeed(m.self)
 }
 
 // notEqual returns true if two float64 values differ by more than 1e-5.
@@ -702,14 +702,13 @@ var nonPushableEntities = map[string]bool{
 // applyEntityPushing applies pushing forces from nearby entities (Entity.push).
 // Vanilla: LivingEntity.pushEntities → getPushableEntities (AABB intersection) → Entity.push
 func (m *Module) applyEntityPushing(x, y, z, height float64) {
-	ents := entities.From(m.client)
-	if ents == nil {
+	if m.entities == nil {
 		return
 	}
 
 	// find entities whose AABB intersects with the player's AABB
 	hw := PlayerWidth / 2
-	overlapping := ents.GetEntitiesInAABB(
+	overlapping := m.entities.GetEntitiesInAABB(
 		x-hw, y, z-hw,
 		x+hw, y+height, z+hw,
 	)

@@ -1,6 +1,7 @@
 package collisions
 
 import (
+	"fmt"
 	"math"
 	"slices"
 
@@ -14,6 +15,7 @@ const ModuleName = "collisions"
 
 type Module struct {
 	client *client.Client
+	world  *world.Module
 }
 
 func New() *Module { return &Module{} }
@@ -22,6 +24,13 @@ func (m *Module) Name() string                  { return ModuleName }
 func (m *Module) Init(c *client.Client)         { m.client = c }
 func (m *Module) HandlePacket(_ *jp.WirePacket) {}
 func (m *Module) Reset()                        {}
+
+func (m *Module) Wire() error {
+	if m.world = world.From(m.client); m.world == nil {
+		return fmt.Errorf("requires world module")
+	}
+	return nil
+}
 
 func From(c *client.Client) *Module {
 	mod := c.Module(ModuleName)
@@ -166,10 +175,7 @@ func (m *Module) tryStepUp(x, y, z, width, height, dx, dz float64, existingShape
 
 // getBlockCollisions returns all block collision AABBs within the given region.
 func (m *Module) getBlockCollisions(region AABB) []AABB {
-	w := world.From(m.client)
-	if w == nil {
-		return nil
-	}
+	w := m.world
 
 	minBX := int(math.Floor(region.MinX))
 	minBY := int(math.Floor(region.MinY))
@@ -206,11 +212,7 @@ func (m *Module) getBlockCollisions(region AABB) []AABB {
 
 // blockShapesWorld returns the collision AABBs of a single block in world coords.
 func (m *Module) blockShapesWorld(bx, by, bz int) []AABB {
-	w := world.From(m.client)
-	if w == nil {
-		return nil
-	}
-	stateID := w.GetBlock(bx, by, bz)
+	stateID := m.world.GetBlock(bx, by, bz)
 	if stateID == 0 {
 		return nil
 	}

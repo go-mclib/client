@@ -74,7 +74,7 @@ func (m *Module) FindBlocks(blockIDs []int32, fn func(x, y, z int, stateID int32
 				continue
 			}
 			baseX := int(chunk.X) * 16
-			baseY := chunks.MinY + secIdx*16
+			baseY := chunk.MinY + secIdx*16
 			baseZ := int(chunk.Z) * 16
 			for lx := range 16 {
 				for ly := range 16 {

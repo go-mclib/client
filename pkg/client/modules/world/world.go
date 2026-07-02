@@ -4,12 +4,13 @@ import (
 	"sync"
 
 	"github.com/go-mclib/client/pkg/client"
+	"github.com/go-mclib/client/pkg/client/modules/registry"
 	"github.com/go-mclib/data/pkg/data/chunks"
 	"github.com/go-mclib/data/pkg/data/packet_ids"
 	"github.com/go-mclib/data/pkg/packets"
+	"github.com/go-mclib/nbt"
 	jp "github.com/go-mclib/protocol/java_protocol"
 	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
-	"github.com/go-mclib/protocol/nbt"
 )
 
 const ModuleName = "world"
@@ -37,7 +38,8 @@ type BlockEntityData struct {
 }
 
 type Module struct {
-	client *client.Client
+	client   *client.Client
+	registry *registry.Module // optional, supplies per-dimension world height
 
 	mu            sync.RWMutex
 	chunks        map[int64]*chunks.ChunkColumn
@@ -69,6 +71,22 @@ func (m *Module) Name() string { return ModuleName }
 func (m *Module) Init(c *client.Client) {
 	m.client = c
 	c.OnTransfer(m.Reset)
+}
+
+func (m *Module) Wire() error {
+	m.registry = registry.From(m.client) // optional: dynamic world height
+	return nil
+}
+
+// dimensionBounds returns the current dimension's bottom Y and section count,
+// falling back to the vanilla overworld when no registry data is available.
+func (m *Module) dimensionBounds() (minY, sectionCount int) {
+	if m.registry != nil {
+		if dt, ok := m.registry.CurrentDimensionType(); ok && dt.Height > 0 {
+			return int(dt.MinY), int(dt.Height) / 16
+		}
+	}
+	return chunks.MinY, chunks.SectionCount
 }
 
 // ClearChunks removes all loaded chunks and block entities.
@@ -148,7 +166,8 @@ func (m *Module) handleChunkData(pkt *jp.WirePacket) {
 		return
 	}
 
-	column, err := chunks.ParseChunkColumn(int32(d.ChunkX), int32(d.ChunkZ), d.ChunkData, &d.LightData)
+	minY, sectionCount := m.dimensionBounds()
+	column, err := chunks.ParseChunkColumn(int32(d.ChunkX), int32(d.ChunkZ), minY, sectionCount, d.ChunkData, &d.LightData)
 	if err != nil {
 		m.client.Logger.Printf("failed to parse chunk column at (%d, %d): %v", d.ChunkX, d.ChunkZ, err)
 		return
@@ -257,7 +276,7 @@ func (m *Module) handleSectionBlocksUpdate(pkt *jp.WirePacket) {
 	m.mu.Lock()
 	chunk := m.chunks[ChunkKey(sectionX, sectionZ)]
 	if chunk != nil {
-		sectionIndex := chunks.SectionIndex(int(sectionY) * 16)
+		sectionIndex := chunk.SectionIndex(int(sectionY) * 16)
 		if sectionIndex >= 0 && sectionIndex < len(chunk.Sections) {
 			section := chunk.Sections[sectionIndex]
 			if section != nil {

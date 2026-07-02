@@ -15,6 +15,14 @@ type Module interface {
 	Reset()
 }
 
+// Wirer is optionally implemented by modules that depend on sibling modules.
+// Wire runs once after all modules are registered and before connecting, so a
+// module can resolve typed handles to its dependencies and fail fast if a
+// required one is missing. A returned error aborts startup.
+type Wirer interface {
+	Wire() error
+}
+
 // ChatSessionSender is optionally implemented by the chat module.
 // The protocol module calls this during config -> play transition.
 type ChatSessionSender interface {

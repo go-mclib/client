@@ -59,6 +59,20 @@ func (c *Client) SwingArm(hand int8) error {
 	return c.WritePacket(&packets.C2SSwing{Hand: ns.VarInt(hand)})
 }
 
+// SetCreativeSlot sets an inventory slot to the given item (creative mode only).
+// slot is a container slot index (hotbar 0-8 → 36-44).
+func (c *Client) SetCreativeSlot(slot int16, item ns.Slot) error {
+	return c.WritePacket(&packets.C2SSetCreativeModeSlot{
+		Slot:        ns.Int16(slot),
+		ClickedItem: item,
+	})
+}
+
+// SetHeldSlot selects the active hotbar slot (0-8).
+func (c *Client) SetHeldSlot(slot int16) error {
+	return c.WritePacket(&packets.C2SSetCarriedItem{Slot: ns.Int16(slot)})
+}
+
 // DropItem drops the currently held item. If dropStack is true, the entire stack is dropped.
 func (c *Client) DropItem(dropStack bool) error {
 	var status ns.VarInt

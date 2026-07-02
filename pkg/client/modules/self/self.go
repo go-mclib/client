@@ -364,6 +364,22 @@ func (m *Module) IsDead() bool {
 	return m.health <= 0
 }
 
+// IsCreative reports whether the player has the instant-build ability (creative mode).
+func (m *Module) IsCreative() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.abilityFlags&0x08 != 0
+}
+
+// CanUseGameMasterBlocks reports whether the player may edit command blocks:
+// instant-build (creative) plus operator permission level >= 2. Mirrors
+// Player.canUseGameMasterBlocks in the vanilla source.
+func (m *Module) CanUseGameMasterBlocks() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.abilityFlags&0x08 != 0 && m.opLevel >= 2
+}
+
 func (m *Module) DeathLocation() ns.PrefixedOptional[ns.GlobalPos] {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

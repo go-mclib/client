@@ -35,7 +35,7 @@ func TestGetSetBlock(t *testing.T) {
 	m := New()
 
 	// create a test chunk at (0, 0) with an empty section at Y=64 (section index 8)
-	column := &chunks.ChunkColumn{X: 0, Z: 0}
+	column := chunks.NewColumn(0, 0)
 	column.Sections[8] = chunks.NewEmptySection()
 	m.chunks[ChunkKey(0, 0)] = column
 
@@ -69,7 +69,7 @@ func TestIsChunkLoaded(t *testing.T) {
 		t.Error("IsChunkLoaded(0, 0) = true, want false")
 	}
 
-	m.chunks[ChunkKey(0, 0)] = &chunks.ChunkColumn{X: 0, Z: 0}
+	m.chunks[ChunkKey(0, 0)] = chunks.NewColumn(0, 0)
 
 	if !m.IsChunkLoaded(0, 0) {
 		t.Error("IsChunkLoaded(0, 0) = false, want true")
@@ -79,8 +79,8 @@ func TestIsChunkLoaded(t *testing.T) {
 func TestReset(t *testing.T) {
 	m := New()
 
-	m.chunks[ChunkKey(0, 0)] = &chunks.ChunkColumn{X: 0, Z: 0}
-	m.chunks[ChunkKey(1, 1)] = &chunks.ChunkColumn{X: 1, Z: 1}
+	m.chunks[ChunkKey(0, 0)] = chunks.NewColumn(0, 0)
+	m.chunks[ChunkKey(1, 1)] = chunks.NewColumn(1, 1)
 
 	if m.GetLoadedChunkCount() != 2 {
 		t.Errorf("GetLoadedChunkCount() = %d, want 2", m.GetLoadedChunkCount())
