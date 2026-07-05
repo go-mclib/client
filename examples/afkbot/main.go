@@ -3,7 +3,7 @@ package main
 import (
 	"flag"
 
-	"github.com/go-mclib/client/pkg/helpers"
+	"github.com/go-mclib/client/helpers"
 )
 
 func main() {

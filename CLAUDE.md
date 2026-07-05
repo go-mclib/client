@@ -2,13 +2,15 @@
 
 `go-mclib/client` provides a high-level Go implementation of the Minecraft: Java Edition client, built on `go-mclib/data` and `go-mclib/protocol`.
 
-## Folders
+## Layout
 
-- `./client` — main client implementation
-- `./examples` — example bots and scripts
-- `./chat` — signed chat message helpers
-- `./minecraft_source` — (optional) symlinked decompiled Minecraft source from `go-mclib/mcsrc`; our implementation should match official client logic
+- module root (`package client`) — the `Client` core: connection/reconnect loop, module system, auth bootstrap, swarm
+- `./modules` — pluggable client modules, one package each (protocol, self, world, physics, collisions, pathfinding, entities, inventory, chat, playerlist, registry, combat, command_block_core)
+- `./chat` — signed chat: message signing and last-seen tracking
+- `./helpers` — CLI flag wiring and default module registration for bots
 - `./tui` — terminal UI for interactive mode (chat & commands)
+- `./examples` — example bots and scripts
+- `./minecraft_source` — (optional) symlinked decompiled Minecraft source from `go-mclib/mcsrc`; our implementation should match official client logic
 
 The [Minecraft wiki](https://minecraft.wiki/w/Java_Edition_protocol) is useful but may be outdated. Prefer Minecraft source when available (see <https://github.com/go-mclib/mcsrc>).
 

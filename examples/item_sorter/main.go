@@ -9,17 +9,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-mclib/client/pkg/client"
-	"github.com/go-mclib/client/pkg/client/modules/collisions"
-	"github.com/go-mclib/client/pkg/client/modules/entities"
-	"github.com/go-mclib/client/pkg/client/modules/inventory"
-	"github.com/go-mclib/client/pkg/client/modules/pathfinding"
-	"github.com/go-mclib/client/pkg/client/modules/self"
-	"github.com/go-mclib/client/pkg/client/modules/world"
-	"github.com/go-mclib/client/pkg/helpers"
-	"github.com/go-mclib/data/pkg/data/blocks"
-	dataEntities "github.com/go-mclib/data/pkg/data/entities"
-	"github.com/go-mclib/data/pkg/data/items"
+	"github.com/go-mclib/client"
+	"github.com/go-mclib/client/helpers"
+	"github.com/go-mclib/client/modules/collisions"
+	"github.com/go-mclib/client/modules/entities"
+	"github.com/go-mclib/client/modules/inventory"
+	"github.com/go-mclib/client/modules/pathfinding"
+	"github.com/go-mclib/client/modules/self"
+	"github.com/go-mclib/client/modules/world"
+	"github.com/go-mclib/data/blocks"
+	dataEntities "github.com/go-mclib/data/entities"
+	"github.com/go-mclib/data/items"
 	"github.com/go-mclib/nbt"
 	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
 )
@@ -176,8 +176,6 @@ func newSorter(c *client.Client) *sorter {
 		closeCh:  make(chan struct{}, 1),
 	}
 }
-
-// --- core operations ---
 
 func (sr *sorter) navigateTo(x, y, z float64, timeout time.Duration) bool {
 	ch := make(chan bool, 1)
@@ -418,8 +416,6 @@ func (sr *sorter) eatIfHungry() {
 	}
 }
 
-// --- main loop ---
-
 // run is the main sorter loop. It deposits any sortable inventory items,
 // then cycles through filter chests — camping at each until items arrive,
 // taking them, and depositing before moving to the next.
@@ -646,11 +642,9 @@ func (sr *sorter) groupSortableItems() map[blockPos][]int32 {
 	return groups
 }
 
-// --- label map ---
-
 // buildLabelMap scans nearby item frames and signs within scanRadius to map
-// items to destination chests. Uses individual GetBlock calls instead of
-// FindBlocks to avoid holding the world RLock for long durations.
+// items to destination chests. Uses individual GetBlock calls to avoid
+// holding the world RLock for long durations.
 func (sr *sorter) buildLabelMap() {
 	sx, sy, sz := sr.s.Position()
 	cx := int(math.Floor(sx))
@@ -764,8 +758,6 @@ func (sr *sorter) processSignAt(x, y, z int, stateID int32, labelMap map[int32]b
 	}
 }
 
-// --- callbacks ---
-
 func (sr *sorter) setup() {
 	sr.pf.OnNavigationComplete(func(reached bool) {
 		sr.mu.Lock()
@@ -840,8 +832,6 @@ func (sr *sorter) setup() {
 		}()
 	})
 }
-
-// --- pure helpers ---
 
 func isContainer(blockID int32) bool {
 	return slices.Contains(containerBlockIDs, blockID)
