@@ -19,8 +19,8 @@ func (c *Client) initializeAuth(ctx context.Context) error {
 			c.Username = "GoMclibPlayer"
 			c.Logger.Println("Warning: no username provided for offline mode, defaulting to 'GoMclibPlayer'")
 		}
-		uuid := mc_crypto.MinecraftSHA1(c.Username)
-		c.LoginData = auth.LoginData{Username: c.Username, UUID: uuid}
+		uuid := mc_crypto.OfflinePlayerUUID(c.Username)
+		c.LoginData = auth.LoginData{Username: c.Username, UUID: uuid.String()}
 		return nil
 	}
 

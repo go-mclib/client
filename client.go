@@ -30,7 +30,7 @@ type Client struct {
 	MaxReconnectAttempts int
 	shouldReconnect      bool
 
-	// TUI
+	// tui
 	Interactive bool
 	MaxLogLines int
 
@@ -302,7 +302,7 @@ func (c *Client) connectAndStartOnce(ctx context.Context) error {
 		m.Reset()
 	}
 
-	// TCP connect
+	// tcp connect
 	resolvedHost, resolvedPort, err := c.Connect(c.Address)
 	if err != nil {
 		return fmt.Errorf("connect failed: %w", err)
@@ -322,18 +322,20 @@ func (c *Client) connectAndStartOnce(ctx context.Context) error {
 	if c.queueDone != nil {
 		close(c.queueDone)
 	}
-	c.queueDone = make(chan struct{})
-	c.OutgoingPacketQueue = make(chan jp.Packet, 100)
+	queueDone := make(chan struct{})
+	outgoingQueue := make(chan jp.Packet, 100)
+	c.queueDone = queueDone
+	c.OutgoingPacketQueue = outgoingQueue
 
 	// outgoing queue worker
 	go func() {
 		for {
 			select {
-			case pkt := <-c.OutgoingPacketQueue:
+			case pkt := <-outgoingQueue:
 				if err := c.WritePacket(pkt); err != nil {
 					c.Logger.Println("error writing packet from queue:", err)
 				}
-			case <-c.queueDone:
+			case <-queueDone:
 				return
 			}
 		}
