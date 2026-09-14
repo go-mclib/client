@@ -9,13 +9,30 @@ func (m *Module) GetBlock(x, y, z int) int32 {
 	chunkX, chunkZ := chunks.ChunkPos(x, z)
 
 	m.mu.RLock()
+	defer m.mu.RUnlock()
 	chunk := m.chunks[ChunkKey(chunkX, chunkZ)]
-	m.mu.RUnlock()
 
 	if chunk == nil {
 		return 0
 	}
 	return chunk.GetBlockState(x, y, z)
+}
+
+// GetLoadedBlock returns a block state only when its chunk and vertical section
+// are loaded. Unlike GetBlock, it distinguishes unavailable data from air.
+func (m *Module) GetLoadedBlock(x, y, z int) (stateID int32, known bool) {
+	chunkX, chunkZ := chunks.ChunkPos(x, z)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	chunk := m.chunks[ChunkKey(chunkX, chunkZ)]
+	if chunk == nil {
+		return 0, false
+	}
+	index := chunk.SectionIndex(y)
+	if index < 0 || index >= len(chunk.Sections) || chunk.Sections[index] == nil {
+		return 0, false
+	}
+	return chunk.GetBlockState(x, y, z), true
 }
 
 // IsChunkLoaded checks if a chunk is loaded at the given chunk coordinates.

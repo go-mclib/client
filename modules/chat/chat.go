@@ -127,11 +127,11 @@ func (m *Module) handleDisguisedChat(pkt *jp.WirePacket) {
 	if err := pkt.ReadInto(&d); err != nil {
 		return
 	}
-	isWhisper := d.TargetName.Present
-	sender := d.SenderName.String()
+	isWhisper := d.ChatType.TargetName.Present
+	sender := d.ChatType.Name.String()
 	msg := d.Message.String()
 	if isWhisper {
-		m.client.Logger.Printf("[DISGUISED] %s -> %s: %s", sender, d.TargetName.Value.String(), msg)
+		m.client.Logger.Printf("[DISGUISED] %s -> %s: %s", sender, d.ChatType.TargetName.Value.String(), msg)
 	} else {
 		m.client.Logger.Printf("[DISGUISED] %s: %s", sender, msg)
 	}

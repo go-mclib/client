@@ -32,6 +32,7 @@ type Entity struct {
 	EyeHeight        float64
 	SpawnData        int32 // extra data from S2CAddEntity (e.g. block state for falling blocks)
 	Metadata         entities.Metadata
+	Equipment        map[uint8]EquipmentItem
 }
 
 type Module struct {
@@ -63,6 +64,7 @@ func (m *Module) Name() string { return ModuleName }
 func (m *Module) Init(c *client.Client) {
 	m.client = c
 	c.OnTransfer(m.Reset)
+	c.OnDisconnect(m.Reset)
 }
 
 func (m *Module) Reset() {
@@ -108,6 +110,10 @@ func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 		return
 	}
 	switch pkt.PacketID {
+	case packet_ids.S2CRespawnID:
+		m.Reset()
+	case packet_ids.S2CSetEquipmentID:
+		m.handleSetEquipment(pkt)
 	case packet_ids.S2CAddEntityID:
 		m.handleAddEntity(pkt)
 	case packet_ids.S2CRemoveEntitiesID:
@@ -169,7 +175,7 @@ func (m *Module) handleAddEntity(pkt *jp.WirePacket) {
 	m.mu.Unlock()
 
 	for _, cb := range m.onEntitySpawn {
-		cb(e)
+		cb(cloneEntity(e))
 	}
 }
 
@@ -244,12 +250,15 @@ func (m *Module) handleMoveEntityPos(pkt *jp.WirePacket) {
 		e.Y += float64(d.DeltaY) / 4096.0
 		e.Z += float64(d.DeltaZ) / 4096.0
 		e.OnGround = bool(d.OnGround)
+		if len(m.onEntityMove) > 0 {
+			e = cloneEntity(e)
+		}
 	}
 	m.mu.Unlock()
 
 	if e != nil {
 		for _, cb := range m.onEntityMove {
-			cb(e)
+			cb(cloneEntity(e))
 		}
 	}
 }
@@ -269,12 +278,15 @@ func (m *Module) handleMoveEntityPosRot(pkt *jp.WirePacket) {
 		e.Yaw = float32(d.Yaw.Degrees())
 		e.Pitch = float32(d.Pitch.Degrees())
 		e.OnGround = bool(d.OnGround)
+		if len(m.onEntityMove) > 0 {
+			e = cloneEntity(e)
+		}
 	}
 	m.mu.Unlock()
 
 	if e != nil {
 		for _, cb := range m.onEntityMove {
-			cb(e)
+			cb(cloneEntity(e))
 		}
 	}
 }
@@ -307,12 +319,15 @@ func (m *Module) handleSetEntityMotion(pkt *jp.WirePacket) {
 		e.VelX = d.Velocity.X
 		e.VelY = d.Velocity.Y
 		e.VelZ = d.Velocity.Z
+		if len(m.onEntityVelocity) > 0 {
+			e = cloneEntity(e)
+		}
 	}
 	m.mu.Unlock()
 
 	if e != nil {
 		for _, cb := range m.onEntityVelocity {
-			cb(e)
+			cb(cloneEntity(e))
 		}
 	}
 }
@@ -335,12 +350,15 @@ func (m *Module) handleEntityPositionSync(pkt *jp.WirePacket) {
 		e.Yaw = float32(d.Yaw)
 		e.Pitch = float32(d.Pitch)
 		e.OnGround = bool(d.OnGround)
+		if len(m.onEntityMove) > 0 {
+			e = cloneEntity(e)
+		}
 	}
 	m.mu.Unlock()
 
 	if e != nil {
 		for _, cb := range m.onEntityMove {
-			cb(e)
+			cb(cloneEntity(e))
 		}
 	}
 }

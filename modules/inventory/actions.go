@@ -2,20 +2,30 @@ package inventory
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/go-mclib/data/items"
 	"github.com/go-mclib/data/packets"
 	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
 )
 
-// RawSlots returns all 46 protocol slots, the state ID, and cursor slot.
+// RawSlots returns independent snapshots of all 46 protocol slots and cursor.
 func (m *Module) RawSlots() (slots [TotalSlots]ns.Slot, stateID int32, cursor ns.Slot) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for i := range TotalSlots {
-		slots[i] = m.slots[i].raw
+		slots[i] = cloneRawSlot(m.slots[i].raw)
 	}
-	return slots, m.stateID, m.cursor.raw
+	return slots, m.stateID, cloneRawSlot(m.cursor.raw)
+}
+
+func cloneRawSlot(slot ns.Slot) ns.Slot {
+	slot.Components.Add = slices.Clone(slot.Components.Add)
+	for i := range slot.Components.Add {
+		slot.Components.Add[i].Data = slices.Clone(slot.Components.Add[i].Data)
+	}
+	slot.Components.Remove = slices.Clone(slot.Components.Remove)
+	return slot
 }
 
 // GetSlot returns the item at a container slot index (0-45), or nil if empty.
