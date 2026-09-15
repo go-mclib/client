@@ -92,7 +92,7 @@ func (m *Module) RaycastBlocks(fromX, fromY, fromZ, toX, toY, toZ float64) (hit 
 		}
 
 		// check current block for collision shapes
-		stateID := w.GetBlock(bx, by, bz)
+		stateID, _ := w.GetLoadedBlock(bx, by, bz)
 		if stateID != 0 {
 			shapes := block_shapes.CollisionShape(stateID)
 			for _, s := range shapes {

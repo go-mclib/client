@@ -2,6 +2,7 @@ package pathfinding
 
 import (
 	"container/heap"
+	"context"
 	"fmt"
 	"math"
 
@@ -22,10 +23,22 @@ var diagonalOffsets = [4][2]int{
 	{1, 1}, {1, -1}, {-1, 1}, {-1, -1},
 }
 
-func findPath(w *world.Module, col *collisions.Module, ents *entities.Module,
+func findPath(ctx context.Context, w *world.Module, col *collisions.Module, ents *entities.Module,
 	startX, startY, startZ, goalX, goalY, goalZ, maxNodes int,
-	jumpPower, effectiveSpeed float64,
+	cfg simulationConfig,
 ) ([]PathNode, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !nodeLoaded(w, startX, startY, startZ, cfg) || !nodeLoaded(w, goalX, goalY, goalZ, cfg) {
+		return nil, fmt.Errorf("pathfinding: start or goal terrain is unloaded")
+	}
+	if _, ok := standSurface(col, goalX, goalY, goalZ, cfg.sneakingHeight, cfg); !ok {
+		return nil, fmt.Errorf("pathfinding: goal has no support or headroom")
+	}
+	if _, ok := standSurface(col, startX, startY, startZ, cfg.sneakingHeight, cfg); !ok {
+		return nil, fmt.Errorf("pathfinding: start has no support or headroom")
+	}
 	start := &PathNode{X: startX, Y: startY, Z: startZ}
 	start.H = heuristic(startX, startY, startZ, goalX, goalY, goalZ)
 	start.F = start.H
@@ -41,6 +54,9 @@ func findPath(w *world.Module, col *collisions.Module, ents *entities.Module,
 	explored := 0
 
 	for openSet.Len() > 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		current := heap.Pop(openSet).(*PathNode)
 		cx, cy, cz := current.X, current.Y, current.Z
 
@@ -60,9 +76,9 @@ func findPath(w *world.Module, col *collisions.Module, ents *entities.Module,
 		}
 
 		// generate all movement types
-		tryCardinalMoves(w, col, ents, current, goalX, goalY, goalZ, gScore, openSet)
-		tryDiagonalMoves(w, col, ents, current, goalX, goalY, goalZ, gScore, openSet)
-		tryParkourMoves(w, col, current, goalX, goalY, goalZ, gScore, openSet, jumpPower, effectiveSpeed)
+		tryCardinalMoves(w, col, ents, current, goalX, goalY, goalZ, gScore, openSet, cfg)
+		tryDiagonalMoves(w, col, ents, current, goalX, goalY, goalZ, gScore, openSet, cfg)
+		tryParkourMoves(ctx, w, col, current, goalX, goalY, goalZ, gScore, openSet, cfg)
 	}
 
 	return nil, fmt.Errorf("pathfinding: no path found")
@@ -72,19 +88,20 @@ func findPath(w *world.Module, col *collisions.Module, ents *entities.Module,
 func tryCardinalMoves(w *world.Module, col *collisions.Module, ents *entities.Module,
 	current *PathNode, goalX, goalY, goalZ int,
 	gScore map[[3]int]float64, openSet *nodeHeap,
+	cfg simulationConfig,
 ) {
 	cx, cy, cz := current.X, current.Y, current.Z
-	srcFy := nodeSurfaceY(col, cx, cy, cz)
+	srcFy := nodeSurfaceY(col, cx, cy, cz, cfg)
 
 	for _, off := range cardinalOffsets {
 		nx, nz := cx+off[0], cz+off[1]
 
 		// 1. walk (dy=0)
-		tryMove(w, col, ents, current, srcFy, nx, cy, nz, 0, goalX, goalY, goalZ, gScore, openSet)
+		tryMove(w, col, ents, current, srcFy, nx, cy, nz, goalX, goalY, goalZ, gScore, openSet, cfg)
 
-		// 2. step-up (dy=+1)
-		if canStepUp(w, col, nx, cy, nz, srcFy) {
-			tryMove(w, col, ents, current, srcFy, nx, cy+1, nz, 1, goalX, goalY, goalZ, gScore, openSet)
+		// 2. rise into the next node band, only if the collision sweep can step it
+		for rise := 1; rise <= max(1, int(math.Ceil(cfg.maxStep))); rise++ {
+			tryMove(w, col, ents, current, srcFy, nx, cy+rise, nz, goalX, goalY, goalZ, gScore, openSet, cfg)
 		}
 
 		// 3. descend/fall (dy=-1 to -safeFall)
@@ -95,42 +112,30 @@ func tryCardinalMoves(w *world.Module, col *collisions.Module, ents *entities.Mo
 			}
 
 			ny := cy + dy
-			isGoal := nx == goalX && ny == goalY && nz == goalZ
 
-			cost, sneaking, _ := moveCost(w, col, ents, nx, ny, nz)
-			if cost < 0 && !isGoal {
-				if dy == -1 {
-					continue // -1 might just be impassable, try deeper
-				}
-				break // deeper falls need contiguous passable space
-			}
+			cost, sneaking, _ := moveCost(w, col, ents, nx, ny, nz, cfg)
 			if cost < 0 {
-				cost = sprintOneBlockCost
+				continue
 			}
 
-			height := playerHeight
+			height := cfg.height
 			if sneaking {
-				height = playerSneakingHeight
+				height = cfg.sneakingHeight
 			}
 
-			if !isGoal {
-				// check we can walk off the source edge into this column
-				if !canPassBetween(col, cx, cz, nx, nz, srcFy, srcFy, height) {
+			// Falling requires a clear, loaded departure and descent column.
+			if !canPassBetween(w, col, cx, cz, nx, nz, srcFy, srcFy, height, cfg) {
+				break
+			}
+			clear := true
+			for checkY := cy - 1; checkY > ny; checkY-- {
+				if !nodeLoaded(w, nx, checkY, nz, cfg) || !col.CanFitAt(float64(nx)+0.5, float64(checkY), float64(nz)+0.5, cfg.width, height) {
+					clear = false
 					break
 				}
-				if dy <= -2 {
-					// verify intermediate Y levels are clear
-					clear := true
-					for checkY := cy - 1; checkY > ny; checkY-- {
-						if !col.CanFitAt(float64(nx)+0.5, float64(checkY), float64(nz)+0.5, playerWidth, height) {
-							clear = false
-							break
-						}
-					}
-					if !clear {
-						break
-					}
-				}
+			}
+			if !clear {
+				break
 			}
 
 			// calculate edge cost
@@ -163,46 +168,35 @@ func tryCardinalMoves(w *world.Module, col *collisions.Module, ents *entities.Mo
 
 		// 4. door traversal: check if a closed wooden door blocks walk at (nx, cy, nz)
 		if _, _, _, hasDoor := findClosedWoodenDoor(w, nx, cy, nz); hasDoor {
-			tryDoorMove(w, col, ents, current, nx, cy, nz, goalX, goalY, goalZ, gScore, openSet)
+			tryDoorMove(w, col, ents, current, nx, cy, nz, goalX, goalY, goalZ, gScore, openSet, cfg)
 		}
 	}
 }
 
 // tryMove attempts to add a walk or step-up node.
 func tryMove(w *world.Module, col *collisions.Module, ents *entities.Module,
-	current *PathNode, srcFy float64, nx, ny, nz, dy int,
+	current *PathNode, srcFy float64, nx, ny, nz int,
 	goalX, goalY, goalZ int,
 	gScore map[[3]int]float64, openSet *nodeHeap,
+	cfg simulationConfig,
 ) {
 	cx, cz := current.X, current.Z
-	isGoal := nx == goalX && ny == goalY && nz == goalZ
 
-	cost, sneaking, destFy := moveCost(w, col, ents, nx, ny, nz)
-	if cost < 0 && !isGoal {
+	cost, sneaking, destFy := moveCost(w, col, ents, nx, ny, nz, cfg)
+	if cost < 0 {
 		return
 	}
-	if cost < 0 {
-		cost = sprintOneBlockCost
-		destFy = float64(ny)
-	}
 
-	height := playerHeight
+	height := cfg.height
 	if sneaking {
-		height = playerSneakingHeight
+		height = cfg.sneakingHeight
 	}
 
-	if !isGoal {
-		if !canPassBetween(col, cx, cz, nx, nz, srcFy, destFy, height) {
-			return
-		}
+	if !canPassBetween(w, col, cx, cz, nx, nz, srcFy, destFy, height, cfg) {
+		return
 	}
 
 	edgeCost := cost
-	// only a rise beyond auto-step height costs a jump; small rises (stair backs,
-	// slabs) are stepped over for free
-	if dy == 1 && (destFy-srcFy) > collisions.StepUpHeight {
-		edgeCost += jumpOneBlockCost
-	}
 
 	tentativeG := current.G + edgeCost
 	nKey := [3]int{nx, ny, nz}
@@ -222,13 +216,17 @@ func tryMove(w *world.Module, col *collisions.Module, ents *entities.Module,
 }
 
 // tryDoorMove adds a node that goes through a closed wooden door.
-func tryDoorMove(w *world.Module, _ *collisions.Module, _ *entities.Module,
+func tryDoorMove(w *world.Module, col *collisions.Module, _ *entities.Module,
 	current *PathNode, nx, ny, nz int,
 	goalX, goalY, goalZ int,
 	gScore map[[3]int]float64, openSet *nodeHeap,
+	cfg simulationConfig,
 ) {
 	doorX, doorY, doorZ, found := findClosedWoodenDoor(w, nx, ny, nz)
-	if !found {
+	if !found || !nodeLoaded(w, nx, ny, nz, cfg) {
+		return
+	}
+	if _, ok := standSurface(col, current.X, current.Y, current.Z, cfg.height, cfg); !ok {
 		return
 	}
 
@@ -260,14 +258,15 @@ func tryDoorMove(w *world.Module, _ *collisions.Module, _ *entities.Module,
 func tryDiagonalMoves(w *world.Module, col *collisions.Module, ents *entities.Module,
 	current *PathNode, goalX, goalY, goalZ int,
 	gScore map[[3]int]float64, openSet *nodeHeap,
+	cfg simulationConfig,
 ) {
 	cx, cy, cz := current.X, current.Y, current.Z
-	srcFy := nodeSurfaceY(col, cx, cy, cz)
+	srcFy := nodeSurfaceY(col, cx, cy, cz, cfg)
 
 	for _, off := range diagonalOffsets {
 		nx, nz := cx+off[0], cz+off[1]
 
-		if !canDiagonalTraverse(w, col, cx, cy, cz, off[0], off[1]) {
+		if !canDiagonalTraverse(w, col, cx, cy, cz, off[0], off[1], cfg) {
 			continue
 		}
 
@@ -275,31 +274,22 @@ func tryDiagonalMoves(w *world.Module, col *collisions.Module, ents *entities.Mo
 		for _, dy := range [2]int{0, -1} {
 			ny := cy + dy
 
-			isGoal := nx == goalX && ny == goalY && nz == goalZ
-
-			cost, sneaking, destFy := moveCost(w, col, ents, nx, ny, nz)
-			if cost < 0 && !isGoal {
+			cost, sneaking, destFy := moveCost(w, col, ents, nx, ny, nz, cfg)
+			if cost < 0 {
 				continue
 			}
-			if cost < 0 {
-				cost = sprintOneBlockCost
-				destFy = float64(ny)
-			}
 
-			height := playerHeight
+			height := cfg.height
 			if sneaking {
-				height = playerSneakingHeight
+				height = cfg.sneakingHeight
 			}
 
-			if !isGoal && dy == 0 {
-				if !canPassBetween(col, cx, cz, nx, nz, srcFy, destFy, height) {
-					continue
-				}
-			} else if !isGoal && dy == -1 {
-				// check we can walk off the source edge into this column
-				if !canPassBetween(col, cx, cz, nx, nz, srcFy, srcFy, height) {
-					continue
-				}
+			traverseY := destFy
+			if dy < 0 {
+				traverseY = srcFy
+			}
+			if !canPassBetween(w, col, cx, cz, nx, nz, srcFy, traverseY, height, cfg) {
+				continue
 			}
 
 			edgeCost := cost * math.Sqrt2
@@ -327,44 +317,19 @@ func tryDiagonalMoves(w *world.Module, col *collisions.Module, ents *entities.Mo
 }
 
 // tryParkourMoves generates sprint-jump moves using physics simulation.
-func tryParkourMoves(w *world.Module, col *collisions.Module,
+func tryParkourMoves(ctx context.Context, w *world.Module, col *collisions.Module,
 	current *PathNode, goalX, goalY, goalZ int,
 	gScore map[[3]int]float64, openSet *nodeHeap,
-	jumpPower, effectiveSpeed float64,
+	cfg simulationConfig,
 ) {
 	cx, cy, cz := current.X, current.Y, current.Z
 
-	// simulate jumps from current position (per-landing direction checks below
-	// skip jumps where a plain walk would do)
-	landings := simulateJumps(col, w, cx, cy, cz, jumpPower, effectiveSpeed)
+	landings := simulateJumps(ctx, col, w, cx, cy, cz, cfg)
 	for _, landing := range landings {
 		nx, ny, nz := landing.X, landing.Y, landing.Z
 
-		// skip if same block or adjacent (should use walk instead)
-		dist := iabs(nx-cx) + iabs(nz-cz)
-		if dist < 2 {
-			continue
-		}
-
-		// skip if there's a walkable path in this direction (don't parkour when you can walk)
-		dirX := sign(nx - cx)
-		dirZ := sign(nz - cz)
-		if dirX != 0 && dirZ == 0 {
-			adjX := cx + dirX
-			if canStandAt(w, col, adjX, cy, cz) {
-				continue
-			}
-		} else if dirZ != 0 && dirX == 0 {
-			adjZ := cz + dirZ
-			if canStandAt(w, col, cx, cy, adjZ) {
-				continue
-			}
-		}
-
-		isGoal := nx == goalX && ny == goalY && nz == goalZ
-
 		// verify destination is standable
-		if !isGoal && !canStandAt(w, col, nx, ny, nz) {
+		if !canStandAt(w, col, nx, ny, nz, cfg) {
 			continue
 		}
 

@@ -20,21 +20,21 @@ type Attribute struct {
 }
 
 // computeValue calculates the effective value following vanilla AttributeInstance.calculateValue.
-func (a *Attribute) computeValue() float64 {
+func (a *Attribute) computeValue(skipModifier string) float64 {
 	value := a.Base
 	for _, mod := range a.Modifiers {
-		if mod.Operation == 0 {
+		if mod.ID != skipModifier && mod.Operation == 0 {
 			value += mod.Amount
 		}
 	}
 	saved := value
 	for _, mod := range a.Modifiers {
-		if mod.Operation == 1 {
+		if mod.ID != skipModifier && mod.Operation == 1 {
 			value += saved * mod.Amount
 		}
 	}
 	for _, mod := range a.Modifiers {
-		if mod.Operation == 2 {
+		if mod.ID != skipModifier && mod.Operation == 2 {
 			value *= 1.0 + mod.Amount
 		}
 	}
@@ -50,9 +50,24 @@ func (m *Module) AttributeValue(name string, fallback float64) float64 {
 		m.mu.RUnlock()
 		return fallback
 	}
-	val := attr.computeValue()
+	val := attr.computeValue("")
 	m.mu.RUnlock()
 	return val
+}
+
+// MovementSpeed predicts a local sprint toggle without double-applying a
+// synchronized minecraft:sprinting modifier from the server.
+func (m *Module) MovementSpeed(sprinting bool) float64 {
+	m.mu.RLock()
+	value := float64(float32(0.1))
+	if attr := m.attributes["minecraft:movement_speed"]; attr != nil {
+		value = attr.computeValue("minecraft:sprinting")
+	}
+	m.mu.RUnlock()
+	if sprinting {
+		value *= 1 + float64(float32(0.3))
+	}
+	return float64(float32(max(0, min(1024, value))))
 }
 
 func (m *Module) handleUpdateAttributes(pkt *jp.WirePacket) {
@@ -126,7 +141,7 @@ func (m *Module) handleUpdateAttributes(pkt *jp.WirePacket) {
 			Modifiers: mods,
 		}
 		m.attributes[name] = attr
-		updates = append(updates, attrUpdate{name, attr.computeValue()})
+		updates = append(updates, attrUpdate{name, attr.computeValue("")})
 	}
 	m.mu.Unlock()
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -47,6 +48,7 @@ type Client struct {
 	modules       []Module
 	modulesByName map[string]Module
 	handlers      []Handler
+	packetMu      sync.Mutex
 
 	// lifecycle callbacks
 	onConnect    []func()
@@ -124,6 +126,15 @@ func (c *Client) wireModules() error {
 // RegisterHandler appends a lightweight packet callback (escape hatch).
 func (c *Client) RegisterHandler(h Handler) {
 	c.handlers = append(c.handlers, h)
+}
+
+// WithPacketState runs a game-state update atomically with packet dispatch.
+// Like vanilla's main thread, a movement tick cannot observe half a teleport,
+// attribute update or entity update. Do not call this from a packet callback.
+func (c *Client) WithPacketState(update func()) {
+	c.packetMu.Lock()
+	defer c.packetMu.Unlock()
+	update()
 }
 
 // lifecycle event registration
@@ -307,6 +318,8 @@ func (c *Client) connectAndStartOnce(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("connect failed: %w", err)
 	}
+	transport := c.TCPClient
+	defer transport.Close()
 	c.resolvedHost = resolvedHost
 	c.resolvedPort = resolvedPort
 
@@ -332,7 +345,7 @@ func (c *Client) connectAndStartOnce(ctx context.Context) error {
 		for {
 			select {
 			case pkt := <-outgoingQueue:
-				if err := c.WritePacket(pkt); err != nil {
+				if err := transport.WritePacket(pkt); err != nil {
 					c.Logger.Println("error writing packet from queue:", err)
 				}
 			case <-queueDone:
@@ -345,6 +358,9 @@ func (c *Client) connectAndStartOnce(ctx context.Context) error {
 	for {
 		wire, err := c.ReadWirePacket()
 		if err != nil {
+			// Unblock writes from tick callbacks before disconnect handlers wait
+			// for those ticks to finish. The queue retains only this transport.
+			_ = transport.Close()
 			c.Logger.Println("read packet error:", err)
 			c.shouldReconnect = true
 			if c.queueDone != nil {
@@ -354,11 +370,13 @@ func (c *Client) connectAndStartOnce(ctx context.Context) error {
 			c.FireDisconnect()
 			return err
 		}
-		for _, m := range c.modules {
-			m.HandlePacket(wire)
-		}
-		for _, h := range c.handlers {
-			h(c, wire)
-		}
+		c.WithPacketState(func() {
+			for _, m := range c.modules {
+				m.HandlePacket(wire)
+			}
+			for _, h := range c.handlers {
+				h(c, wire)
+			}
+		})
 	}
 }

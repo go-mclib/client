@@ -5,10 +5,12 @@ import (
 	"encoding/binary"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-mclib/client"
 	chatsign "github.com/go-mclib/client/chat"
+	"github.com/go-mclib/data/lang"
 	"github.com/go-mclib/data/packet_ids"
 	"github.com/go-mclib/data/packets"
 	jp "github.com/go-mclib/protocol/java_protocol"
@@ -18,7 +20,14 @@ import (
 const ModuleName = "chat"
 
 type Module struct {
-	client *client.Client
+	client             *client.Client
+	commandMu          sync.RWMutex
+	commandTree        *commandTree
+	commandTreeError   error
+	suggestionMu       sync.Mutex
+	suggestionSession  *suggestionSession
+	nextSuggestionID   int64
+	pendingSuggestions map[ns.VarInt]*pendingSuggestion
 
 	onPlayerChat    []func(sender, message string, isWhisper bool)
 	onSystemChat    []func(message string, isOverlay bool)
@@ -31,9 +40,20 @@ func New() *Module {
 
 func (m *Module) Name() string { return ModuleName }
 
-func (m *Module) Init(c *client.Client) { m.client = c }
+func (m *Module) Init(c *client.Client) {
+	m.client = c
+	c.OnPlay(m.startSuggestions)
+	c.OnTransfer(m.Reset)
+	c.OnDisconnect(m.Reset)
+}
 
-func (m *Module) Reset() {}
+func (m *Module) Reset() {
+	m.commandMu.Lock()
+	m.commandTree = nil
+	m.commandTreeError = nil
+	m.commandMu.Unlock()
+	m.resetSuggestions()
+}
 
 // From retrieves the chat module from a client.
 func From(c *client.Client) *Module {
@@ -59,6 +79,18 @@ func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 		return
 	}
 	switch pkt.PacketID {
+	case packet_ids.S2CCommandSuggestionsID:
+		m.handleCommandSuggestions(pkt)
+	case packet_ids.S2CCommandsID:
+		m.commandMu.Lock()
+		defer m.commandMu.Unlock()
+		var d packets.S2CCommands
+		if err := pkt.ReadInto(&d); err != nil {
+			m.commandTree = nil
+			m.commandTreeError = err
+			return
+		}
+		m.commandTree, m.commandTreeError = parseCommandTree(d.Data)
 	case packet_ids.S2CPlayerChatID:
 		m.handlePlayerChat(pkt)
 	case packet_ids.S2CSystemChatID:
@@ -111,7 +143,7 @@ func (m *Module) handleSystemChat(pkt *jp.WirePacket) {
 	if err := pkt.ReadInto(&d); err != nil {
 		return
 	}
-	txt := d.Content.String()
+	txt := d.Content.Render(lang.Translate)
 	if d.Overlay {
 		m.client.Logger.Printf("[SYSTEM-ACTION] %s", txt)
 	} else {
@@ -128,10 +160,10 @@ func (m *Module) handleDisguisedChat(pkt *jp.WirePacket) {
 		return
 	}
 	isWhisper := d.ChatType.TargetName.Present
-	sender := d.ChatType.Name.String()
-	msg := d.Message.String()
+	sender := d.ChatType.Name.Render(lang.Translate)
+	msg := d.Message.Render(lang.Translate)
 	if isWhisper {
-		m.client.Logger.Printf("[DISGUISED] %s -> %s: %s", sender, d.ChatType.TargetName.Value.String(), msg)
+		m.client.Logger.Printf("[DISGUISED] %s -> %s: %s", sender, d.ChatType.TargetName.Value.Render(lang.Translate), msg)
 	} else {
 		m.client.Logger.Printf("[DISGUISED] %s: %s", sender, msg)
 	}
@@ -185,11 +217,80 @@ func (m *Module) SendMessage(message string) error {
 	})
 }
 
-// SendCommand sends a command (strips leading /).
+// SendCommand signs minecraft:message arguments from the advertised graph.
+// Commands without signable arguments retain the ordinary unsigned packet.
 func (m *Module) SendCommand(command string) error {
 	command = strings.TrimPrefix(command, "/")
-	return m.client.WritePacket(&packets.C2SChatCommand{
-		Command: ns.String(command),
+	if err := validCommandInput(command); err != nil {
+		return err
+	}
+	var arguments []signableArgument
+	m.commandMu.RLock()
+	tree, treeError := m.commandTree, m.commandTreeError
+	m.commandMu.RUnlock()
+	if tree != nil {
+		var err error
+		// Vanilla LevelBasedPermissionSet grants COMMANDS_ENTITY_SELECTORS at
+		// GAMEMASTERS (level 2). Missing client permission state is not a grant.
+		// self.OpLevel is a synchronized accessor, not an exported state field.
+		permissions, known := m.client.Module("self").(interface{ OpLevel() int8 })
+		allowSelectors := known && permissions.OpLevel() >= 2
+		arguments, err = tree.arguments(command, allowSelectors)
+		if err != nil {
+			return err
+		}
+	} else if m.client.ChatSigner != nil {
+		// Never guess which substrings to sign. Plain discovery still works
+		// before a tree arrives, or when a custom parser prevents decoding.
+		root := strings.SplitN(command, " ", 2)[0]
+		if root != "help" && root != "plugins" && root != "version" && root != "list" {
+			if treeError != nil {
+				return fmt.Errorf("server command tree: %w", treeError)
+			}
+			return fmt.Errorf("server command tree has not arrived")
+		}
+	}
+	if len(arguments) == 0 {
+		return m.client.WritePacket(&packets.C2SChatCommand{Command: ns.String(command)})
+	}
+	if m.client.ChatSigner == nil {
+		// Vanilla offline sessions send the signed-command envelope with an
+		// empty signature list. The server decides whether unsigned chat is
+		// permitted; never fabricate signatures or claim acceptance.
+		return m.client.WritePacket(&packets.C2SChatCommandSigned{
+			Command: ns.String(command), Timestamp: ns.Int64(time.Now().UnixMilli()),
+			Acknowledged: ns.NewFixedBitSet(20),
+		})
+	}
+	var saltBytes [8]byte
+	if _, err := rand.Read(saltBytes[:]); err != nil {
+		return fmt.Errorf("command salt: %w", err)
+	}
+	salt := int64(binary.BigEndian.Uint64(saltBytes[:]))
+	timestamp := time.Now()
+	update := m.client.ChatSigner.GenerateAndApplyUpdate()
+	signatures := make([]packets.CommandArgumentSignature, 0, len(arguments))
+	for _, argument := range arguments {
+		signature, err := m.client.ChatSigner.SignMessage(argument.text, timestamp, salt, update.LastSeen)
+		if err != nil {
+			return fmt.Errorf("sign command argument %s: %w", argument.name, err)
+		}
+		if len(signature) != 256 {
+			return fmt.Errorf("command signature must be 256 bytes")
+		}
+		entry := packets.CommandArgumentSignature{Name: ns.String(argument.name)}
+		copy(entry.Signature[:], signature)
+		signatures = append(signatures, entry)
+	}
+	ack := ns.NewFixedBitSet(20)
+	for i, seen := range update.Acknowledged {
+		if seen {
+			ack.Set(i)
+		}
+	}
+	return m.client.WritePacket(&packets.C2SChatCommandSigned{
+		Command: ns.String(command), Timestamp: ns.Int64(timestamp.UnixMilli()), Salt: ns.Int64(salt),
+		ArgumentSignatures: signatures, MessageCount: ns.VarInt(update.Offset), Acknowledged: ack, Checksum: ns.Int8(update.Checksum),
 	})
 }
 

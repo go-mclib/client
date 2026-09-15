@@ -83,6 +83,10 @@ func (m *Module) handleRespawn(pkt *jp.WirePacket) {
 	m.x = 0
 	m.y = 0
 	m.z = 0
+	m.entityFlags, m.livingFlags = 0, 0
+	m.noGravity, m.sleeping, m.isVehicle = false, false, false
+	m.vehicleID = 0
+	m.sprinting, m.sneaking = false, false
 
 	if d.DataKept&0x01 == 0 {
 		m.health = 20
@@ -168,36 +172,44 @@ func (m *Module) handlePlayerPosition(pkt *jp.WirePacket) {
 	flags := int32(d.Flags)
 
 	m.mu.Lock()
-	if flags&0x01 != 0 {
-		m.x += float64(d.X)
-	} else {
-		m.x = float64(d.X)
-	}
-	if flags&0x02 != 0 {
-		m.y += float64(d.Y)
-	} else {
-		m.y = float64(d.Y)
-	}
-	if flags&0x04 != 0 {
-		m.z += float64(d.Z)
-	} else {
-		m.z = float64(d.Z)
-	}
-	if flags&0x08 != 0 {
-		m.yaw += float32(d.Yaw)
-	} else {
-		m.yaw = float32(d.Yaw)
-	}
-	if flags&0x10 != 0 {
-		m.pitch += float32(d.Pitch)
-	} else {
-		m.pitch = float32(d.Pitch)
+	oldYaw, oldPitch := m.yaw, m.pitch
+	if m.vehicleID == 0 {
+		if flags&0x01 != 0 {
+			m.x += float64(d.X)
+		} else {
+			m.x = float64(d.X)
+		}
+		if flags&0x02 != 0 {
+			m.y += float64(d.Y)
+		} else {
+			m.y = float64(d.Y)
+		}
+		if flags&0x04 != 0 {
+			m.z += float64(d.Z)
+		} else {
+			m.z = float64(d.Z)
+		}
+		if flags&0x08 != 0 {
+			m.yaw += float32(d.Yaw)
+		} else {
+			m.yaw = float32(d.Yaw)
+		}
+		if flags&0x10 != 0 {
+			m.pitch += float32(d.Pitch)
+		} else {
+			m.pitch = float32(d.Pitch)
+		}
+		m.pitch = max(float32(-90), min(float32(90), m.pitch))
 	}
 
 	suppress := m.suppressPositionEcho
 	x, y, z := m.x, m.y, m.z
 	yaw, pitch := m.yaw, m.pitch
 	m.mu.Unlock()
+
+	for _, cb := range m.onTeleport {
+		cb(&d, oldYaw, oldPitch)
+	}
 
 	if !suppress {
 		_ = m.client.WritePacket(&packets.C2SAcceptTeleportation{

@@ -1,0 +1,385 @@
+package entities
+
+import (
+	"encoding/binary"
+	"fmt"
+	"math"
+	"slices"
+	"strings"
+
+	"github.com/go-mclib/client/modules/collisions"
+	dataentities "github.com/go-mclib/data/entities"
+	"github.com/go-mclib/data/packets"
+	"github.com/go-mclib/data/registries"
+	jp "github.com/go-mclib/protocol/java_protocol"
+)
+
+// IsBoat identifies registered AbstractBoat types, including bamboo rafts.
+func IsBoat(name string) bool {
+	return (strings.HasSuffix(name, "_boat") || strings.HasSuffix(name, "_raft")) && dataentities.EntityTypeID(name) >= 0
+}
+
+func (m *Module) trackEntityLocked(e *Entity) {
+	if _, exists := m.entities[e.ID]; !exists {
+		m.entityOrder = append(m.entityOrder, e.ID)
+	}
+	m.entities[e.ID] = e
+}
+
+func (m *Module) removeTrackedEntityLocked(id int32) {
+	delete(m.entities, id)
+	m.removeVehicleLocked(id)
+	if index := slices.Index(m.entityOrder, id); index >= 0 {
+		m.entityOrder = slices.Delete(m.entityOrder, index, index+1)
+	}
+}
+
+func decodeEntityDelta(base float64, delta int16) float64 {
+	if delta == 0 {
+		return base
+	}
+	return (math.Floor(base*4096+0.5) + float64(delta)) / 4096
+}
+
+func (e *Entity) moveTo(x, y, z float64, yaw, pitch float32, absolute bool) {
+	if e.interpolationSteps > 0 && e.X == x && e.Y == y && e.Z == z && e.Yaw == yaw && e.Pitch == pitch {
+		return
+	}
+	e.X, e.Y, e.Z, e.Yaw, e.Pitch = x, y, z, yaw, pitch
+	e.startInterpolation(absolute)
+}
+
+func (e *Entity) startInterpolation(absolute bool) {
+	dx, dy, dz := e.X-e.physicsX, e.Y-e.physicsY, e.Z-e.physicsZ
+	// Shulkers explicitly return null from getInterpolation(). Other living
+	// entities and boats use InterpolationHandler's three simulation steps.
+	if e.TypeName == "minecraft:shulker" || !dataentities.IsAttackable(e.TypeName) && !IsBoat(e.TypeName) || absolute && dx*dx+dy*dy+dz*dz > 4096 {
+		e.physicsX, e.physicsY, e.physicsZ = e.X, e.Y, e.Z
+		e.interpolationSteps = 0
+		return
+	}
+	e.interpolationSteps = 3
+}
+
+// TickPhysics advances remote collision positions once per client game tick.
+// Packet-facing X/Y/Z remain the codec targets used by relative movement packets;
+// collision and push queries use these independently interpolated positions.
+func (m *Module) TickPhysics() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, id := range m.entityOrder {
+		e := m.entities[id]
+		if e.interpolationSteps > 0 {
+			alpha := 1 / float64(e.interpolationSteps)
+			e.physicsX += alpha * (e.X - e.physicsX)
+			e.physicsY += alpha * (e.Y - e.physicsY)
+			e.physicsZ += alpha * (e.Z - e.physicsZ)
+			e.interpolationSteps--
+		}
+		if e.TypeName == "minecraft:shulker" {
+			target := float32(metadataByte(e, dataentities.ShulkerIndexPeek)) * float32(0.01)
+			if e.peekAmount > target {
+				e.peekAmount = min(max(e.peekAmount-float32(0.05), target), 1)
+			} else {
+				e.peekAmount = min(max(e.peekAmount+float32(0.05), 0), target)
+			}
+		}
+	}
+}
+
+// PhysicsEntitiesInAABB returns snapshots at client-tick positions. Unlike the
+// observation APIs it also resolves pose-dependent bounds used by movement.
+func (m *Module) PhysicsEntitiesInAABB(minX, minY, minZ, maxX, maxY, maxZ float64) []*Entity {
+	ownID := m.ownEntityID()
+	query := collisions.NewAABB(minX, minY, minZ, maxX, maxY, maxZ)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var result []*Entity
+	for _, id := range m.entityOrder {
+		e := m.entities[id]
+		if e.ID == ownID {
+			continue
+		}
+		positioned := *e
+		positioned.X, positioned.Y, positioned.Z = e.physicsX, e.physicsY, e.physicsZ
+		if positioned.BoundingBox().Intersects(query) {
+			result = append(result, cloneEntity(&positioned))
+		}
+	}
+	return result
+}
+
+// BoundingBox resolves metadata-controlled collision geometry at the snapshot's
+// position. A shulker lid changes collision bounds, not merely its rendered box.
+func (e *Entity) BoundingBox() collisions.AABB {
+	width, height := e.Width, e.Height
+	pose := metadataInt(e, dataentities.EntityIndexPose)
+	if dataentities.IsAttackable(e.TypeName) && pose == 2 {
+		width, height = float64(float32(0.2)), float64(float32(0.2))
+	} else if e.TypeName == "minecraft:player" || e.TypeName == "minecraft:mannequin" {
+		switch pose {
+		case 1, 3, 4: // fall flying, swimming, spin attack
+			height = float64(float32(0.6))
+		case 5: // crouching
+			height = float64(float32(1.5))
+		case 7: // dying
+			width, height = float64(float32(0.2)), float64(float32(0.2))
+		}
+	} else {
+		w, h := mobDimensions(e, pose, float32(width), float32(height))
+		width, height = float64(w), float64(h)
+	}
+	scale := e.physicsScale()
+	if dataentities.IsAttackable(e.TypeName) && pose != 2 && !((e.TypeName == "minecraft:player" || e.TypeName == "minecraft:mannequin") && pose == 7) {
+		width = float64(float32(width) * scale)
+		height = float64(float32(height) * scale)
+	}
+	box := collisions.EntityAABB(e.X, e.Y, e.Z, width, height)
+	if e.TypeName == "minecraft:shulker" {
+		// Shulker.getPhysicalPeek uses the same float sine table as Mth.sin.
+		angle := float32(float32(0.5)+e.peekAmount) * float32(math.Pi)
+		index := int(float64(angle)*10430.378350470453) & 65535
+		sine := float32(math.Sin(float64(index) / 10430.378350470453))
+		peek := float64(float32(0.5)-sine*float32(0.5)) * float64(scale)
+		switch metadataInt(e, dataentities.ShulkerIndexAttachFace) { // lid opens opposite the attached face
+		case 0:
+			box.MaxY += peek
+		case 1:
+			box.MinY -= peek
+		case 2:
+			box.MaxZ += peek
+		case 3:
+			box.MinZ -= peek
+		case 4:
+			box.MaxX += peek
+		case 5:
+			box.MinX -= peek
+		}
+	}
+	return box
+}
+
+func (e *Entity) physicsScale() float32 {
+	scale := e.scale
+	if scale == 0 {
+		scale = 1
+	}
+	switch e.TypeName {
+	case "minecraft:shulker":
+		return min(scale, 3)
+	case "minecraft:happy_ghast":
+		return min(scale, 1)
+	default:
+		return scale
+	}
+}
+
+func (m *Module) handleUpdateAttributes(pkt *jp.WirePacket) {
+	var d packets.S2CUpdateAttributes
+	if pkt.ReadInto(&d) != nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e := m.entities[int32(d.EntityId)]
+	if e == nil || !dataentities.IsAttackable(e.TypeName) {
+		return
+	}
+	for _, attribute := range d.Attributes {
+		if registries.Attribute.ByID(int32(attribute.Type)) != "minecraft:scale" {
+			continue
+		}
+		value := float64(attribute.Base)
+		for _, modifier := range attribute.Modifiers {
+			if modifier.Operation == 0 {
+				value += float64(modifier.Amount)
+			}
+		}
+		base := value
+		for _, modifier := range attribute.Modifiers {
+			if modifier.Operation == 1 {
+				value += base * float64(modifier.Amount)
+			}
+		}
+		for _, modifier := range attribute.Modifiers {
+			if modifier.Operation == 2 {
+				value *= 1 + float64(modifier.Amount)
+			}
+		}
+		if math.IsNaN(value) {
+			value = 0.0625
+		}
+		e.scale = float32(min(max(value, 0.0625), 16))
+	}
+}
+
+func metadataByte(e *Entity, index byte) byte {
+	data := e.Metadata.Get(index)
+	if len(data) == 0 {
+		return 0
+	}
+	return data[0]
+}
+
+func metadataInt(e *Entity, index byte) int32 {
+	data := e.Metadata.Get(index)
+	value, n := binary.Uvarint(data)
+	if n <= 0 {
+		return 0
+	}
+	return int32(value)
+}
+
+func entityAlive(e *Entity) bool {
+	data := e.Metadata.Get(dataentities.LivingEntityIndexHealth)
+	return len(data) != 4 || math.Float32frombits(binary.BigEndian.Uint32(data)) > 0
+}
+
+func (m *Module) entityScoreName(e *Entity) (string, bool) {
+	if e.TypeName == "minecraft:player" && m.playerlist != nil {
+		if player := m.playerlist.GetPlayer(e.UUID); player != nil {
+			return player.Name, player.Gamemode == 3
+		}
+	}
+	return e.scoreName, false
+}
+
+// CanPushLocal applies the contextual part of EntitySelector.pushableBy and
+// Entity.push. The caller checks the local player's alive/climbing/sleeping state.
+func (m *Module) CanPushLocal(e *Entity) bool {
+	name, spectator := m.entityScoreName(e)
+	if spectator {
+		return false
+	}
+	ownID := m.ownEntityID()
+	ownName := ""
+	if m.client != nil {
+		ownName = m.client.Username
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.rootVehicleLocked(e.ID) == m.rootVehicleLocked(ownID) {
+		return false
+	}
+	ownTeam, theirTeam := m.memberTeams[ownName], m.memberTeams[name]
+	return teamsAllowPush(m.teams[ownTeam], m.teams[theirTeam], ownTeam != "" && ownTeam == theirTeam)
+}
+
+func teamsAllowPush(own, other int32, allied bool) bool {
+	if own == 1 || other == 1 {
+		return false
+	}
+	if (own == 3 || other == 3) && allied {
+		return false
+	}
+	return own != 2 && other != 2 || allied
+}
+
+func (m *Module) rootVehicleLocked(id int32) int32 {
+	// The packet protocol describes a forest. Bound traversal to avoid cycling
+	// forever on malformed server passenger data, without allocating a visited set.
+	for range len(m.vehicles) + 1 {
+		vehicle, ok := m.vehicles[id]
+		if !ok {
+			return id
+		}
+		id = vehicle
+	}
+	return id
+}
+
+func (m *Module) removeVehicleLocked(id int32) {
+	delete(m.vehicles, id)
+	for passenger, vehicle := range m.vehicles {
+		if vehicle == id {
+			delete(m.vehicles, passenger)
+		}
+	}
+}
+
+func (m *Module) handleSetPassengers(pkt *jp.WirePacket) {
+	var d packets.S2CSetPassengers
+	if pkt.ReadInto(&d) != nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for passenger, vehicle := range m.vehicles {
+		if vehicle == int32(d.EntityId) {
+			delete(m.vehicles, passenger)
+		}
+	}
+	for _, passenger := range d.Passengers {
+		m.vehicles[int32(passenger)] = int32(d.EntityId)
+	}
+}
+
+func (m *Module) handleSetPlayerTeam(pkt *jp.WirePacket) {
+	var d packets.S2CSetPlayerTeam
+	if pkt.ReadInto(&d) != nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	name := string(d.TeamName)
+	switch d.Method {
+	case 0, 2:
+		m.teams[name] = int32(d.Parameters.CollisionRule)
+	case 1:
+		delete(m.teams, name)
+		for member, team := range m.memberTeams {
+			if team == name {
+				delete(m.memberTeams, member)
+			}
+		}
+	}
+	for _, player := range d.Players {
+		if d.Method == 0 || d.Method == 3 {
+			m.memberTeams[string(player)] = name
+		} else if d.Method == 4 && m.memberTeams[string(player)] == name {
+			delete(m.memberTeams, string(player))
+		}
+	}
+}
+
+// CollisionBoxes supplies rigid entity colliders to the optional collision
+// provider interface. Ordinary mobs and players are pushers, not solid obstacles;
+// team collision rules govern pushing only, not Entity.canCollideWith.
+func (m *Module) CollisionBoxes(minX, minY, minZ, maxX, maxY, maxZ float64) []collisions.AABB {
+	ownID := m.ownEntityID()
+	playerY := minY
+	if m.self != nil {
+		if m.self.Gamemode() == 3 {
+			return nil
+		}
+		_, playerY, _ = m.self.Position()
+	}
+	query := collisions.NewAABB(minX, minY, minZ, maxX, maxY, maxZ)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var boxes []collisions.AABB
+	for _, id := range m.entityOrder {
+		e := m.entities[id]
+		if e.ID == ownID || m.rootVehicleLocked(e.ID) == m.rootVehicleLocked(ownID) {
+			continue
+		}
+		if !IsBoat(e.TypeName) && e.TypeName != "minecraft:shulker" && e.TypeName != "minecraft:happy_ghast" {
+			continue
+		}
+		positioned := *e
+		positioned.X, positioned.Y, positioned.Z = e.physicsX, e.physicsY, e.physicsZ
+		box := positioned.BoundingBox()
+		if !box.Intersects(query) || !entityAlive(e) && !IsBoat(e.TypeName) {
+			continue
+		}
+		if e.TypeName == "minecraft:happy_ghast" && (metadataByte(e, dataentities.AgeableMobIndexIsBaby) != 0 || playerY < box.MaxY && metadataByte(e, dataentities.HappyGhastIndexStaysStill) == 0) {
+			continue
+		}
+		boxes = append(boxes, box)
+	}
+	return boxes
+}
+
+func entityUUIDName(uuid [16]byte) string {
+	return fmt.Sprintf("%x-%x-%x-%x-%x", uuid[0:4], uuid[4:6], uuid[6:8], uuid[8:10], uuid[10:16])
+}

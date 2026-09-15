@@ -5,6 +5,7 @@ import (
 
 	"github.com/go-mclib/client"
 	"github.com/go-mclib/data/packet_ids"
+	"github.com/go-mclib/data/packets"
 	jp "github.com/go-mclib/protocol/java_protocol"
 	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
 )
@@ -82,8 +83,14 @@ type Module struct {
 	suppressPositionEcho bool
 
 	// movement state flags
-	sprinting bool
-	sneaking  bool
+	sprinting   bool
+	sneaking    bool
+	entityFlags byte
+	livingFlags byte
+	noGravity   bool
+	sleeping    bool
+	isVehicle   bool
+	vehicleID   int32
 
 	attributes map[string]*Attribute
 
@@ -95,6 +102,7 @@ type Module struct {
 	onRespawn          []func()
 	onHealthSet        []func(health, food float32)
 	onPosition         []func(x, y, z float64)
+	onTeleport         []func(packet *packets.S2CPlayerPosition, oldYaw, oldPitch float32)
 	onGameEvent        []func(event uint8, value float32)
 	onGamemodeChange   []func(gamemode uint8)
 	onDimensionChange  []func(dimensionName string)
@@ -155,6 +163,9 @@ func (m *Module) Reset() {
 	m.pitch = 0
 	m.sprinting = false
 	m.sneaking = false
+	m.entityFlags, m.livingFlags = 0, 0
+	m.noGravity, m.sleeping, m.isVehicle = false, false, false
+	m.vehicleID = 0
 	m.difficulty = 0
 	m.difficultyLocked = false
 	m.abilityFlags = 0
@@ -219,5 +230,9 @@ func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 		m.handleRespawn(pkt)
 	case packet_ids.S2CUpdateAttributesID:
 		m.handleUpdateAttributes(pkt)
+	case packet_ids.S2CSetEntityDataID:
+		m.handleOwnMetadata(pkt)
+	case packet_ids.S2CSetPassengersID:
+		m.handlePassengers(pkt)
 	}
 }

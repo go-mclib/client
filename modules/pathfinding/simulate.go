@@ -1,157 +1,136 @@
 package pathfinding
 
 import (
+	"context"
 	"math"
 
 	"github.com/go-mclib/client/modules/collisions"
 	"github.com/go-mclib/client/modules/physics"
 	"github.com/go-mclib/client/modules/world"
+	"github.com/go-mclib/data/blocks"
 )
 
 const simMaxTicks = 40
 
-// jumpLanding represents where a simulated jump lands.
 type jumpLanding struct {
-	X, Y, Z int // block position of landing
-	Ticks   int // ticks from jump to landing
+	X, Y, Z int
+	Ticks   int
 }
 
-// simulateJumps simulates sprint-jumps in each cardinal direction from the given
-// block position and returns the reachable landing positions.
-func simulateJumps(col *collisions.Module, w *world.Module,
-	bx, by, bz int,
-	jumpPower, effectiveSpeed float64,
+// simulateJumps uses the live travel primitives and collision resolver. Contextual
+// surfaces not represented by a dry-air trajectory are deliberately not jump edges.
+func simulateJumps(ctx context.Context, col *collisions.Module, w *world.Module,
+	bx, by, bz int, cfg simulationConfig,
 ) []jumpLanding {
-	if jumpPower <= 0 {
-		jumpPower = physics.JumpPower
+	startY, ok := standSurface(col, bx, by, bz, cfg.height, cfg)
+	if !ok || !nodeLoaded(w, bx, by, bz, cfg) {
+		return nil
 	}
-	if effectiveSpeed <= 0 {
-		effectiveSpeed = physics.PlayerSpeed
-	}
-
-	startX := float64(bx) + 0.5
-	startY := float64(by)
-	startZ := float64(bz) + 0.5
-
-	// cardinal directions: yaw 0=south(+Z), 90=west(-X), 180=north(-Z), 270=east(+X)
-	yaws := [4]float64{270, 90, 0, 180} // +X, -X, +Z, -Z
-
 	var landings []jumpLanding
-	for _, yaw := range yaws {
-		if landing, ok := simulateOneJump(col, w, startX, startY, startZ, yaw, jumpPower, effectiveSpeed); ok {
+	for _, yaw := range [4]float64{270, 90, 0, 180} {
+		if ctx.Err() != nil {
+			return nil
+		}
+		if landing, ok := simulateOneJump(ctx, col, w, float64(bx)+0.5, startY, float64(bz)+0.5, yaw, cfg); ok {
 			landings = append(landings, landing)
 		}
 	}
 	return landings
 }
 
-func simulateOneJump(col *collisions.Module, w *world.Module,
-	startX, startY, startZ, yaw, jumpPower, effectiveSpeed float64,
+func simulateOneJump(ctx context.Context, col *collisions.Module, w *world.Module,
+	startX, startY, startZ, yaw float64, cfg simulationConfig,
 ) (jumpLanding, bool) {
 	x, y, z := startX, startY, startZ
-	velX, velY, velZ := 0.0, 0.0, 0.0
-	onGround := true
-
-	sprintSpeed := effectiveSpeed * (1.0 + physics.SprintModifier)
-
+	vx, vy, vz := 0.0, 0.0, 0.0
+	onGround := col.IsOnGround(x, y, z, cfg.width)
+	if !onGround || !jumpTerrain(w, x, y, z, x, y, z, cfg) {
+		return jumpLanding{}, false
+	}
+	forward, strafe := physics.ProcessInput(1, 0, 1, 1)
 	for tick := range simMaxTicks {
-		// jump on first tick
-		if tick == 0 && onGround {
-			velY = max(jumpPower, velY)
-			// sprint-jump boost
-			angle := yaw * math.Pi / 180.0
-			velX += -math.Sin(angle) * physics.SprintJumpBoost
-			velZ += math.Cos(angle) * physics.SprintJumpBoost
-		}
-
-		// movement threshold zeroing
-		if velX*velX+velZ*velZ < 9e-6 {
-			velX, velZ = 0, 0
-		}
-		if math.Abs(velY) < 0.003 {
-			velY = 0
-		}
-
-		// input: always forward=1, sprint
-		forward := physics.InputFriction // modifyInput: 0.98 * 1.0
-
-		// get block friction
-		var blockFriction float64
-		if onGround {
-			belowState := w.GetBlock(int(math.Floor(x)), int(math.Floor(y-0.5)), int(math.Floor(z)))
-			blockFriction = physics.GetBlockFriction(belowState)
-		} else {
-			blockFriction = 1.0
-		}
-
-		// getFrictionInfluencedSpeed
-		var speed float64
-		if onGround {
-			bf := float32(blockFriction)
-			speed = float64(float32(sprintSpeed) * (float32(physics.FrictionSpeedFactor) / (bf * bf * bf)))
-		} else {
-			speed = physics.FlyingSpeed
-		}
-
-		// moveRelative (forward only, strafe=0)
-		dx, _, dz := physics.MoveRelative(speed, forward, 0, yaw)
-		velX += dx
-		velZ += dz
-
-		// collision resolution
-		origVelY := velY
-		adjX, adjY, adjZ, _, vCol := col.CollideMovement(x, y, z, playerWidth, playerHeight, velX, velY, velZ)
-
-		if vCol {
-			velY = 0
-		}
-		xCollided := math.Abs(velX-adjX) >= 1e-5
-		zCollided := math.Abs(velZ-adjZ) >= 1e-5
-		if xCollided {
-			velX = 0
-		}
-		if zCollided {
-			velZ = 0
-		}
-
-		x += adjX
-		y += adjY
-		z += adjZ
-
-		onGround = vCol && origVelY < 0
-
-		// post-collision physics: gravity + friction
-		friction := float64(float32(blockFriction) * float32(physics.AirFrictionMul))
-		velY -= physics.Gravity
-		velX *= friction
-		velZ *= friction
-		velY *= physics.VerticalAirFriction
-
-		// check landing (after tick 0)
-		if tick > 0 && onGround {
-			landX := int(math.Floor(x))
-			landY := int(math.Floor(y))
-			landZ := int(math.Floor(z))
-
-			// only consider if we've actually moved from the start block
-			startBX := int(math.Floor(startX))
-			startBZ := int(math.Floor(startZ))
-			dist := iabs(landX-startBX) + iabs(landZ-startBZ)
-			if dist >= 2 { // at least a 1-block gap
-				return jumpLanding{
-					X: landX, Y: landY, Z: landZ,
-					Ticks: tick + 1,
-				}, true
-			}
-			// landed too close, abort
+		if ctx.Err() != nil {
 			return jumpLanding{}, false
 		}
-
-		// if we hit a wall horizontally, abort
-		if xCollided || zCollided {
+		if vx*vx+vz*vz < 9e-6 {
+			vx, vz = 0, 0
+		}
+		if math.Abs(vy) < 0.003 {
+			vy = 0
+		}
+		if tick == 0 {
+			jx, jy, jz := physics.JumpImpulse(yaw, cfg.jumpPower, true)
+			vx, vy, vz = vx+jx, math.Max(vy, jy), vz+jz
+		}
+		friction := 1.0
+		speed := physics.SprintFlyingSpeed
+		if onGround {
+			friction = physics.ModifiedFriction(physics.GetBlockFrictionAt(w, x, y, z, cfg.width), cfg.frictionModifier)
+			speed = physics.GroundAcceleration(cfg.speed, friction)
+		}
+		ax, _, az := physics.MoveRelative(speed, forward, strafe, yaw)
+		vx, vz = vx+ax, vz+az
+		if !jumpTerrain(w, x, y, z, x+vx, y+vy, z+vz, cfg) {
+			return jumpLanding{}, false
+		}
+		dx, dy, dz, _, vertical := col.CollideMovement(x, y, z, cfg.width, cfg.height, vx, vy, vz, onGround, cfg.maxStep)
+		xBlocked, zBlocked := vx != dx, vz != dz
+		onGround = vertical && vy < 0
+		if vertical {
+			vy = 0
+		}
+		if xBlocked {
+			vx = 0
+		}
+		if zBlocked {
+			vz = 0
+		}
+		x, y, z = x+dx, y+dy, z+dz
+		vx, vy, vz = physics.AirVelocity(vx, vy, vz, friction, cfg.gravity, cfg.airDragModifier)
+		if tick > 0 && onGround {
+			bx, by, bz := int(math.Floor(x)), int(math.Floor(y)), int(math.Floor(z))
+			if bx == int(math.Floor(startX)) && bz == int(math.Floor(startZ)) {
+				return jumpLanding{}, false
+			}
+			fy, ok := standSurface(col, bx, by, bz, cfg.height, cfg)
+			if !ok || math.Abs(fy-y) > collisions.Epsilon || !nodeLoaded(w, bx, by, bz, cfg) {
+				return jumpLanding{}, false
+			}
+			return jumpLanding{X: bx, Y: by, Z: bz, Ticks: tick + 1}, true
+		}
+		if (xBlocked || zBlocked) && vy <= 0 {
 			return jumpLanding{}, false
 		}
 	}
-
 	return jumpLanding{}, false
+}
+
+// Include the entire swept body and support origins, not only endpoint columns:
+// skipping an unloaded chunk or a fluid between two known endpoints is unsafe.
+func jumpTerrain(w *world.Module, x, y, z, nx, ny, nz float64, cfg simulationConfig) bool {
+	half := cfg.width / 2
+	for bx := int(math.Floor(math.Min(x, nx) - half)); bx <= int(math.Floor(math.Max(x, nx)+half)); bx++ {
+		for bz := int(math.Floor(math.Min(z, nz) - half)); bz <= int(math.Floor(math.Max(z, nz)+half)); bz++ {
+			for by := int(math.Floor(math.Min(y, ny))) - 1; by <= int(math.Floor(math.Max(y, ny)+cfg.height+cfg.maxStep)); by++ {
+				state, loaded := w.GetLoadedBlock(bx, by, bz)
+				if !loaded {
+					return false
+				}
+				id, props := blocks.StateProperties(int(state))
+				if props["waterlogged"] == "true" {
+					return false
+				}
+				switch blocks.BlockName(id) {
+				case "minecraft:water", "minecraft:lava", "minecraft:bubble_column",
+					"minecraft:slime_block", "minecraft:honey_block", "minecraft:cobweb",
+					"minecraft:soul_sand", "minecraft:sweet_berry_bush", "minecraft:powder_snow",
+					"minecraft:scaffolding", "minecraft:ladder", "minecraft:vine",
+					"minecraft:weeping_vines", "minecraft:weeping_vines_plant",
+					"minecraft:twisting_vines", "minecraft:twisting_vines_plant":
+					return false
+				}
+			}
+		}
+	}
+	return true
 }

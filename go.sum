@@ -26,12 +26,10 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f h1:Y/CXytFA4m6baUTXGLOoWe4PQhGxaX0KpnayAqC48p4=
 github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f/go.mod h1:vw97MGsxSvLiUE2X8qFplwetxpGLQrlU1Q9AUEIzCaM=
-github.com/go-mclib/data v0.0.0-20260914122156-d84784fa1d3f h1:AyUY2rx8gVyd0aPunALYgfN4+XGAcTf0+Nh1L+VnDbI=
-github.com/go-mclib/data v0.0.0-20260914122156-d84784fa1d3f/go.mod h1:MpAemDGgVWxOf/dhaZ5rPC87I9cLW7gLyJm9+1tNFV8=
-github.com/go-mclib/data v0.0.0-20260914124408-f099c6bbc8f1 h1:wKDk2ls+t1qNaLHXmmaoop2YxQc3qeGqzzCxOzNY2XI=
-github.com/go-mclib/data v0.0.0-20260914124408-f099c6bbc8f1/go.mod h1:MpAemDGgVWxOf/dhaZ5rPC87I9cLW7gLyJm9+1tNFV8=
-github.com/go-mclib/protocol v0.0.0-20260721202818-10261fbb8e79 h1:6o5r0PlMl+nickFom3dA4u2N6smsSlwb/5ZAGpKYMRw=
-github.com/go-mclib/protocol v0.0.0-20260721202818-10261fbb8e79/go.mod h1:AZYa0fywR50u4C4GUBSc8Qn0UOiWEcujECO+xe4KSBE=
+github.com/go-mclib/data v0.0.0-20260915044945-8957c18fe1a8 h1:6DEVRDdQ7DQ2AAL4Hf3da14Kg5cwR6TfLQMS7VpT0Ao=
+github.com/go-mclib/data v0.0.0-20260915044945-8957c18fe1a8/go.mod h1:7zjLTB2KwMiQVcRXrxK2m+2ssYgxOeUmY6311bLVD9Y=
+github.com/go-mclib/protocol v0.0.0-20260915044803-070acbb8d0aa h1:54ZpGhHOI6+QArIqY8O/Wh6HHOza11LSkTlahF3CNdQ=
+github.com/go-mclib/protocol v0.0.0-20260915044803-070acbb8d0aa/go.mod h1:vapFPL9o6TXBXusIpzO5LILlZm4RC9k2l+6LTnXJZAQ=
 github.com/lucasb-eyer/go-colorful v1.3.0 h1:2/yBRLdWBZKrf7gB40FoiKfAWYQ0lqNcbuQwVHXptag=
 github.com/lucasb-eyer/go-colorful v1.3.0/go.mod h1:R4dSotOR9KMtayYi1e77YzuveK+i7ruzyGqttikkLy0=
 github.com/mattn/go-isatty v0.0.20 h1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWEY=

@@ -1,8 +1,10 @@
 package combat
 
 import (
+	"context"
 	"fmt"
 	"math"
+	"sync"
 
 	"github.com/go-mclib/client"
 	"github.com/go-mclib/client/modules/collisions"
@@ -25,7 +27,9 @@ const (
 )
 
 type Module struct {
-	client *client.Client
+	client  *client.Client
+	mu      sync.Mutex
+	physics *physics.Module
 
 	self      *self.Module
 	entities  *entities.Module
@@ -34,6 +38,8 @@ type Module struct {
 	targetID             int32
 	attacking            bool
 	ticksSinceLastAttack int
+	attackContext        context.Context
+	cancel               context.CancelFunc
 
 	onAttack []func(entityID int32)
 }
@@ -54,13 +60,18 @@ func (m *Module) Wire() error {
 		return fmt.Errorf("requires self and entities modules")
 	}
 	m.inventory = inventory.From(m.client)
+	m.physics = physics.From(m.client)
 
 	// optional: physics enables continuous (per-tick) attacking
 	if p := physics.From(m.client); p != nil {
 		p.OnTick(func() {
+			m.mu.Lock()
 			m.ticksSinceLastAttack++
-			if m.attacking {
-				m.tryAttack()
+			id := m.targetID
+			attacked := m.attacking && m.tryAttack()
+			m.mu.Unlock()
+			if attacked {
+				m.notifyAttack(id)
 			}
 		})
 	}
@@ -70,6 +81,12 @@ func (m *Module) Wire() error {
 func (m *Module) HandlePacket(_ *jp.WirePacket) {}
 
 func (m *Module) Reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cancel != nil {
+		m.cancel()
+	}
+	m.attackContext, m.cancel = nil, nil
 	m.targetID = 0
 	m.attacking = false
 	m.ticksSinceLastAttack = 0
@@ -89,31 +106,61 @@ func (m *Module) OnAttack(cb func(entityID int32)) {
 
 // Attack performs a single attack on the given entity.
 func (m *Module) Attack(entityID int32) error {
+	m.mu.Lock()
+	attacked := false
+	defer func() {
+		m.mu.Unlock()
+		if attacked {
+			m.notifyAttack(entityID)
+		}
+	}()
 	e := m.entities.GetEntity(entityID)
 	if e == nil {
 		return fmt.Errorf("entity %d not found", entityID)
 	}
 
-	if !m.isWithinReach(e) {
-		return fmt.Errorf("entity %d out of reach", entityID)
+	if !m.isWithinReach(e) || !m.entities.CanSee(entityID) {
+		return fmt.Errorf("entity %d out of reach or behind terrain", entityID)
 	}
 
-	if m.GetAttackCooldown() < 0.9 {
+	if m.attackCooldown() < 0.9 {
 		return fmt.Errorf("attack on cooldown")
 	}
 
-	return m.performAttack(e)
+	err := m.performAttack(e)
+	attacked = err == nil
+	return err
 }
 
 // StartAttacking begins continuous attacking on the given entity.
 // Attacks are executed each physics tick when cooldown is ready.
 func (m *Module) StartAttacking(entityID int32) {
+	m.StartAttackingContext(context.Background(), entityID)
+}
+
+// StartAttackingContext scopes continuous attacks and queued packets to a job.
+func (m *Module) StartAttackingContext(parent context.Context, entityID int32) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.attacking && m.targetID == entityID {
+		return
+	}
+	if m.cancel != nil {
+		m.cancel()
+	}
+	m.attackContext, m.cancel = context.WithCancel(parent)
 	m.targetID = entityID
 	m.attacking = true
 }
 
 // StopAttacking stops continuous attacking.
 func (m *Module) StopAttacking() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cancel != nil {
+		m.cancel()
+	}
+	m.attackContext, m.cancel = nil, nil
 	m.attacking = false
 	m.targetID = 0
 }
@@ -151,42 +198,76 @@ func (m *Module) IsInCrosshair(entityID int32) bool {
 
 // GetAttackCooldown returns the current attack cooldown progress (0.0 to 1.0).
 func (m *Module) GetAttackCooldown() float32 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.attackCooldown()
+}
+
+func (m *Module) attackCooldown() float32 {
 	return min(float32(m.ticksSinceLastAttack+1)/m.cooldownTicks(), 1.0)
 }
 
-func (m *Module) tryAttack() {
-	if m.GetAttackCooldown() < 0.9 {
-		return
+func (m *Module) tryAttack() bool {
+	if m.attackContext != nil && m.attackContext.Err() != nil {
+		m.attacking = false
+		return false
+	}
+	if m.attackCooldown() < 0.9 {
+		return false
 	}
 	e := m.entities.GetEntity(m.targetID)
 	if e == nil {
-		m.StopAttacking()
-		return
+		m.attacking = false
+		m.targetID = 0
+		return false
 	}
 	if !m.isWithinReach(e) || !m.entities.CanSee(m.targetID) {
-		return
+		return false
 	}
-	_ = m.performAttack(e)
+	return m.performAttack(e) == nil
 }
 
 func (m *Module) performAttack(e *entities.Entity) error {
 	m.self.LookAt(e.X, e.Y+e.EyeHeight, e.Z)
-
-	// send attack packet
-	m.client.SendPacket(&packets.C2SAttack{
-		EntityId: ns.VarInt(e.ID),
-	})
-
-	// swing arm
-	m.client.SendPacket(&packets.C2SSwing{Hand: 0})
-
-	m.ticksSinceLastAttack = 0
-
-	for _, cb := range m.onAttack {
-		cb(e.ID)
+	// Publish aim before attack, rather than relying on the later physics
+	// position packet (important on servers that validate attack direction).
+	yaw, pitch := m.self.Rotation()
+	var flags ns.Int8
+	if m.physics != nil && m.physics.IsOnGround() {
+		flags = 1
+	}
+	if err := m.queue(&packets.C2SMovePlayerRot{Yaw: ns.Float32(yaw), Pitch: ns.Float32(pitch), Flags: flags}); err != nil {
+		m.attacking = false
+		return err
 	}
 
+	// send attack packet
+	if err := m.queue(&packets.C2SAttack{EntityId: ns.VarInt(e.ID)}); err != nil {
+		m.attacking = false
+		return err
+	}
+	// Cooldown starts when the attack is accepted by the outgoing transport,
+	// even if the subsequent cosmetic swing cannot be queued.
+	m.ticksSinceLastAttack = 0
+	_ = m.queue(&packets.C2SSwing{Hand: 0})
+
 	return nil
+}
+
+func (m *Module) notifyAttack(id int32) {
+	for _, cb := range m.onAttack {
+		cb(id)
+	}
+}
+
+func (m *Module) queue(pkt jp.Packet) error {
+	if m.physics != nil {
+		if m.attackContext != nil {
+			return m.physics.QueuePacketContext(m.attackContext, pkt)
+		}
+		return m.physics.QueuePacket(pkt)
+	}
+	return m.client.WritePacket(pkt)
 }
 
 // cooldownTicks returns the full attack cooldown duration in ticks, derived

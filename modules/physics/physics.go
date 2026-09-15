@@ -10,11 +10,14 @@ import (
 	"github.com/go-mclib/client"
 	"github.com/go-mclib/client/modules/collisions"
 	"github.com/go-mclib/client/modules/entities"
+	"github.com/go-mclib/client/modules/inventory"
+	"github.com/go-mclib/client/modules/registry"
 	"github.com/go-mclib/client/modules/self"
 	"github.com/go-mclib/client/modules/world"
 	"github.com/go-mclib/data/packet_ids"
 	"github.com/go-mclib/data/packets"
 	jp "github.com/go-mclib/protocol/java_protocol"
+	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
 )
 
 const ModuleName = "physics"
@@ -22,21 +25,31 @@ const ModuleName = "physics"
 type Module struct {
 	client *client.Client
 	mu     sync.RWMutex
+	tickMu sync.Mutex // serializes old/new tick loops across lifecycle transitions
 
 	// deps (self/world/collisions required, entities optional)
 	self       *self.Module
 	world      *world.Module
 	collisions *collisions.Module
 	entities   *entities.Module
+	inventory  *inventory.Module
+	registry   *registry.Module
 
 	// velocity (delta movement)
 	velX, velY, velZ float64
 
 	// state
-	onGround            bool
-	horizontalCollision bool
-	xCollision          bool
-	zCollision          bool
+	onGround                 bool
+	horizontalCollision      bool
+	xCollision               bool
+	zCollision               bool
+	minorHorizontalCollision bool
+	fluid                    fluidState
+	blocks                   blockEffects
+	fallDistance             float64
+	noJumpDelay              int
+	poseHeight               float64
+	swimming                 bool
 
 	// input
 	forwardImpulse float64 // -1.0 to 1.0
@@ -49,15 +62,14 @@ type Module struct {
 	lastSentOnGround                bool
 	lastSentHorizontalCollision     bool
 	lastSentSprinting               bool
-	lastSentSneaking                bool
 	lastSentInputFlags              uint8
 	positionReminder                int
 
-	cancel context.CancelFunc
-
-	// damage tracking for knockback filtering
-	hasPendingDamage      bool
-	lastDamageEntityCause bool // true if the last damage had an entity source
+	cancel        context.CancelFunc
+	tickContext   context.Context
+	outgoing      chan jp.Packet
+	positionKnown bool
+	vehicleID     int32
 
 	onTick []func()
 }
@@ -69,6 +81,7 @@ func (m *Module) Name() string { return ModuleName }
 func (m *Module) Init(c *client.Client) {
 	m.client = c
 	c.OnTransfer(m.Reset)
+	c.OnDisconnect(m.Reset)
 }
 
 func (m *Module) Wire() error {
@@ -79,16 +92,27 @@ func (m *Module) Wire() error {
 		return fmt.Errorf("requires self, world and collisions modules")
 	}
 	m.entities = entities.From(m.client) // optional: enables entity pushing
+	m.inventory = inventory.From(m.client)
+	m.registry = registry.From(m.client)
 
 	s := m.self
 	// start tick loop when player spawns
 	s.OnSpawn(func() {
 		m.startTickLoop()
 	})
+	s.OnRespawn(func() {
+		m.Reset()
+		m.startTickLoop()
+	})
+	s.OnDeath(m.Reset)
+	s.OnTeleport(m.handleTeleport)
 
 	// sync last-sent tracking after server teleport so sendPosition
 	// doesn't re-send a flying packet for the same position
 	s.OnPosition(func(x, y, z float64) {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.positionKnown = true
 		m.lastSentX = x
 		m.lastSentY = y
 		m.lastSentZ = z
@@ -102,23 +126,82 @@ func (m *Module) Wire() error {
 }
 
 func (m *Module) Reset() {
+	m.mu.Lock()
 	if m.cancel != nil {
 		m.cancel()
-		m.cancel = nil
 	}
+	m.mu.Unlock()
+	// The loop never blocks on packet writes, so an old tick can finish without
+	// needing the packet/lifecycle loop that is waiting here.
+	m.tickMu.Lock()
+	defer m.tickMu.Unlock()
 	m.mu.Lock()
-	m.velX = 0
-	m.velY = 0
-	m.velZ = 0
+	defer m.mu.Unlock()
+	m.cancel = nil
+	m.tickContext = nil
+	m.outgoing = nil
+	m.velX, m.velY, m.velZ = 0, 0, 0
 	m.onGround = false
 	m.horizontalCollision = false
-	m.xCollision = false
-	m.zCollision = false
-	m.forwardImpulse = 0
-	m.strafeImpulse = 0
-	m.jumping = false
-	m.mu.Unlock()
+	m.xCollision, m.zCollision = false, false
+	m.forwardImpulse, m.strafeImpulse, m.jumping = 0, 0, false
 	m.positionReminder = 0
+	m.positionKnown = false
+	m.vehicleID = 0
+	m.fluid, m.blocks = fluidState{}, blockEffects{}
+	m.fallDistance, m.poseHeight = 0, 0
+	m.noJumpDelay = 0
+	m.swimming, m.minorHorizontalCollision = false, false
+}
+
+// QueuePacket submits an action to this physics session without blocking the
+// tick or packet loop. Failure cancels the loop rather than retaining stale input.
+func (m *Module) QueuePacket(pkt jp.Packet) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sendPacket(pkt)
+}
+
+// QueuePacketContext additionally cancels an action packet that is still
+// waiting in the outgoing queue. Bytes already written cannot be recalled.
+func (m *Module) QueuePacketContext(ctx context.Context, pkt jp.Packet) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return m.QueuePacket(contextPacket{Packet: pkt, ctx: ctx})
+}
+
+type contextPacket struct {
+	jp.Packet
+	ctx context.Context
+}
+
+func (p contextPacket) Write(buf *ns.PacketBuffer) error {
+	if err := p.ctx.Err(); err != nil {
+		return err
+	}
+	return p.Packet.Write(buf)
+}
+
+// sendPacket requires mu. The captured queue cannot cross a reconnect.
+func (m *Module) sendPacket(pkt jp.Packet) error {
+	if m.tickContext == nil || m.tickContext.Err() != nil {
+		return fmt.Errorf("physics session is inactive")
+	}
+	select {
+	case m.outgoing <- contextPacket{Packet: pkt, ctx: m.tickContext}:
+		return nil
+	default:
+		m.cancel()
+		return fmt.Errorf("outgoing packet queue is full; physics stopped")
+	}
+}
+
+// Available reports whether loaded-position physics can accept action input.
+func (m *Module) Available() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.tickContext != nil && m.tickContext.Err() == nil && m.positionKnown && !m.self.SuppressPositionEcho()
 }
 
 func From(c *client.Client) *Module {
@@ -180,30 +263,30 @@ func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 		return
 	}
 	switch pkt.PacketID {
-	case packet_ids.S2CDamageEventID:
-		m.handleDamageEvent(pkt)
 	case packet_ids.S2CSetEntityMotionID:
 		m.handleEntityMotion(pkt)
-	case packet_ids.S2CPlayerPositionID:
-		m.handleTeleport(pkt)
+	case packet_ids.S2CSetPassengersID:
+		var d packets.S2CSetPassengers
+		if pkt.ReadInto(&d) != nil {
+			return
+		}
+		m.mu.Lock()
+		previousVehicle := m.vehicleID
+		if m.vehicleID == int32(d.EntityId) {
+			m.vehicleID = 0
+		}
+		for _, id := range d.Passengers {
+			if int32(id) == m.self.EntityID() {
+				m.vehicleID = int32(d.EntityId)
+			}
+		}
+		if previousVehicle != 0 && m.vehicleID == 0 {
+			// A vehicle can have moved far from our last walking position.
+			// Wait for the server's dismount position before echoing movement.
+			m.positionKnown = false
+		}
+		m.mu.Unlock()
 	}
-}
-
-func (m *Module) handleDamageEvent(pkt *jp.WirePacket) {
-	var d packets.S2CDamageEvent
-	if err := pkt.ReadInto(&d); err != nil {
-		return
-	}
-
-	if int32(d.EntityId) != m.self.EntityID() {
-		return
-	}
-
-	// SourceCauseId and SourceDirectId are >1, or 0 if no entity (e.g. environmental damage)
-	m.mu.Lock()
-	m.hasPendingDamage = true
-	m.lastDamageEntityCause = int32(d.SourceCauseId) > 0 || int32(d.SourceDirectId) > 0
-	m.mu.Unlock()
 }
 
 func (m *Module) handleEntityMotion(pkt *jp.WirePacket) {
@@ -217,30 +300,27 @@ func (m *Module) handleEntityMotion(pkt *jp.WirePacket) {
 	}
 
 	m.mu.Lock()
-	// if preceded by a damage event, only apply velocity for entity-caused damage
-	if m.hasPendingDamage {
-		m.hasPendingDamage = false
-		if !m.lastDamageEntityCause {
-			m.mu.Unlock()
-			return // environmental damage — ignore knockback
-		}
-	}
-
 	m.velX = d.Velocity.X
 	m.velY = d.Velocity.Y
 	m.velZ = d.Velocity.Z
 	m.mu.Unlock()
 }
 
-func (m *Module) handleTeleport(pkt *jp.WirePacket) {
-	var d packets.S2CPlayerPosition
-	if err := pkt.ReadInto(&d); err != nil {
-		return
-	}
-
+func (m *Module) handleTeleport(d *packets.S2CPlayerPosition, oldYaw, oldPitch float32) {
 	flags := int32(d.Flags)
 
 	m.mu.Lock()
+	if m.vehicleID != 0 {
+		m.mu.Unlock()
+		return
+	}
+	if flags&0x100 != 0 {
+		yaw, pitch := m.self.Rotation()
+		sinPitch, cosPitch := sinCos(float64(float32(float64(oldPitch-pitch) * (math.Pi / 180))))
+		m.velY, m.velZ = m.velY*cosPitch+m.velZ*sinPitch, m.velZ*cosPitch-m.velY*sinPitch
+		sinYaw, cosYaw := sinCos(float64(float32(float64(oldYaw-yaw) * (math.Pi / 180))))
+		m.velX, m.velZ = m.velX*cosYaw+m.velZ*sinYaw, m.velZ*cosYaw-m.velX*sinYaw
+	}
 	if flags&0x20 != 0 {
 		m.velX += float64(d.VelocityX)
 	} else {
@@ -260,79 +340,140 @@ func (m *Module) handleTeleport(pkt *jp.WirePacket) {
 }
 
 func (m *Module) startTickLoop() {
-	if m.cancel != nil {
-		m.cancel()
-	}
+	m.Reset()
+	m.mu.Lock()
 	ctx, cancel := context.WithCancel(context.Background())
-	m.cancel = cancel
-
-	s := m.self
-
-	// initialize last sent position
-	x, y, z := s.Position()
-	yaw, pitch := s.Rotation()
-	m.lastSentX = x
-	m.lastSentY = y
-	m.lastSentZ = z
-	m.lastSentYaw = yaw
-	m.lastSentPitch = pitch
-	m.lastSentOnGround = m.onGround
-	m.positionReminder = 0
-
+	m.cancel, m.tickContext = cancel, ctx
+	m.outgoing = m.client.OutgoingPacketQueue
+	m.lastSentInputFlags = 0
+	m.lastSentSprinting = false
+	m.mu.Unlock()
 	go func() {
 		ticker := time.NewTicker(tickDuration)
 		defer ticker.Stop()
-
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				m.tick()
+				m.client.WithPacketState(func() {
+					m.tickMu.Lock()
+					defer m.tickMu.Unlock()
+					if ctx.Err() == nil {
+						m.tick()
+					}
+				})
 			}
 		}
 	}()
 }
 
 func (m *Module) tick() {
-	s := m.self
-	w := m.world
-	col := m.collisions
-
-	// an external controller handles movement and position — skip physics
+	m.mu.RLock()
+	ctx := m.tickContext
+	m.mu.RUnlock()
+	if ctx == nil || ctx.Err() != nil {
+		return
+	}
+	s, w, col := m.self, m.world, m.collisions
 	if s.SuppressPositionEcho() {
 		return
 	}
-
 	m.tickEffectsAndCallbacks(s)
-
-	x, y, z := s.Position()
-	yaw, _ := s.Rotation()
-
-	// apply fluid flow pushing (Entity.baseTick in vanilla, before aiStep)
-	m.applyFluidPushing(x, y, z, w)
-
-	forwardImpulse, strafeImpulse, playerHeight := m.processInput(s)
-
-	m.zeroSmallVelocity()
-	m.nudgeOutOfCorners(col, x, y, z, playerHeight)
-
-	// jump (after threshold zeroing, before travel)
-	if m.jumping && m.onGround {
-		m.jump(s, float64(yaw))
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if ctx.Err() != nil || !m.positionKnown {
+		return
 	}
-
-	inWater, inLava := feetFluid(w, x, y, z)
-
-	blockFriction := m.applyMovementInput(s, w, x, y, z, float64(yaw), forwardImpulse, strafeImpulse, inWater, inLava)
-
-	newX, newY, newZ := m.collideAndMove(s, col, x, y, z, playerHeight)
-
-	m.applyPostMovePhysics(s, w, newX, newY, newZ, inWater, inLava, blockFriction)
-
-	// entity pushing
-	m.applyEntityPushing(newX, newY, newZ, playerHeight)
-
+	if m.vehicleID != 0 {
+		m.velX, m.velY, m.velZ = 0, 0, 0
+		m.noJumpDelay = 0
+		if m.entities != nil {
+			m.entities.TickPhysics()
+		}
+		col.TickBorder()
+		m.sendInput(s)
+		m.sendPacket(&packets.C2SClientTickEnd{})
+		return
+	}
+	x, y, z := s.Position()
+	// Unknown chunks are not empty terrain. Do not predict through an unloaded
+	// boundary while the server is still streaming the initial world.
+	halfWidth := m.bodyWidth() / 2
+	for _, bx := range [2]int{int(math.Floor(x - halfWidth - 1)), int(math.Floor(x + halfWidth + 1))} {
+		for _, bz := range [2]int{int(math.Floor(z - halfWidth - 1)), int(math.Floor(z + halfWidth + 1))} {
+			if !w.IsChunkLoaded(int32(bx>>4), int32(bz>>4)) {
+				col.TickBorder()
+				m.sendInput(s)
+				m.sendPacket(&packets.C2SClientTickEnd{})
+				return
+			}
+		}
+	}
+	yaw, pitch := s.Rotation()
+	flying := s.AbilityFlags()&2 != 0
+	if s.Gamemode() == 3 {
+		m.onGround = false
+	}
+	col.SetPlayerContext(s.Sneaking(), m.fallDistance, m.canWalkOnPowderSnow())
+	previousEyeInWater := m.fluid.eyeInWater
+	m.fluid.eyeHeight, m.fluid.fastLava = m.eyeHeight(), m.fastLava()
+	playerHeight := m.bodyHeight()
+	m.updateFluidState(x, y, z, playerHeight)
+	m.updateSwimming(previousEyeInWater, x, y, z)
+	forward, strafe, _ := m.processInput(s, x, y, z, previousEyeInWater)
+	if s.Gamemode() != 3 {
+		m.nudgeOutOfCorners(col, x, y, z, playerHeight)
+	}
+	if m.fluid.waterHeight > 0 {
+		m.fallDistance = 0
+		if s.Sneaking() && !flying {
+			m.velY -= float64(float32(0.04))
+		}
+	}
+	if flying {
+		verticalInput := float32(0)
+		if m.jumping {
+			verticalInput++
+		}
+		if s.Sneaking() {
+			verticalInput--
+		}
+		m.velY += float64(verticalInput * s.FlyingSpeed() * 3)
+	}
+	m.zeroSmallVelocity()
+	if !s.Sleeping() {
+		m.applyJumpInput(float64(yaw))
+	}
+	if s.HasEffect(effectSlowFalling) || s.HasEffect(effectLevitation) {
+		m.fallDistance = 0
+	}
+	inWater, inLava := !flying && m.fluid.waterHeight > 0, !flying && m.fluid.lavaHeight > 0
+	m.applySwimSteering(x, y, z, pitch)
+	flyingY := m.velY
+	gliding := !inWater && !inLava && s.FallFlying() && !m.onClimbableAt(x, y, z)
+	blockFriction := 1.0
+	if gliding {
+		m.applyGliding(yaw, pitch)
+	} else {
+		blockFriction = m.applyMovementInput(s, w, x, y, z, float64(yaw), forward, strafe, inWater, inLava)
+	}
+	newX, newY, newZ := m.collideAndMove(s, col, x, y, z, playerHeight, forward, strafe, float64(yaw))
+	m.applyPostMovePhysics(s, w, newX, newY, newZ, playerHeight, y, inWater, inLava, gliding, blockFriction)
+	if flying {
+		m.velY = flyingY * 0.6
+	}
+	if s.Gamemode() != 3 {
+		m.applyInsideBlockEffects(s, x, y, z, newX, newY, newZ, playerHeight)
+	}
+	m.updatePose(newX, newY, newZ)
+	// The local player is inserted first. Remote interpolation/pushing follows
+	// local travel, and the resulting impulse belongs to the next movement tick.
+	if m.entities != nil {
+		m.entities.TickPhysics()
+	}
+	m.applyEntityPushing(newX, newY, newZ, m.bodyHeight())
+	col.TickBorder()
 	m.sendTickPackets(s)
 }
 
@@ -349,16 +490,23 @@ func (m *Module) tickEffectsAndCallbacks(s *self.Module) {
 }
 
 // processInput applies vanilla input processing and resolves the effective player height.
-func (m *Module) processInput(s *self.Module) (forwardImpulse, strafeImpulse, playerHeight float64) {
-	// process inputs (LocalPlayer.modifyInput: 0.98 friction + sneaking + square normalization)
-	forwardImpulse, strafeImpulse = modifyInput(m.forwardImpulse, m.strafeImpulse, s.Sneaking())
-
-	// effective player height (1.5 when sneaking, 1.8 otherwise)
-	playerHeight = collisions.PlayerHeight
-	if s.Sneaking() {
-		playerHeight = collisions.PlayerSneakingHeight
+func (m *Module) processInput(s *self.Module, x, y, z float64, previousEyeInWater bool) (forwardImpulse, strafeImpulse, playerHeight float64) {
+	playerHeight = m.bodyHeight()
+	if s.Sleeping() {
+		return 0, 0, playerHeight
 	}
-	return forwardImpulse, strafeImpulse, playerHeight
+	width, scale := m.bodyWidth(), m.scale()
+	crouching := s.AbilityFlags()&2 == 0 && !m.swimming &&
+		m.collisions.CanFitAt(x, y, z, width, float64(float32(collisions.PlayerSneakingHeight)*scale)) &&
+		(s.Sneaking() || !m.collisions.CanFitAt(x, y, z, width, float64(float32(collisions.PlayerHeight)*scale)))
+	m.updateSprinting(crouching, previousEyeInWater)
+	slowFactor := 1.0
+	if crouching || m.poseHeight == collisions.PlayerWidth && !m.swimming {
+		slowFactor = s.AttributeValue("minecraft:sneaking_speed", sneakingSpeedFactor)
+	}
+	itemFactor, _ := m.itemUseEffects()
+	forwardImpulse, strafeImpulse = ProcessInput(m.forwardImpulse, m.strafeImpulse, itemFactor, slowFactor)
+	return
 }
 
 // zeroSmallVelocity applies movement threshold zeroing (LivingEntity.aiStep lines 2917-2940):
@@ -377,17 +525,11 @@ func (m *Module) zeroSmallVelocity() {
 // LocalPlayer.moveTowardsClosestSpace (runs for the 4 body corners each tick
 // before travel). Without it the player snags on block corners/walls.
 func (m *Module) nudgeOutOfCorners(col *collisions.Module, x, y, z, playerHeight float64) {
-	const cornerInset = collisions.PlayerWidth * 0.35
+	cornerInset := m.bodyWidth() * 0.35
 	m.moveTowardsClosestSpace(col, x-cornerInset, z+cornerInset, y, y+playerHeight)
 	m.moveTowardsClosestSpace(col, x-cornerInset, z-cornerInset, y, y+playerHeight)
 	m.moveTowardsClosestSpace(col, x+cornerInset, z-cornerInset, y, y+playerHeight)
 	m.moveTowardsClosestSpace(col, x+cornerInset, z+cornerInset, y, y+playerHeight)
-}
-
-// feetFluid determines the fluid environment at the player's feet.
-func feetFluid(w *world.Module, x, y, z float64) (inWater, inLava bool) {
-	feetBlock := w.GetBlock(int(math.Floor(x)), int(math.Floor(y)), int(math.Floor(z)))
-	return isWater(feetBlock), isLava(feetBlock)
 }
 
 // applyMovementInput applies movement input to velocity (pre-collision).
@@ -395,9 +537,9 @@ func feetFluid(w *world.Module, x, y, z float64) (inWater, inLava bool) {
 // Returns the block friction for post-collision air physics.
 func (m *Module) applyMovementInput(s *self.Module, w *world.Module, x, y, z, yaw, forwardImpulse, strafeImpulse float64, inWater, inLava bool) (blockFriction float64) {
 	if inWater {
-		m.applyWaterInputScaled(yaw, forwardImpulse, strafeImpulse)
+		m.applyWaterInputScaled(s, yaw, forwardImpulse, strafeImpulse)
 	} else if inLava {
-		m.applyLavaInputScaled(yaw, forwardImpulse, strafeImpulse)
+		m.applyLavaInputScaled(s, yaw, forwardImpulse, strafeImpulse)
 	} else {
 		blockFriction = m.applyAirInputScaled(s, x, y, z, yaw, w, forwardImpulse, strafeImpulse)
 	}
@@ -405,54 +547,63 @@ func (m *Module) applyMovementInput(s *self.Module, w *world.Module, x, y, z, ya
 }
 
 // collideAndMove resolves collisions, updates collision flags, position and onGround.
-func (m *Module) collideAndMove(s *self.Module, col *collisions.Module, x, y, z, playerHeight float64) (newX, newY, newZ float64) {
-	// resolve collisions (this.move in vanilla)
-	origVelY := m.velY
-	adjX, adjY, adjZ, _, vCol := col.CollideMovement(x, y, z, collisions.PlayerWidth, playerHeight, m.velX, m.velY, m.velZ)
-
-	// horizontal collision detection with tolerance (vanilla Mth.equal: 1e-5)
-	xCollided := notEqual(m.velX, adjX)
-	zCollided := notEqual(m.velZ, adjZ)
-	m.horizontalCollision = xCollided || zCollided
-	m.xCollision = xCollided
-	m.zCollision = zCollided
-	if vCol {
-		m.velY = 0
+func (m *Module) collideAndMove(s *self.Module, col *collisions.Module, x, y, z, playerHeight, forward, strafe, yaw float64) (newX, newY, newZ float64) {
+	if s.Gamemode() == 3 {
+		m.horizontalCollision, m.minorHorizontalCollision = false, false
+		m.xCollision, m.zCollision = false, false
+		newX, newY, newZ = x+m.velX, y+m.velY, z+m.velZ
+		s.SetPosition(newX, newY, newZ)
+		return
 	}
-	if xCollided {
-		m.velX = 0
+	dx, dy, dz := m.consumeStuckMovement(m.velX, m.velY, m.velZ)
+	maxStep := float64(float32(s.AttributeValue("minecraft:step_height", collisions.StepUpHeight)))
+	dx, dz = m.backOffFromEdge(x, y, z, dx, dy, dz, maxStep)
+	m.blocks.originalX, m.blocks.originalZ = dx, dz
+	adjX, adjY, adjZ, _, vCol := col.CollideMovement(x, y, z, m.bodyWidth(), playerHeight, dx, dy, dz, m.onGround, maxStep)
+	m.xCollision, m.zCollision = notEqual(dx, adjX), notEqual(dz, adjZ)
+	m.horizontalCollision = m.xCollision || m.zCollision
+	m.minorHorizontalCollision = m.horizontalCollision && minorCollision(adjX, adjZ, forward, strafe, yaw)
+	m.onGround = vCol && dy < 0
+	newX, newY, newZ = x, y, z
+	movementSquared := adjX*adjX + adjY*adjY + adjZ*adjZ
+	if movementSquared > 1e-7 || dx*dx+dy*dy+dz*dz-movementSquared < 1e-7 {
+		newX, newY, newZ = x+adjX, y+adjY, z+adjZ
+		s.SetPosition(newX, newY, newZ)
 	}
-	if zCollided {
-		m.velZ = 0
+	if m.onGround {
+		m.fallDistance = 0
+	} else if adjY < 0 {
+		m.fallDistance -= adjY
 	}
-
-	// update position
-	newX = x + adjX
-	newY = y + adjY
-	newZ = z + adjZ
-	s.SetPosition(newX, newY, newZ)
-
-	m.onGround = vCol && origVelY < 0
-	return newX, newY, newZ
+	if dy != 0 && vCol || m.horizontalCollision {
+		restitution := entityBounciness(s)
+		if m.xCollision {
+			m.velX = -m.velX * restitution
+		}
+		if m.zCollision {
+			m.velZ = -m.velZ * restitution
+		}
+		if vCol {
+			m.applyLandingEffects(s, newX, newY, newZ, m.velY, adjY)
+		}
+	}
+	return
 }
 
 // applyPostMovePhysics applies block speed factor, then gravity and friction after the move.
-func (m *Module) applyPostMovePhysics(s *self.Module, w *world.Module, newX, newY, newZ float64, inWater, inLava bool, blockFriction float64) {
-	// block speed factor (Entity.move: applied after collision, before friction)
-	if !inWater && !inLava {
-		speedFactor := getBlockSpeedFactorAt(w, newX, newY, newZ)
-		if speedFactor != 1.0 {
-			m.velX *= speedFactor
-			m.velZ *= speedFactor
-		}
+func (m *Module) applyPostMovePhysics(s *self.Module, w *world.Module, newX, newY, newZ, height, startY float64, inWater, inLava, gliding bool, blockFriction float64) {
+	if s.Gamemode() != 3 {
+		factor := float32(getBlockSpeedFactorAt(w, newX, newY, newZ, m.bodyWidth()))
+		efficiency := float32(s.AttributeValue("minecraft:movement_efficiency", 0))
+		factor += efficiency * (1 - factor)
+		m.velX *= float64(factor)
+		m.velZ *= float64(factor)
 	}
-
-	// post-collision: apply gravity and friction (after move, matching vanilla)
 	if inWater {
-		m.applyWaterPhysics(s)
+		m.applyWaterPhysics(s, newX, newY, newZ, height, startY)
 	} else if inLava {
-		m.applyLavaPhysics()
-	} else {
+		m.applyLavaPhysics(s, newX, newY, newZ, height, startY)
+	} else if !gliding {
 		m.applyAirPhysics(s, blockFriction)
 	}
 }

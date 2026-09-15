@@ -1,5 +1,7 @@
 package self
 
+import "github.com/go-mclib/data/packets"
+
 func (m *Module) OnDeath(cb func())   { m.onDeath = append(m.onDeath, cb) }
 func (m *Module) OnSpawn(cb func())   { m.onSpawn = append(m.onSpawn, cb) }
 func (m *Module) OnRespawn(cb func()) { m.onRespawn = append(m.onRespawn, cb) }
@@ -7,6 +9,12 @@ func (m *Module) OnHealthSet(cb func(health, food float32)) {
 	m.onHealthSet = append(m.onHealthSet, cb)
 }
 func (m *Module) OnPosition(cb func(x, y, z float64)) { m.onPosition = append(m.onPosition, cb) }
+
+// OnTeleport observes a server correction after position/rotation are updated,
+// before acknowledgement. The old rotation allows ROTATE_DELTA velocity handling.
+func (m *Module) OnTeleport(cb func(packet *packets.S2CPlayerPosition, oldYaw, oldPitch float32)) {
+	m.onTeleport = append(m.onTeleport, cb)
+}
 func (m *Module) OnGameEvent(cb func(event uint8, value float32)) {
 	m.onGameEvent = append(m.onGameEvent, cb)
 }

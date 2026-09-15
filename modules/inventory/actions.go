@@ -6,6 +6,7 @@ import (
 
 	"github.com/go-mclib/data/items"
 	"github.com/go-mclib/data/packets"
+	jp "github.com/go-mclib/protocol/java_protocol"
 	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
 )
 
@@ -132,24 +133,50 @@ func (m *Module) FindItems(itemID int32) []int {
 
 // SetHeldSlot changes the selected hotbar slot (0-8) and notifies the server.
 func (m *Module) SetHeldSlot(slot int) error {
+	return m.SelectHotbar(slot, m.client.WritePacket)
+}
+
+// SelectHotbar selects a slot using the caller's session-bound transport.
+// Local selection changes only after the transport accepts the packet.
+func (m *Module) SelectHotbar(slot int, send func(jp.Packet) error) error {
 	if slot < 0 || slot > 8 {
 		return fmt.Errorf("invalid hotbar slot %d", slot)
 	}
 
-	m.mu.Lock()
-	m.heldSlot = slot
-	m.mu.Unlock()
-
-	if err := m.client.WritePacket(&packets.C2SSetCarriedItem{
+	if err := send(&packets.C2SSetCarriedItem{
 		Slot: ns.Int16(slot),
 	}); err != nil {
 		return err
 	}
+	m.mu.Lock()
+	m.heldSlot = slot
+	m.mu.Unlock()
 
 	for _, cb := range m.onHeldSlotChange {
 		cb(slot)
 	}
 	return nil
+}
+
+// RequestHotbarSwap asks the server to swap a main-inventory stack with a
+// hotbar stack without predicting local contents. Empty ChangedSlots means
+// the server sends its authoritative changes; callers must wait for those.
+func (m *Module) RequestHotbarSwap(containerSlot, hotbarIndex int, send func(jp.Packet) error) error {
+	if containerSlot < SlotMainStart || containerSlot >= SlotHotbarStart || hotbarIndex < 0 || hotbarIndex > 8 {
+		return fmt.Errorf("invalid main-inventory/hotbar swap")
+	}
+	m.mu.RLock()
+	if m.container != nil || !m.cursor.item.IsEmpty() {
+		m.mu.RUnlock()
+		return fmt.Errorf("close the container and clear the cursor before swapping")
+	}
+	stateID := m.stateID
+	cursor := slotToHashed(m.cursor.raw)
+	m.mu.RUnlock()
+	return send(&packets.C2SContainerClick{
+		WindowId: 0, StateId: ns.VarInt(stateID), Slot: ns.Int16(containerSlot),
+		Button: ns.Int8(hotbarIndex), Mode: 2, CarriedItem: cursor,
+	})
 }
 
 // SwapToHotbar swaps an item from any container slot into a hotbar slot (0-8).

@@ -8,27 +8,42 @@ import (
 	"github.com/go-mclib/client"
 	"github.com/go-mclib/client/modules/world"
 	"github.com/go-mclib/data/block_shapes"
-	jp "github.com/go-mclib/protocol/java_protocol"
+	"github.com/go-mclib/data/blocks"
 )
 
 const ModuleName = "collisions"
 
-type Module struct {
-	client *client.Client
-	world  *world.Module
+type blockGetter interface {
+	GetLoadedBlock(x, y, z int) (int32, bool)
 }
 
-func New() *Module { return &Module{} }
+type entityCollisions interface {
+	CollisionBoxes(minX, minY, minZ, maxX, maxY, maxZ float64) []AABB
+}
 
-func (m *Module) Name() string                  { return ModuleName }
-func (m *Module) Init(c *client.Client)         { m.client = c }
-func (m *Module) HandlePacket(_ *jp.WirePacket) {}
-func (m *Module) Reset()                        {}
+type Module struct {
+	client   *client.Client
+	world    blockGetter
+	entities entityCollisions
+	context  playerContext
+	border   borderState
+}
+
+func New() *Module                      { return &Module{border: defaultBorder()} }
+func (m *Module) Name() string          { return ModuleName }
+func (m *Module) Init(c *client.Client) { m.client = c }
+func (m *Module) Reset() {
+	m.context = playerContext{}
+	m.border = defaultBorder()
+}
 
 func (m *Module) Wire() error {
-	if m.world = world.From(m.client); m.world == nil {
+	w := world.From(m.client)
+	if w == nil {
 		return fmt.Errorf("requires world module")
 	}
+	m.world = w
+	m.entities, _ = m.client.Module("entities").(entityCollisions)
 	return nil
 }
 
@@ -40,169 +55,164 @@ func From(c *client.Client) *Module {
 	return mod.(*Module)
 }
 
-// CollideMovement resolves entity movement against world block collisions.
-// Returns the adjusted movement vector and collision flags.
-// Implements the same algorithm as Entity.collide() in the Minecraft source.
-func (m *Module) CollideMovement(x, y, z, width, height float64, dx, dy, dz float64) (adjX, adjY, adjZ float64, horizontalCollision, verticalCollision bool) {
-	entityBox := EntityAABB(x, y, z, width, height)
-
-	// collect block collision shapes in the expanded region
-	expanded := entityBox.ExpandTowards(dx, dy, dz).Inflate(Epsilon, Epsilon, Epsilon)
-	shapes := m.getBlockCollisions(expanded)
-
-	if len(shapes) == 0 {
-		return dx, dy, dz, false, false
+// CollideMovement resolves Entity.collide movement. onGround is the previous
+// movement's ground state, not a proximity probe; maxStep is the step attribute.
+// The returned collision flags compare the requested and final movement.
+func (m *Module) CollideMovement(x, y, z, width, height, dx, dy, dz float64, onGround bool, maxStep float64) (adjX, adjY, adjZ float64, horizontalCollision, verticalCollision bool) {
+	box := EntityAABB(x, y, z, width, height)
+	region := box.ExpandTowards(dx, dy, dz)
+	var entities []AABB
+	if m.entities != nil {
+		query := region.Inflate(Epsilon, Epsilon, Epsilon)
+		entities = m.entities.CollisionBoxes(query.MinX, query.MinY, query.MinZ, query.MaxX, query.MaxY, query.MaxZ)
 	}
-
 	adjX, adjY, adjZ = dx, dy, dz
-
-	// vanilla axis order (Direction.axisStepOrder): Y always first,
-	// then resolve the dominant horizontal axis before the minor one.
-	// if |dx| < |dz|: Y → Z → X; else Y → X → Z
-	for _, s := range shapes {
-		adjY = entityBox.clipYCollide(s, adjY)
+	if dx*dx+dy*dy+dz*dz != 0 {
+		shapes := m.collectColliders(region, x, y, z, entities)
+		adjX, adjY, adjZ = collideWithShapes(box, shapes, dx, dy, dz)
 	}
-	entityBox = entityBox.Move(0, adjY, 0)
-
-	if math.Abs(dx) < math.Abs(dz) {
-		// Y → Z → X
-		for _, s := range shapes {
-			adjZ = entityBox.clipZCollide(s, adjZ)
+	landed := dy != adjY && dy < 0
+	maxStep = float64(float32(maxStep))
+	if maxStep > 0 && (landed || onGround) && (dx != adjX || dz != adjZ) {
+		grounded := box
+		if landed {
+			grounded = grounded.Move(0, adjY, 0)
 		}
-		entityBox = entityBox.Move(0, 0, adjZ)
-		for _, s := range shapes {
-			adjX = entityBox.clipXCollide(s, adjX)
+		stepRegion := grounded.ExpandTowards(dx, maxStep, dz)
+		if !landed {
+			stepRegion = stepRegion.ExpandTowards(0, -float64(float32(1.0e-5)), 0)
 		}
-	} else {
-		// Y → X → Z
-		for _, s := range shapes {
-			adjX = entityBox.clipXCollide(s, adjX)
-		}
-		entityBox = entityBox.Move(adjX, 0, 0)
-		for _, s := range shapes {
-			adjZ = entityBox.clipZCollide(s, adjZ)
-		}
-	}
-
-	horizontalCollision = dx != adjX || dz != adjZ
-	verticalCollision = dy != adjY
-
-	// step-up (vanilla Entity.collide): on a horizontal collision while on the
-	// ground (or about to land), try stepping over the obstacle. Crucially the
-	// step is measured from the LANDING box when descending, otherwise from the
-	// ORIGINAL box — never from the post-Y position. Stepping from post-Y would
-	// let an upward velocity (a jump or knockback) stack with the 0.6 step and
-	// climb a full block in a single tick, which the server rejects as moving
-	// into the wall (rubberband) and which clobbers normal wall-sliding. With
-	// the original box, a single step is capped at maxUpStep, so a full block
-	// must be cleared by the jump arc over several ticks.
-	onGroundAfterCollision := verticalCollision && dy < 0
-	if StepUpHeight > 0 && horizontalCollision && (onGroundAfterCollision || m.IsOnGround(x, y, z, width)) {
-		originY := y
-		if onGroundAfterCollision {
-			originY = y + adjY // step from the landing position
-		}
-		stepResult := m.tryStepUp(x, originY, z, width, height, dx, dz, shapes)
-		if stepResult != nil {
-			stepHorizSq := stepResult[0]*stepResult[0] + stepResult[2]*stepResult[2]
-			currHorizSq := adjX*adjX + adjZ*adjZ
-			if stepHorizSq > currHorizSq {
-				// distanceToGround = aabb.minY - groundedAABB.minY = y - originY
-				adjX = stepResult[0]
-				adjY = stepResult[1] + (originY - y)
-				adjZ = stepResult[2]
-				horizontalCollision = dx != adjX || dz != adjZ
+		shapes := m.collectColliders(stepRegion, x, y, z, entities)
+		for _, candidate := range collectCandidateStepUpHeights(grounded, shapes, float32(maxStep), float32(adjY)) {
+			sx, sy, sz := collideWithShapes(grounded, shapes, dx, float64(candidate), dz)
+			if sx*sx+sz*sz > adjX*adjX+adjZ*adjZ {
+				adjX, adjY, adjZ = sx, sy-(box.MinY-grounded.MinY), sz
+				break
 			}
 		}
 	}
-
-	return
+	return adjX, adjY, adjZ, dx != adjX || dz != adjZ, dy != adjY
 }
 
-// tryStepUp attempts to step up over an obstacle.
-// Returns [dx, dy, dz] adjusted movement, or nil if no upward movement was possible.
-// The caller compares horizontal distance to decide whether to use the step-up result.
-func (m *Module) tryStepUp(x, y, z, width, height, dx, dz float64, existingShapes []AABB) []float64 {
-	stepBox := EntityAABB(x, y, z, width, height)
-	expanded := stepBox.ExpandTowards(dx, StepUpHeight, dz).Inflate(Epsilon, Epsilon, Epsilon)
-	shapes := m.getBlockCollisions(expanded)
+// collectCandidateStepUpHeights uses actual voxel Y planes, float-rounded before
+// comparison, and ascending order. A higher speculative step is never attempted
+// once the first candidate improves horizontal travel.
+func collectCandidateStepUpHeights(box AABB, shapes []voxelShape, maxStep, skip float32) []float32 {
+	candidates := make([]float32, 0, 4)
+	for _, shape := range shapes {
+		coords := shape.coords[1]
+		offset := shape.y
+		if len(coords) == 0 {
+			coords = []float64{shape.box.MinY, shape.box.MaxY}
+			offset = 0
+		}
+		for _, coord := range coords {
+			h := float32(coord + offset - box.MinY)
+			if h >= 0 && h <= maxStep && h != skip && !slices.Contains(candidates, h) {
+				candidates = append(candidates, h)
+			}
+		}
+	}
+	slices.Sort(candidates)
+	return candidates
+}
 
+func collideWithShapes(box AABB, shapes []voxelShape, dx, dy, dz float64) (float64, float64, float64) {
 	if len(shapes) == 0 {
-		shapes = existingShapes
+		return dx, dy, dz
 	}
-
-	// move up
-	stepDY := StepUpHeight
-	for _, s := range shapes {
-		stepDY = stepBox.clipYCollide(s, stepDY)
+	if dy != 0 {
+		for _, shape := range shapes {
+			dy = shape.clip(box, 1, dy)
+		}
+		box = box.Move(0, dy, 0)
 	}
-	if stepDY < Epsilon {
-		return nil // couldn't step up at all
-	}
-	stepBox = stepBox.Move(0, stepDY, 0)
-
-	// horizontal axes in vanilla axis order
-	stepDX := dx
-	stepDZ := dz
 	if math.Abs(dx) < math.Abs(dz) {
-		for _, s := range shapes {
-			stepDZ = stepBox.clipZCollide(s, stepDZ)
+		if dz != 0 {
+			for _, shape := range shapes {
+				dz = shape.clip(box, 2, dz)
+			}
+			box = box.Move(0, 0, dz)
 		}
-		stepBox = stepBox.Move(0, 0, stepDZ)
-		for _, s := range shapes {
-			stepDX = stepBox.clipXCollide(s, stepDX)
+		if dx != 0 {
+			for _, shape := range shapes {
+				dx = shape.clip(box, 0, dx)
+			}
 		}
-		stepBox = stepBox.Move(stepDX, 0, 0)
 	} else {
-		for _, s := range shapes {
-			stepDX = stepBox.clipXCollide(s, stepDX)
+		if dx != 0 {
+			for _, shape := range shapes {
+				dx = shape.clip(box, 0, dx)
+			}
+			box = box.Move(dx, 0, 0)
 		}
-		stepBox = stepBox.Move(stepDX, 0, 0)
-		for _, s := range shapes {
-			stepDZ = stepBox.clipZCollide(s, stepDZ)
+		if dz != 0 {
+			for _, shape := range shapes {
+				dz = shape.clip(box, 2, dz)
+			}
 		}
-		stepBox = stepBox.Move(0, 0, stepDZ)
 	}
-
-	// move back down
-	downDY := -stepDY
-	for _, s := range shapes {
-		downDY = stepBox.clipYCollide(s, downDY)
-	}
-
-	return []float64{stepDX, stepDY + downDY, stepDZ}
+	return dx, dy, dz
 }
 
-// getBlockCollisions returns all block collision AABBs within the given region.
-func (m *Module) getBlockCollisions(region AABB) []AABB {
-	w := m.world
+func (m *Module) collectColliders(region AABB, x, bottom, z float64, entities []AABB) []voxelShape {
+	shapes := make([]voxelShape, 0, len(entities)+1)
+	for _, box := range entities {
+		shapes = append(shapes, voxelShape{box: box})
+	}
+	shapes = m.appendBorder(shapes, region, x, z)
+	return m.blockCollisions(region, bottom, false, shapes)
+}
 
-	minBX := int(math.Floor(region.MinX))
-	minBY := int(math.Floor(region.MinY))
-	minBZ := int(math.Floor(region.MinZ))
-	maxBX := int(math.Floor(region.MaxX))
-	maxBY := int(math.Floor(region.MaxY))
-	maxBZ := int(math.Floor(region.MaxZ))
-
-	var result []AABB
-	for bx := minBX; bx <= maxBX; bx++ {
-		for by := minBY; by <= maxBY; by++ {
-			for bz := minBZ; bz <= maxBZ; bz++ {
-				stateID := w.GetBlock(bx, by, bz)
-				if stateID == 0 {
+// blockCollisions follows BlockCollisions/Cursor3D: X fastest, then Y, then Z.
+// The one-cell halo includes tall fences/walls/gates below the entity's feet.
+// Face cells require large shapes, edge cells moving pistons, corners are skipped.
+func (m *Module) blockCollisions(region AABB, bottom float64, suffocatingOnly bool, result []voxelShape) []voxelShape {
+	if m.world == nil {
+		return result
+	}
+	minX, maxX := int(math.Floor(region.MinX-Epsilon))-1, int(math.Floor(region.MaxX+Epsilon))+1
+	minY, maxY := int(math.Floor(region.MinY-Epsilon))-1, int(math.Floor(region.MaxY+Epsilon))+1
+	minZ, maxZ := int(math.Floor(region.MinZ-Epsilon))-1, int(math.Floor(region.MaxZ+Epsilon))+1
+	for z := minZ; z <= maxZ; z++ {
+		for y := minY; y <= maxY; y++ {
+			for x := minX; x <= maxX; x++ {
+				boundary := 0
+				if x == minX || x == maxX {
+					boundary++
+				}
+				if y == minY || y == maxY {
+					boundary++
+				}
+				if z == minZ || z == maxZ {
+					boundary++
+				}
+				if boundary == 3 {
 					continue
 				}
-				shapes := block_shapes.CollisionShape(stateID)
-				for _, s := range shapes {
-					// offset from block-local coords to world coords
-					result = append(result, AABB{
-						MinX: s.MinX + float64(bx),
-						MinY: s.MinY + float64(by),
-						MinZ: s.MinZ + float64(bz),
-						MaxX: s.MaxX + float64(bx),
-						MaxY: s.MaxY + float64(by),
-						MaxZ: s.MaxZ + float64(bz),
-					})
+				state, known := m.world.GetLoadedBlock(x, y, z)
+				if !known || state == 0 || suffocatingOnly && !block_shapes.IsSuffocating(state) {
+					continue
+				}
+				if boundary == 1 && !block_shapes.HasLargeCollisionShape(state) || boundary == 2 && blocks.BlockName(blocks.StateBlockID(state)) != "minecraft:moving_piston" {
+					continue
+				}
+				shape, collidable := m.collisionVoxel(state, x, y, z, bottom)
+				if !collidable {
+					continue
+				}
+				// Yield the entire voxel shape, including internal planes and
+				// parts outside the query, when any occupied part intersects.
+				for i := range shape.size() {
+					part := shape.part(i)
+					intersects := region.Intersects(part)
+					if !block_shapes.IsFullBlock(state) {
+						intersects = region.intersectsVoxel(part)
+					}
+					if intersects {
+						result = append(result, shape)
+						break
+					}
 				}
 			}
 		}
@@ -210,50 +220,24 @@ func (m *Module) getBlockCollisions(region AABB) []AABB {
 	return result
 }
 
-// blockShapesWorld returns the collision AABBs of a single block in world coords.
-func (m *Module) blockShapesWorld(bx, by, bz int) []AABB {
-	stateID := m.world.GetBlock(bx, by, bz)
-	if stateID == 0 {
-		return nil
-	}
-	shapes := block_shapes.CollisionShape(stateID)
-	out := make([]AABB, 0, len(shapes))
-	for _, s := range shapes {
-		out = append(out, AABB{
-			MinX: s.MinX + float64(bx), MinY: s.MinY + float64(by), MinZ: s.MinZ + float64(bz),
-			MaxX: s.MaxX + float64(bx), MaxY: s.MaxY + float64(by), MaxZ: s.MaxZ + float64(bz),
-		})
-	}
-	return out
-}
-
-// SupportSurfaceY returns the height at which a player of the given width standing
-// in the block column at (bx,by,bz) rests its feet: the highest collision-shape
-// top that overlaps the player's footprint and lies in [by, by+1). A full block
-// below yields by; a slab/stair/snow/path yields a fractional height; a tall
-// shape in the block below (e.g. a fence top at by+0.5) is also a valid surface.
-// ok is false when nothing supports the player at this level.
+// SupportSurfaceY finds the highest collision top in this node's [by,by+1)
+// range, including shapes protruding from adjacent columns and the block below.
 func (m *Module) SupportSurfaceY(bx, by, bz int, width float64) (surfaceY float64, ok bool) {
-	hw := width / 2
-	cx, cz := float64(bx)+0.5, float64(bz)+0.5
-	fpMinX, fpMaxX := cx-hw, cx+hw
-	fpMinZ, fpMaxZ := cz-hw, cz+hw
-	lo, hi := float64(by), float64(by)+1.0
-
+	footprint := EntityAABB(float64(bx)+0.5, float64(by), float64(bz)+0.5, width, 1)
+	if !m.loaded(footprint.Inflate(1, 0, 1).ExpandTowards(0, -1, 0)) {
+		return 0, false
+	}
 	best := math.Inf(-1)
-	// scan the feet block and the block below (a tall shape there can reach up
-	// into this node's [by, by+1) range)
-	for _, dy := range [2]int{0, -1} {
-		for _, s := range m.blockShapesWorld(bx, by+dy, bz) {
-			if s.MaxY < lo-Epsilon || s.MaxY >= hi {
-				continue // top must rest within this node's vertical range
+	for _, collider := range m.blockCollisions(footprint.Inflate(0, 1.0e-6, 0), footprint.MinY, false, nil) {
+		for i := range collider.size() {
+			shape := collider.part(i)
+			if shape.MaxY < float64(by)-Epsilon || shape.MaxY >= float64(by)+1 {
+				continue
 			}
-			if s.MaxX <= fpMinX || s.MinX >= fpMaxX || s.MaxZ <= fpMinZ || s.MinZ >= fpMaxZ {
-				continue // shape doesn't overlap the player's footprint
+			if shape.MaxX <= footprint.MinX+Epsilon || shape.MinX > footprint.MaxX-Epsilon || shape.MaxZ <= footprint.MinZ+Epsilon || shape.MinZ > footprint.MaxZ-Epsilon {
+				continue
 			}
-			if s.MaxY > best {
-				best = s.MaxY
-			}
+			best = math.Max(best, shape.MaxY)
 		}
 	}
 	if math.IsInf(best, -1) {
@@ -262,25 +246,65 @@ func (m *Module) SupportSurfaceY(bx, by, bz int, width float64) (surfaceY float6
 	return best, true
 }
 
-// IsOnGround checks if an entity at the given position would be on the ground.
+// IsOnGround probes the vanilla supporting-block slice; it is not a replacement
+// for the previous tick's onGround flag when deciding whether stepping is allowed.
 func (m *Module) IsOnGround(x, y, z, width float64) bool {
-	hw := width / 2
-	feetBox := AABB{
-		MinX: x - hw, MinY: y - 0.001, MinZ: z - hw,
-		MaxX: x + hw, MaxY: y, MaxZ: z + hw,
+	feet := EntityAABB(x, y-1.0e-6, z, width, 1.0e-6)
+	return len(m.blockCollisions(feet, y, false, nil)) != 0
+}
+
+func (m *Module) loaded(box AABB) bool {
+	if m.world == nil {
+		return false
 	}
-	shapes := m.getBlockCollisions(feetBox)
-	return slices.ContainsFunc(shapes, feetBox.Intersects)
+	for z := int(math.Floor(box.MinZ)); z <= int(math.Floor(box.MaxZ-Epsilon)); z++ {
+		for y := int(math.Floor(box.MinY)); y <= int(math.Floor(box.MaxY-Epsilon)); y++ {
+			for x := int(math.Floor(box.MinX)); x <= int(math.Floor(box.MaxX-Epsilon)); x++ {
+				if _, known := m.world.GetLoadedBlock(x, y, z); !known {
+					return false
+				}
+			}
+		}
+	}
+	return true
 }
 
-// CanFitAt checks if an entity of the given size can exist at the position without colliding.
+// CanFitAt requires known terrain and the vanilla 1e-7 pose-fit deflation.
 func (m *Module) CanFitAt(x, y, z, width, height float64) bool {
-	entityBox := EntityAABB(x, y, z, width, height)
-	shapes := m.getBlockCollisions(entityBox)
-	return !slices.ContainsFunc(shapes, entityBox.Intersects)
+	box := EntityAABB(x, y, z, width, height).Inflate(-Epsilon, -Epsilon, -Epsilon)
+	return m.loaded(box.Inflate(1, 0, 1).ExpandTowards(0, -1, 0)) && m.NoCollision(box)
 }
 
-// CollidesWith reports whether any block collision shape overlaps the given box.
+// NoCollision checks block, rigid-entity and world-border overlap without
+// changing the supplied AABB. Callers are responsible for loaded terrain.
+func (m *Module) NoCollision(box AABB) bool {
+	if m.CollidesWith(box) {
+		return false
+	}
+	if m.entities != nil {
+		query := box.Inflate(Epsilon, Epsilon, Epsilon)
+		if len(m.entities.CollisionBoxes(query.MinX, query.MinY, query.MinZ, query.MaxX, query.MaxY, query.MaxZ)) != 0 {
+			return false
+		}
+	}
+	var borderStorage [1]voxelShape
+	for _, border := range m.appendBorder(borderStorage[:0], box, (box.MinX+box.MaxX)/2, (box.MinZ+box.MaxZ)/2) {
+		for i := range border.size() {
+			if box.intersectsVoxel(border.part(i)) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// CollidesWith reports block collision overlap, without pose-fit deflation.
 func (m *Module) CollidesWith(box AABB) bool {
-	return slices.ContainsFunc(m.getBlockCollisions(box), box.Intersects)
+	return len(m.blockCollisions(box, box.MinY, false, nil)) != 0
+}
+
+// CollidesWithSuffocatingBlock is the collision query used by corner escape.
+// Fences, stairs and other merely-collidable blocks are not suffocating blocks.
+func (m *Module) CollidesWithSuffocatingBlock(box AABB) bool {
+	return len(m.blockCollisions(box, box.MinY, true, nil)) != 0
 }

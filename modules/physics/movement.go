@@ -20,13 +20,73 @@ func MoveRelative(speed, forward, strafe, yaw float64) (dx, dy, dz float64) {
 		forward *= invLen
 		strafe *= invLen
 	}
+	speed = float64(float32(speed))
 	forward *= speed
 	strafe *= speed
-	sinYaw := math.Sin(yaw * math.Pi / 180.0)
-	cosYaw := math.Cos(yaw * math.Pi / 180.0)
-	dx = strafe*cosYaw - forward*sinYaw
-	dz = forward*cosYaw + strafe*sinYaw
+	sinYaw, cosYaw := sinCosYaw(yaw)
+	dx = float64(strafe*cosYaw) - float64(forward*sinYaw)
+	dz = float64(forward*cosYaw) + float64(strafe*sinYaw)
 	return dx, 0, dz
+}
+
+// Mth uses a float sine table, indexed by a double angle in Minecraft 26.2.
+var sineTable = func() [65536]float32 {
+	var table [65536]float32
+	for i := range table {
+		table[i] = float32(math.Sin(float64(i) / 10430.378350470453))
+	}
+	return table
+}()
+
+func sinCos(angle float64) (float64, float64) {
+	return float64(sineTable[uint64(int64(angle*10430.378350470453))&65535]),
+		float64(sineTable[uint64(int64(angle*10430.378350470453+16384.0))&65535])
+}
+
+func sinCosYaw(yaw float64) (float64, float64) {
+	return sinCos(float64(float32(yaw) * float32(math.Pi/180)))
+}
+
+// ModifiedFriction applies the server's friction/air-drag attribute in float arithmetic.
+func ModifiedFriction(base, modifier float64) float64 {
+	return float64(max(float32(0), min(float32(1), float32(1)-float32(float32(1)-float32(base))*float32(modifier))))
+}
+
+// GroundAcceleration is LivingEntity.getFrictionInfluencedSpeed on the ground.
+// blockFriction is the material friction after its attribute modifier, before air drag.
+func GroundAcceleration(speed, blockFriction float64) float64 {
+	bf := float32(blockFriction)
+	if float64(bf) > 0.6 {
+		return float64(float32(speed) * (float32(FrictionSpeedFactor) / (bf * bf * bf)))
+	}
+	return float64(float32(speed))
+}
+
+// AirVelocity applies post-move gravity and air drag. Callers apply levitation
+// to vy first and pass zero gravity when it replaces normal falling.
+func AirVelocity(vx, vy, vz, blockFriction, gravity, airDragModifier float64) (float64, float64, float64) {
+	friction := float64(float32(blockFriction) * float32(ModifiedFriction(AirFrictionMul, airDragModifier)))
+	return vx * friction, (vy - gravity) * ModifiedFriction(VerticalAirFriction, airDragModifier), vz * friction
+}
+
+// JumpImpulse returns the horizontal sprint impulse and minimum upward velocity.
+func JumpImpulse(yaw, jumpPower float64, sprinting bool) (float64, float64, float64) {
+	jumpPower = float64(float32(jumpPower))
+	if jumpPower <= float64(float32(1e-5)) {
+		return 0, 0, 0
+	}
+	if sprinting {
+		sinYaw, cosYaw := sinCosYaw(yaw)
+		return -sinYaw * SprintJumpBoost, jumpPower, cosYaw * SprintJumpBoost
+	}
+	return 0, jumpPower, 0
+}
+
+// GetBlockFrictionAt uses the collision support beneath the player's footprint,
+// including an overhanging fence or the edge of a block, not only the center cell.
+func GetBlockFrictionAt(w *world.Module, x, y, z, width float64) float64 {
+	pos := blockOnPos(w, x, y, z, width, float64(float32(0.500001)))
+	return GetBlockFriction(w.GetBlock(pos[0], pos[1], pos[2]))
 }
 
 // GetJumpPower returns current jump power from the tracked attribute.
@@ -45,88 +105,51 @@ func (m *Module) GetEffectiveSpeed() float64 {
 // Vanilla travelInAir passes raw blockFriction to getFrictionInfluencedSpeed (NOT blockFriction * 0.91).
 // The 0.91 multiplier only applies to post-move velocity friction (applyAirPhysics).
 func (m *Module) applyAirInputScaled(s *self.Module, x, y, z, yaw float64, w *world.Module, forward, strafe float64) float64 {
-	belowBlock := w.GetBlock(int(math.Floor(x)), int(math.Floor(y-0.5)), int(math.Floor(z)))
-	var blockFriction float64
-	if m.onGround {
-		blockFriction = GetBlockFriction(belowBlock)
-	} else {
-		blockFriction = 1.0
+	blockFriction := 1.0
+	speed := FlyingSpeed
+	if s.Sprinting() {
+		speed = SprintFlyingSpeed
 	}
-
-	// vanilla getFrictionInfluencedSpeed: entire calculation in float32
-	var speed float64
-	if m.onGround {
-		baseSpeed := m.getEffectiveSpeed(s)
+	if s.AbilityFlags()&2 != 0 {
+		speed = float64(s.FlyingSpeed())
 		if s.Sprinting() {
-			baseSpeed *= (1.0 + SprintModifier)
+			speed = float64(s.FlyingSpeed() * 2)
 		}
-		// vanilla: this.getSpeed() * (0.21600002F / (blockFriction * blockFriction * blockFriction))
-		// getSpeed() returns float, all arithmetic is float32
-		bf := float32(blockFriction)
-		speed = float64(float32(baseSpeed) * (float32(FrictionSpeedFactor) / (bf * bf * bf)))
-	} else {
-		speed = FlyingSpeed
 	}
-
+	if m.onGround {
+		blockFriction = ModifiedFriction(GetBlockFrictionAt(w, x, y, z, m.bodyWidth()), s.AttributeValue("minecraft:friction_modifier", 1))
+		speed = GroundAcceleration(m.getEffectiveSpeed(s), blockFriction)
+	}
 	dx, _, dz := MoveRelative(speed, forward, strafe, yaw)
 	m.velX += dx
 	m.velZ += dz
-
+	if m.onClimbableAt(x, y, z) {
+		m.fallDistance = 0
+		limit := float64(float32(0.15))
+		m.velX = max(-limit, min(limit, m.velX))
+		m.velZ = max(-limit, min(limit, m.velZ))
+		m.velY = max(-limit, m.velY)
+		if m.velY < 0 && s.Sneaking() && !isScaffolding(w.GetBlock(int(math.Floor(x)), int(math.Floor(y)), int(math.Floor(z)))) {
+			m.velY = 0
+		}
+	}
 	return blockFriction
 }
 
 // applyAirPhysics applies gravity/levitation and friction after collision (post-move).
 // Matches LivingEntity.travelInAir: levitation replaces gravity, slow falling caps it.
 func (m *Module) applyAirPhysics(s *self.Module, blockFriction float64) {
-	// vanilla: float friction = blockFriction * 0.91F (float32 arithmetic)
-	friction := float64(float32(blockFriction) * float32(AirFrictionMul))
-
-	levAmp := s.EffectAmplifier(effectLevitation)
-	if levAmp >= 0 {
-		// levitation replaces gravity: lerp toward target upward velocity
+	x, y, z := s.Position()
+	if (m.horizontalCollision || m.jumping) && (m.onClimbableAt(x, y, z) || m.blocks.inPowderSnow && m.canWalkOnPowderSnow()) {
+		m.velY = 0.2
+	}
+	gravity := m.getEffectiveGravity(s)
+	if levAmp := s.EffectAmplifier(effectLevitation); levAmp >= 0 {
 		target := levitationPerLevel * float64(levAmp+1)
 		m.velY += (target - m.velY) * levitationLerpFactor
-	} else {
-		m.velY -= m.getEffectiveGravity(s)
+		gravity = 0
 	}
-
-	m.velX *= friction
-	m.velZ *= friction
-	m.velY *= VerticalAirFriction
-}
-
-// applyWaterInputScaled adds movement input to velocity in water (pre-collision).
-func (m *Module) applyWaterInputScaled(yaw, forward, strafe float64) {
-	dx, _, dz := MoveRelative(waterAcceleration, forward, strafe, yaw)
-	m.velX += dx
-	m.velZ += dz
-}
-
-// applyWaterPhysics applies water drag and gravity after collision (post-move).
-func (m *Module) applyWaterPhysics(s *self.Module) {
-	slowDown := waterSlowdown
-	if s.Sprinting() {
-		slowDown = waterSprintSlowdown
-	}
-	m.velX *= slowDown
-	m.velY *= waterVerticalDrag
-	m.velZ *= slowDown
-	m.velY -= Gravity
-}
-
-// applyLavaInputScaled adds movement input to velocity in lava (pre-collision).
-func (m *Module) applyLavaInputScaled(yaw, forward, strafe float64) {
-	dx, _, dz := MoveRelative(waterAcceleration, forward, strafe, yaw)
-	m.velX += dx
-	m.velZ += dz
-}
-
-// applyLavaPhysics applies lava drag and gravity after collision (post-move).
-func (m *Module) applyLavaPhysics() {
-	m.velX *= lavaSlowdown
-	m.velY *= lavaVerticalDrag
-	m.velZ *= lavaSlowdown
-	m.velY -= Gravity * lavaGravityFactor
+	m.velX, m.velY, m.velZ = AirVelocity(m.velX, m.velY, m.velZ, blockFriction, gravity, s.AttributeValue("minecraft:air_drag_modifier", 1))
 }
 
 // jump applies jump velocity (LivingEntity.jumpFromGround).
@@ -134,24 +157,35 @@ func (m *Module) applyLavaPhysics() {
 // after collision resolution. Keeping onGround = true ensures the jump tick
 // uses ground friction/speed for input, matching vanilla behavior.
 func (m *Module) jump(s *self.Module, yaw float64) {
-	jp := m.getJumpPower(s)
-	m.velY = max(jp, m.velY)
-	if s.Sprinting() {
-		angle := yaw * math.Pi / 180.0
-		m.velX += -math.Sin(angle) * SprintJumpBoost
-		m.velZ += math.Cos(angle) * SprintJumpBoost
+	dx, jumpY, dz := JumpImpulse(yaw, m.getJumpPower(s), s.Sprinting())
+	if jumpY == 0 {
+		return
 	}
+	m.velX += dx
+	m.velY = max(jumpY, m.velY)
+	m.velZ += dz
 }
 
-// getJumpPower returns jump velocity from the server-tracked attribute.
-// The server sends jump_strength with jump boost modifiers already applied.
+// getJumpPower includes the block jump factor and the separate Jump Boost effect.
 func (m *Module) getJumpPower(s *self.Module) float64 {
-	return s.AttributeValue("minecraft:jump_strength", JumpPower)
+	factor := float32(1)
+	if m.world != nil {
+		x, y, z := s.Position()
+		factor = float32(blockJumpFactorAt(m.world, x, y, z, m.bodyWidth()))
+	}
+	power := float32(s.AttributeValue("minecraft:jump_strength", JumpPower)) * factor
+	if amp := s.EffectAmplifier(effectJumpBoost); amp >= 0 {
+		power += float32(0.1) * (float32(amp) + 1)
+	}
+	return float64(power)
 }
 
 // getEffectiveGravity returns gravity from the tracked attribute,
 // capped to SlowFallingGravity when slow falling and descending (client-side logic).
 func (m *Module) getEffectiveGravity(s *self.Module) float64 {
+	if s.NoGravity() {
+		return 0
+	}
 	g := s.AttributeValue("minecraft:gravity", Gravity)
 	if m.velY <= 0 && s.HasEffect(effectSlowFalling) {
 		return min(g, slowFallingGravity)
@@ -159,10 +193,9 @@ func (m *Module) getEffectiveGravity(s *self.Module) float64 {
 	return g
 }
 
-// getEffectiveSpeed returns movement speed from the server-tracked attribute.
-// The server sends movement_speed with speed/slowness modifiers already applied.
+// getEffectiveSpeed projects the current local sprint state onto server attributes.
 func (m *Module) getEffectiveSpeed(s *self.Module) float64 {
-	return max(s.AttributeValue("minecraft:movement_speed", PlayerSpeed), 0)
+	return s.MovementSpeed(s.Sprinting())
 }
 
 // moveTowardsClosestSpace nudges the player out of a block it is penetrating at
@@ -206,51 +239,39 @@ func (m *Module) moveTowardsClosestSpace(col *collisions.Module, x, z, minY, max
 func suffocatesAt(col *collisions.Module, bx, bz int, minY, maxY float64) bool {
 	test := collisions.NewAABB(float64(bx), minY, float64(bz), float64(bx)+1, maxY, float64(bz)+1).
 		Inflate(-collisions.Epsilon, -collisions.Epsilon, -collisions.Epsilon)
-	return col.CollidesWith(test)
+	return col.CollidesWithSuffocatingBlock(test)
 }
 
-// modifyInput processes raw movement input matching vanilla LocalPlayer.modifyInput:
-// 1. scale by InputFriction (0.98)
-// 2. scale by sneakingSpeedFactor if sneaking
-// 3. normalize diagonal to unit square distance (modifyInputSpeedForSquareMovement)
-func modifyInput(forward, strafe float64, sneaking bool) (float64, float64) {
-	if forward == 0 && strafe == 0 {
+// ProcessInput follows KeyboardInput normalization and LocalPlayer.modifyInput.
+// itemFactor and slowFactor are applied separately, retaining Java float rounding.
+func ProcessInput(forward, strafe, itemFactor, slowFactor float64) (float64, float64) {
+	f, s := float32(forward), float32(strafe)
+	length := float32(math.Sqrt(float64(f*f + s*s)))
+	if length == 0 {
 		return 0, 0
 	}
-
-	forward *= InputFriction
-	strafe *= InputFriction
-
-	if sneaking {
-		forward *= sneakingSpeedFactor
-		strafe *= sneakingSpeedFactor
+	if length > 1 {
+		inverse := float32(1) / length
+		f, s = f*inverse, s*inverse
 	}
-
-	// modifyInputSpeedForSquareMovement: clamp magnitude to distance-to-unit-square
-	length := math.Sqrt(forward*forward + strafe*strafe)
-	if length > 0 {
-		dirF := forward / length
-		dirS := strafe / length
-		absF := math.Abs(dirF)
-		absS := math.Abs(dirS)
-		// distanceToUnitSquare: 1 / cos(atan(min/max))
-		var tan float64
-		if absS > absF {
-			tan = absF / absS
-		} else {
-			tan = absS / absF
-		}
-		distToSquare := math.Sqrt(1 + tan*tan)
-		modifiedLength := min(length*distToSquare, 1.0)
-		forward = dirF * modifiedLength
-		strafe = dirS * modifiedLength
+	f, s = f*float32(InputFriction), s*float32(InputFriction)
+	f, s = f*float32(itemFactor), s*float32(itemFactor)
+	f, s = f*float32(slowFactor), s*float32(slowFactor)
+	length = float32(math.Sqrt(float64(f*f + s*s)))
+	if length <= 0 {
+		return 0, 0
 	}
-
-	return forward, strafe
+	inverse := float32(1) / length
+	dirF, dirS := f*inverse, s*inverse
+	absF, absS := float32(math.Abs(float64(dirF))), float32(math.Abs(float64(dirS)))
+	tan := min(absF, absS) / max(absF, absS)
+	distanceToSquare := float32(math.Sqrt(float64(float32(1) + tan*tan)))
+	modifiedLength := min(length*distanceToSquare, float32(1))
+	return float64(dirF * modifiedLength), float64(dirS * modifiedLength)
 }
 
 // notEqual returns true if two float64 values differ by more than 1e-5.
 // Matches vanilla Mth.equal (Math.abs(b - a) < 1.0E-5F).
 func notEqual(a, b float64) bool {
-	return math.Abs(a-b) >= 1e-5
+	return math.Abs(a-b) >= float64(float32(1e-5))
 }

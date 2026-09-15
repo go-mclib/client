@@ -4,10 +4,10 @@ import "math"
 
 // authoritative player dimensions, referenced by the physics and pathfinding modules
 const (
-	PlayerWidth          = 0.6
-	PlayerHeight         = 1.8
+	PlayerWidth          = float64(float32(0.6))
+	PlayerHeight         = float64(float32(1.8))
 	PlayerSneakingHeight = 1.5
-	StepUpHeight         = 0.6
+	StepUpHeight         = float64(float32(0.6))
 	Epsilon              = 1.0e-7
 )
 
@@ -35,6 +35,14 @@ func (a AABB) Intersects(b AABB) bool {
 	return a.MinX < b.MaxX && a.MaxX > b.MinX &&
 		a.MinY < b.MaxY && a.MaxY > b.MinY &&
 		a.MinZ < b.MaxZ && a.MaxZ > b.MinZ
+}
+
+// intersectsVoxel uses the coordinate-merger boundary of Shapes.joinIsNotEmpty.
+// Unlike the full-block fast path, voxel intervals at most 1e-7 wide collapse.
+func (a AABB) intersectsVoxel(b AABB) bool {
+	return a.MinX < b.MaxX-Epsilon && a.MaxX > b.MinX+Epsilon &&
+		a.MinY < b.MaxY-Epsilon && a.MaxY > b.MinY+Epsilon &&
+		a.MinZ < b.MaxZ-Epsilon && a.MaxZ > b.MinZ+Epsilon
 }
 
 // Move returns a new AABB translated by (dx, dy, dz).
@@ -84,18 +92,18 @@ func (a AABB) clipXCollide(other AABB, dx float64) float64 {
 		return 0
 	}
 	// perpendicular overlap with epsilon shrink (vanilla: entity bounds ± 1e-7)
-	if other.MaxY <= a.MinY+Epsilon || other.MinY >= a.MaxY-Epsilon ||
-		other.MaxZ <= a.MinZ+Epsilon || other.MinZ >= a.MaxZ-Epsilon {
+	if other.MaxY <= a.MinY+Epsilon || other.MinY > a.MaxY-Epsilon ||
+		other.MaxZ <= a.MinZ+Epsilon || other.MinZ > a.MaxZ-Epsilon {
 		return dx
 	}
 	if dx > 0 {
 		d := other.MinX - a.MaxX
-		if d >= -Epsilon && d < dx {
+		if other.MinX > a.MaxX-Epsilon && d >= -Epsilon && d < dx {
 			dx = d
 		}
 	} else {
 		d := other.MaxX - a.MinX
-		if d <= Epsilon && d > dx {
+		if other.MaxX <= a.MinX+Epsilon && d <= Epsilon && d > dx {
 			dx = d
 		}
 	}
@@ -107,18 +115,18 @@ func (a AABB) clipYCollide(other AABB, dy float64) float64 {
 	if math.Abs(dy) < Epsilon {
 		return 0
 	}
-	if other.MaxX <= a.MinX+Epsilon || other.MinX >= a.MaxX-Epsilon ||
-		other.MaxZ <= a.MinZ+Epsilon || other.MinZ >= a.MaxZ-Epsilon {
+	if other.MaxX <= a.MinX+Epsilon || other.MinX > a.MaxX-Epsilon ||
+		other.MaxZ <= a.MinZ+Epsilon || other.MinZ > a.MaxZ-Epsilon {
 		return dy
 	}
 	if dy > 0 {
 		d := other.MinY - a.MaxY
-		if d >= -Epsilon && d < dy {
+		if other.MinY > a.MaxY-Epsilon && d >= -Epsilon && d < dy {
 			dy = d
 		}
 	} else {
 		d := other.MaxY - a.MinY
-		if d <= Epsilon && d > dy {
+		if other.MaxY <= a.MinY+Epsilon && d <= Epsilon && d > dy {
 			dy = d
 		}
 	}
@@ -130,18 +138,18 @@ func (a AABB) clipZCollide(other AABB, dz float64) float64 {
 	if math.Abs(dz) < Epsilon {
 		return 0
 	}
-	if other.MaxX <= a.MinX+Epsilon || other.MinX >= a.MaxX-Epsilon ||
-		other.MaxY <= a.MinY+Epsilon || other.MinY >= a.MaxY-Epsilon {
+	if other.MaxX <= a.MinX+Epsilon || other.MinX > a.MaxX-Epsilon ||
+		other.MaxY <= a.MinY+Epsilon || other.MinY > a.MaxY-Epsilon {
 		return dz
 	}
 	if dz > 0 {
 		d := other.MinZ - a.MaxZ
-		if d >= -Epsilon && d < dz {
+		if other.MinZ > a.MaxZ-Epsilon && d >= -Epsilon && d < dz {
 			dz = d
 		}
 	} else {
 		d := other.MaxZ - a.MinZ
-		if d <= Epsilon && d > dz {
+		if other.MaxZ <= a.MinZ+Epsilon && d <= Epsilon && d > dz {
 			dz = d
 		}
 	}

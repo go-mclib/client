@@ -20,7 +20,7 @@ const (
 	// attribute-based (double in vanilla — float64 is correct)
 	Gravity         = 0.08
 	SprintJumpBoost = 0.2 // double literal in jumpFromGround
-	SprintModifier  = 0.3 // attribute modifier (double)
+	SprintModifier  = float64(float32(0.3))
 
 	// float in vanilla (getJumpPower returns float, JUMP_STRENGTH attribute is 0.42F)
 	JumpPower = float64(float32(0.42))
@@ -29,7 +29,8 @@ const (
 	PlayerSpeed = float64(float32(0.1))
 
 	// float: getFlyingSpeed returns 0.02F
-	FlyingSpeed = float64(float32(0.02))
+	FlyingSpeed       = float64(float32(0.02))
+	SprintFlyingSpeed = float64(float32(0.025999999))
 
 	// float: literal 0.91F in travelInAir
 	AirFrictionMul = float64(float32(0.91))
@@ -45,22 +46,6 @@ const (
 
 	// float: Block.getFriction() returns float, default 0.6F
 	defaultBlockFriction = float64(float32(0.6))
-
-	// float: getWaterSlowDown returns 0.8F
-	waterSlowdown       = float64(float32(0.8))
-	waterSprintSlowdown = float64(float32(0.9))
-	waterVerticalDrag   = float64(float32(0.8))
-
-	// float: 0.02F literal in travelInWater
-	waterAcceleration = float64(float32(0.02))
-
-	// double in vanilla (scale(0.5) uses double)
-	lavaSlowdown      = 0.5
-	lavaVerticalDrag  = 0.8
-	lavaGravityFactor = 0.25
-
-	entityPushStrength = 0.05
-	entityPushMinDist  = 0.01
 
 	// double: Attributes.SNEAKING_SPEED default is 0.3 (double in attribute system)
 	sneakingSpeedFactor = 0.3
@@ -79,4 +64,5 @@ const (
 var (
 	effectLevitation  = registries.MobEffect.Get("minecraft:levitation")
 	effectSlowFalling = registries.MobEffect.Get("minecraft:slow_falling")
+	effectJumpBoost   = registries.MobEffect.Get("minecraft:jump_boost")
 )

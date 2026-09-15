@@ -4,6 +4,7 @@ import (
 	"math"
 
 	"github.com/go-mclib/client/modules/collisions"
+	"github.com/go-mclib/client/modules/physics"
 	"github.com/go-mclib/client/modules/self"
 )
 
@@ -27,24 +28,15 @@ const (
 	eyeHeight            = self.EyeHeight
 
 	safeFallDistance = 4
-
-	// maxStepUpRise is the greatest height (in blocks) the player can gain in a
-	// single step-up. A standing jump clears ~1.25 blocks; full-block climbs
-	// (rise 1.0) are fine, a block topped with a slab (rise 1.5) is not.
-	maxStepUpRise = 1.2
 )
 
 // pre-computed costs
-var (
-	fallNBlocksCost  [257]float64 // fall cost for 0..256 blocks
-	jumpOneBlockCost float64
-)
+var fallNBlocksCost [257]float64
 
 func init() {
 	for i := range fallNBlocksCost {
 		fallNBlocksCost[i] = distanceToTicks(float64(i))
 	}
-	jumpOneBlockCost = distanceToTicks(1.25) - distanceToTicks(0.25)
 }
 
 // distanceToTicks converts a fall distance to tick count using MC physics.
@@ -68,7 +60,8 @@ func distanceToTicks(distance float64) float64 {
 // fallVelocity returns the distance fallen during a given tick.
 // Matches Baritone's ActionCosts.velocity.
 func fallVelocity(tick int) float64 {
-	return (math.Pow(0.98, float64(tick)) - 1) * -3.92
+	drag := physics.VerticalAirFriction
+	return physics.Gravity * drag * (1 - math.Pow(drag, float64(tick))) / (1 - drag)
 }
 
 // fallCost returns the tick-based cost for falling n blocks.

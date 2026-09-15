@@ -15,7 +15,7 @@ func (m *Module) sendTickPackets(s *self.Module) {
 	m.sendPosition(s)
 
 	// tick end (vanilla: Minecraft.tick sends ClientTickEnd after all tick logic)
-	m.client.SendPacket(&packets.C2SClientTickEnd{})
+	m.sendPacket(&packets.C2SClientTickEnd{})
 }
 
 // sendInput sends C2SPlayerInput when key states change (vanilla: LocalPlayer.tick).
@@ -46,38 +46,24 @@ func (m *Module) sendInput(s *self.Module) {
 
 	if flags != m.lastSentInputFlags {
 		m.lastSentInputFlags = flags
-		m.client.SendPacket(&packets.C2SPlayerInput{
+		m.sendPacket(&packets.C2SPlayerInput{
 			Flags: ns.Uint8(flags),
 		})
 	}
 }
 
 // sendPosition sends position/rotation packets following MC's LocalPlayer.sendPosition logic.
-// Sends sprint/sneak commands first (vanilla: sendIsSprintingIfNeeded is called inside sendPosition).
+// Sprint commands precede movement; sneaking is carried only by PlayerInput.
 func (m *Module) sendPosition(s *self.Module) {
 	// sendIsSprintingIfNeeded
 	sprinting := s.Sprinting()
 	if sprinting != m.lastSentSprinting {
 		m.lastSentSprinting = sprinting
-		actionID := ns.VarInt(4) // stop sprinting
+		actionID := ns.VarInt(2) // stop sprinting
 		if sprinting {
-			actionID = 3 // start sprinting
+			actionID = 1 // start sprinting
 		}
-		m.client.SendPacket(&packets.C2SPlayerCommand{
-			EntityId: ns.VarInt(s.EntityID()),
-			ActionId: actionID,
-		})
-	}
-
-	// send sneaking state change
-	sneaking := s.Sneaking()
-	if sneaking != m.lastSentSneaking {
-		m.lastSentSneaking = sneaking
-		actionID := ns.VarInt(1) // stop sneaking
-		if sneaking {
-			actionID = 0 // start sneaking
-		}
-		m.client.SendPacket(&packets.C2SPlayerCommand{
+		m.sendPacket(&packets.C2SPlayerCommand{
 			EntityId: ns.VarInt(s.EntityID()),
 			ActionId: actionID,
 		})
@@ -103,23 +89,23 @@ func (m *Module) sendPosition(s *self.Module) {
 	}
 
 	if moved && rotated {
-		m.client.SendPacket(&packets.C2SMovePlayerPosRot{
+		m.sendPacket(&packets.C2SMovePlayerPosRot{
 			X: ns.Float64(x), FeetY: ns.Float64(y), Z: ns.Float64(z),
 			Yaw: ns.Float32(yaw), Pitch: ns.Float32(pitch),
 			Flags: flags,
 		})
 	} else if moved {
-		m.client.SendPacket(&packets.C2SMovePlayerPos{
+		m.sendPacket(&packets.C2SMovePlayerPos{
 			X: ns.Float64(x), FeetY: ns.Float64(y), Z: ns.Float64(z),
 			Flags: flags,
 		})
 	} else if rotated {
-		m.client.SendPacket(&packets.C2SMovePlayerRot{
+		m.sendPacket(&packets.C2SMovePlayerRot{
 			Yaw: ns.Float32(yaw), Pitch: ns.Float32(pitch),
 			Flags: flags,
 		})
 	} else if m.onGround != m.lastSentOnGround || m.horizontalCollision != m.lastSentHorizontalCollision {
-		m.client.SendPacket(&packets.C2SMovePlayerStatusOnly{
+		m.sendPacket(&packets.C2SMovePlayerStatusOnly{
 			Flags: flags,
 		})
 	}

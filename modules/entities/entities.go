@@ -6,6 +6,7 @@ import (
 
 	"github.com/go-mclib/client"
 	"github.com/go-mclib/client/modules/collisions"
+	"github.com/go-mclib/client/modules/playerlist"
 	"github.com/go-mclib/client/modules/self"
 	"github.com/go-mclib/data/entities"
 	"github.com/go-mclib/data/entity_hitboxes"
@@ -23,16 +24,21 @@ type Entity struct {
 	TypeID   int32
 	TypeName string
 
-	X, Y, Z          float64
-	Yaw, Pitch       float32
-	HeadYaw          float32
-	VelX, VelY, VelZ float64
-	OnGround         bool
-	Width, Height    float64
-	EyeHeight        float64
-	SpawnData        int32 // extra data from S2CAddEntity (e.g. block state for falling blocks)
-	Metadata         entities.Metadata
-	Equipment        map[uint8]EquipmentItem
+	X, Y, Z                      float64
+	Yaw, Pitch                   float32
+	HeadYaw                      float32
+	VelX, VelY, VelZ             float64
+	OnGround                     bool
+	Width, Height                float64
+	EyeHeight                    float64
+	SpawnData                    int32 // extra data from S2CAddEntity (e.g. block state for falling blocks)
+	Metadata                     entities.Metadata
+	Equipment                    map[uint8]EquipmentItem
+	physicsX, physicsY, physicsZ float64
+	interpolationSteps           int
+	peekAmount                   float32
+	scoreName                    string
+	scale                        float32 // zero until the server synchronizes the scale attribute
 }
 
 type Module struct {
@@ -41,9 +47,14 @@ type Module struct {
 	// optional deps (entities degrades gracefully without them)
 	self       *self.Module
 	collisions *collisions.Module
+	playerlist *playerlist.Module
 
-	mu       sync.RWMutex
-	entities map[int32]*Entity
+	mu          sync.RWMutex
+	entities    map[int32]*Entity
+	entityOrder []int32           // insertion order, matching EntityTickList on the client
+	vehicles    map[int32]int32   // passenger ID -> vehicle ID; includes local player
+	teams       map[string]int32  // team name -> collision rule
+	memberTeams map[string]string // scoreboard entry -> team name
 
 	onEntitySpawn     []func(e *Entity)
 	onEntityRemove    []func(entityID int32)
@@ -56,7 +67,10 @@ type Module struct {
 
 func New() *Module {
 	return &Module{
-		entities: make(map[int32]*Entity),
+		entities:    make(map[int32]*Entity),
+		vehicles:    make(map[int32]int32),
+		teams:       make(map[string]int32),
+		memberTeams: make(map[string]string),
 	}
 }
 
@@ -71,11 +85,16 @@ func (m *Module) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.entities = make(map[int32]*Entity)
+	m.entityOrder = nil
+	m.vehicles = make(map[int32]int32)
+	m.teams = make(map[string]int32)
+	m.memberTeams = make(map[string]string)
 }
 
 func (m *Module) Wire() error {
 	m.self = self.From(m.client)
 	m.collisions = collisions.From(m.client)
+	m.playerlist = playerlist.From(m.client)
 	return nil
 }
 
@@ -111,7 +130,18 @@ func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 	}
 	switch pkt.PacketID {
 	case packet_ids.S2CRespawnID:
-		m.Reset()
+		// Scoreboard teams survive dimension changes, unlike entity instances.
+		m.mu.Lock()
+		m.entities = make(map[int32]*Entity)
+		m.entityOrder = nil
+		m.vehicles = make(map[int32]int32)
+		m.mu.Unlock()
+	case packet_ids.S2CSetPassengersID:
+		m.handleSetPassengers(pkt)
+	case packet_ids.S2CSetPlayerTeamID:
+		m.handleSetPlayerTeam(pkt)
+	case packet_ids.S2CUpdateAttributesID:
+		m.handleUpdateAttributes(pkt)
 	case packet_ids.S2CSetEquipmentID:
 		m.handleSetEquipment(pkt)
 	case packet_ids.S2CAddEntityID:
@@ -169,9 +199,11 @@ func (m *Module) handleAddEntity(pkt *jp.WirePacket) {
 		EyeHeight: float64(eyeHeight),
 		SpawnData: int32(d.Data),
 	}
+	e.physicsX, e.physicsY, e.physicsZ = e.X, e.Y, e.Z
+	e.scoreName = entityUUIDName(e.UUID)
 
 	m.mu.Lock()
-	m.entities[e.ID] = e
+	m.trackEntityLocked(e)
 	m.mu.Unlock()
 
 	for _, cb := range m.onEntitySpawn {
@@ -199,7 +231,7 @@ func (m *Module) handleRemoveEntities(pkt *jp.WirePacket) {
 
 	m.mu.Lock()
 	for _, id := range ids {
-		delete(m.entities, id)
+		m.removeTrackedEntityLocked(id)
 	}
 	m.mu.Unlock()
 
@@ -224,7 +256,7 @@ func (m *Module) handleForgetLevelChunk(pkt *jp.WirePacket) {
 		ecx := int32(math.Floor(e.X / 16))
 		ecz := int32(math.Floor(e.Z / 16))
 		if ecx == cx && ecz == cz {
-			delete(m.entities, id)
+			m.removeTrackedEntityLocked(id)
 			removed = append(removed, id)
 		}
 	}
@@ -246,9 +278,7 @@ func (m *Module) handleMoveEntityPos(pkt *jp.WirePacket) {
 	m.mu.Lock()
 	e := m.entities[int32(d.EntityId)]
 	if e != nil {
-		e.X += float64(d.DeltaX) / 4096.0
-		e.Y += float64(d.DeltaY) / 4096.0
-		e.Z += float64(d.DeltaZ) / 4096.0
+		e.moveTo(decodeEntityDelta(e.X, int16(d.DeltaX)), decodeEntityDelta(e.Y, int16(d.DeltaY)), decodeEntityDelta(e.Z, int16(d.DeltaZ)), e.Yaw, e.Pitch, false)
 		e.OnGround = bool(d.OnGround)
 		if len(m.onEntityMove) > 0 {
 			e = cloneEntity(e)
@@ -272,11 +302,7 @@ func (m *Module) handleMoveEntityPosRot(pkt *jp.WirePacket) {
 	m.mu.Lock()
 	e := m.entities[int32(d.EntityId)]
 	if e != nil {
-		e.X += float64(d.DeltaX) / 4096.0
-		e.Y += float64(d.DeltaY) / 4096.0
-		e.Z += float64(d.DeltaZ) / 4096.0
-		e.Yaw = float32(d.Yaw.Degrees())
-		e.Pitch = float32(d.Pitch.Degrees())
+		e.moveTo(decodeEntityDelta(e.X, int16(d.DeltaX)), decodeEntityDelta(e.Y, int16(d.DeltaY)), decodeEntityDelta(e.Z, int16(d.DeltaZ)), float32(d.Yaw.Degrees()), float32(d.Pitch.Degrees()), false)
 		e.OnGround = bool(d.OnGround)
 		if len(m.onEntityMove) > 0 {
 			e = cloneEntity(e)
@@ -300,8 +326,7 @@ func (m *Module) handleMoveEntityRot(pkt *jp.WirePacket) {
 	m.mu.Lock()
 	e := m.entities[int32(d.EntityId)]
 	if e != nil {
-		e.Yaw = float32(d.Yaw.Degrees())
-		e.Pitch = float32(d.Pitch.Degrees())
+		e.moveTo(e.X, e.Y, e.Z, float32(d.Yaw.Degrees()), float32(d.Pitch.Degrees()), false)
 		e.OnGround = bool(d.OnGround)
 	}
 	m.mu.Unlock()
@@ -341,14 +366,10 @@ func (m *Module) handleEntityPositionSync(pkt *jp.WirePacket) {
 	m.mu.Lock()
 	e := m.entities[int32(d.EntityId)]
 	if e != nil {
-		e.X = float64(d.X)
-		e.Y = float64(d.Y)
-		e.Z = float64(d.Z)
+		e.moveTo(float64(d.X), float64(d.Y), float64(d.Z), float32(d.Yaw), float32(d.Pitch), true)
 		e.VelX = float64(d.VelocityX)
 		e.VelY = float64(d.VelocityY)
 		e.VelZ = float64(d.VelocityZ)
-		e.Yaw = float32(d.Yaw)
-		e.Pitch = float32(d.Pitch)
 		e.OnGround = bool(d.OnGround)
 		if len(m.onEntityMove) > 0 {
 			e = cloneEntity(e)
