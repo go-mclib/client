@@ -30,6 +30,12 @@ Physics uses the vanilla float-rounded dimensions and movement arithmetic, full 
 
 `chat.SuggestCommandContext(ctx, "/pw ")` asks the connected server for completions without executing the command. Preserve trailing spaces; response `Start` and `Length` are UTF-16 offsets into the unchanged input. Results include optional text-component tooltips, are server-specific and non-exhaustive, and do not establish command permission. Requests expire after five seconds or on cancellation, disconnect or transfer.
 
+Applications enforcing their own chat moderation or retention policy should set
+`chat.Module.SuppressChatLogs = true` before registering the module. This disables
+raw player/system/disguised chat logging without disabling callbacks or signed
+message acknowledgements. The application remains responsible for filtering its
+own callbacks, context and storage.
+
 Physics tick callbacks run under the client's packet-state boundary. External controllers needing coherent cross-module state may use `Client.WithPacketState`; never call it from packet or physics-tick callbacks, and never wait for a server reply while holding it.
 
 ## Disclaimer

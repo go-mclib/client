@@ -20,6 +20,11 @@ import (
 const ModuleName = "chat"
 
 type Module struct {
+	// SuppressChatLogs disables raw chat-content logging, not callbacks or
+	// signed-message acknowledgements. Configure before registering the module.
+	// Applications with their own moderation/retention policy should enable it.
+	SuppressChatLogs bool
+
 	client             *client.Client
 	commandMu          sync.RWMutex
 	commandTree        *commandTree
@@ -111,10 +116,12 @@ func (m *Module) handlePlayerChat(pkt *jp.WirePacket) {
 	isWhisper := d.ChatType.TargetName.Present
 	sender := d.ChatType.Name.Text
 	msg := string(d.Body.Content)
-	if isWhisper {
-		m.client.Logger.Printf("[CHAT-WHISPER] %s -> %s: %s", sender, d.ChatType.TargetName.Value.Text, msg)
-	} else {
-		m.client.Logger.Printf("[CHAT] %s: %s", sender, msg)
+	if !m.SuppressChatLogs {
+		if isWhisper {
+			m.client.Logger.Printf("[CHAT-WHISPER] %s -> %s: %s", sender, d.ChatType.TargetName.Value.Text, msg)
+		} else {
+			m.client.Logger.Printf("[CHAT] %s: %s", sender, msg)
+		}
 	}
 	for _, cb := range m.onPlayerChat {
 		cb(sender, msg, isWhisper)
@@ -139,15 +146,20 @@ func (m *Module) acknowledgeReceived(signature []byte) {
 }
 
 func (m *Module) handleSystemChat(pkt *jp.WirePacket) {
+	if m.SuppressChatLogs && len(m.onSystemChat) == 0 {
+		return
+	}
 	var d packets.S2CSystemChat
 	if err := pkt.ReadInto(&d); err != nil {
 		return
 	}
 	txt := d.Content.Render(lang.Translate)
-	if d.Overlay {
-		m.client.Logger.Printf("[SYSTEM-ACTION] %s", txt)
-	} else {
-		m.client.Logger.Printf("[SYSTEM] %s", txt)
+	if !m.SuppressChatLogs {
+		if d.Overlay {
+			m.client.Logger.Printf("[SYSTEM-ACTION] %s", txt)
+		} else {
+			m.client.Logger.Printf("[SYSTEM] %s", txt)
+		}
 	}
 	for _, cb := range m.onSystemChat {
 		cb(txt, bool(d.Overlay))
@@ -155,6 +167,9 @@ func (m *Module) handleSystemChat(pkt *jp.WirePacket) {
 }
 
 func (m *Module) handleDisguisedChat(pkt *jp.WirePacket) {
+	if m.SuppressChatLogs && len(m.onDisguisedChat) == 0 {
+		return
+	}
 	var d packets.S2CDisguisedChat
 	if err := pkt.ReadInto(&d); err != nil {
 		return
@@ -162,10 +177,12 @@ func (m *Module) handleDisguisedChat(pkt *jp.WirePacket) {
 	isWhisper := d.ChatType.TargetName.Present
 	sender := d.ChatType.Name.Render(lang.Translate)
 	msg := d.Message.Render(lang.Translate)
-	if isWhisper {
-		m.client.Logger.Printf("[DISGUISED] %s -> %s: %s", sender, d.ChatType.TargetName.Value.Render(lang.Translate), msg)
-	} else {
-		m.client.Logger.Printf("[DISGUISED] %s: %s", sender, msg)
+	if !m.SuppressChatLogs {
+		if isWhisper {
+			m.client.Logger.Printf("[DISGUISED] %s -> %s: %s", sender, d.ChatType.TargetName.Value.Render(lang.Translate), msg)
+		} else {
+			m.client.Logger.Printf("[DISGUISED] %s: %s", sender, msg)
+		}
 	}
 	for _, cb := range m.onDisguisedChat {
 		cb(sender, msg, isWhisper)
