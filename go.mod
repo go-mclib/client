@@ -8,7 +8,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/go-mclib/data v0.0.0-20260915044945-8957c18fe1a8
 	github.com/go-mclib/nbt v0.0.0
-	github.com/go-mclib/protocol v0.0.0-20260915044803-070acbb8d0aa
+	github.com/go-mclib/protocol v0.0.0-20260915052648-6c01ecdcc533
 )
 
 require (
