@@ -1,6 +1,7 @@
 package entities
 
 import (
+	"reflect"
 	"sync"
 	"testing"
 
@@ -92,12 +93,15 @@ func TestEquipmentReadDuringUpdates(t *testing.T) {
 	m := New()
 	m.entities[42] = &Entity{ID: 42}
 	wire := equipmentPacket(t, &packets.S2CSetEquipment{EntityId: 42, Slots: []packets.EquipmentEntry{{Slot: 0, Item: ns.NewSlot(ns.VarInt(items.ItemID("minecraft:stone")), 1)}}})
+	swap := equipmentPacket(t, &packets.S2CEntityEvent{EntityId: 42, EntityStatus: 55})
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for range 100 {
 			m.handleSetEquipment(wire)
+			m.handleEntityEvent(swap)
+			m.handleEntityEvent(swap)
 		}
 	}()
 	for range 100 {
@@ -109,5 +113,79 @@ func TestEquipmentReadDuringUpdates(t *testing.T) {
 	wg.Wait()
 	if got := m.GetEntity(42).Equipment[0]; got.Name != "minecraft:stone" {
 		t.Fatalf("lost update: %+v", got)
+	}
+}
+
+func TestEquipmentHandSwapEvent(t *testing.T) {
+	for _, offhand := range []string{"shield", "empty", "unknown"} {
+		t.Run(offhand, func(t *testing.T) {
+			c := client.New("unused", "Grace", false)
+			c.SetState(jp.StatePlay)
+			m := New()
+			c.Register(m)
+			m.HandlePacket(equipmentPacket(t, &packets.S2CAddEntity{EntityId: 300, Type: ns.VarInt(dataentities.EntityTypeID("minecraft:player"))}))
+			sword := items.NewStack(items.ItemID("minecraft:diamond_sword"), 1)
+			sword.Components.CustomName = &items.ItemNameComponent{Text: "Swapping sword"}
+			sword.Components.Enchantments = map[string]int32{"minecraft:sharpness": 3}
+			raw, err := sword.ToSlot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			slots := []packets.EquipmentEntry{
+				{Slot: 0, Item: raw},
+				{Slot: 5, Item: ns.NewSlot(ns.VarInt(items.ItemID("minecraft:iron_helmet")), 1)},
+			}
+			switch offhand {
+			case "shield":
+				slots = append(slots, packets.EquipmentEntry{Slot: 1, Item: ns.NewSlot(ns.VarInt(items.ItemID("minecraft:shield")), 1)})
+			case "empty":
+				slots = append(slots, packets.EquipmentEntry{Slot: 1, Item: ns.EmptySlot()})
+			}
+			m.HandlePacket(equipmentPacket(t, &packets.S2CSetEquipment{EntityId: 300, Slots: slots}))
+			before := m.GetEntity(300)
+			// Vanilla replaces the two SetEquipment entries with SWAP_HANDS.
+			// Entity Event uses an Int32 entity ID, not a VarInt.
+			swap := &jp.WirePacket{PacketID: (&packets.S2CEntityEvent{}).ID(), Data: []byte{0, 0, 1, 44, 55}}
+			m.HandlePacket(swap)
+			after := m.GetEntity(300)
+			for destination, source := range map[uint8]uint8{0: 1, 1: 0, 5: 5} {
+				got, known := after.Equipment[destination]
+				want, wantKnown := before.Equipment[source]
+				if known != wantKnown || !reflect.DeepEqual(got, want) {
+					t.Fatalf("slot %d after swap = %+v (known=%v), want %+v (known=%v)", destination, got, known, want, wantKnown)
+				}
+			}
+			if before.Equipment[0].Name != "minecraft:diamond_sword" {
+				t.Fatal("hand swap mutated an existing equipment snapshot")
+			}
+			m.HandlePacket(swap)
+			if !reflect.DeepEqual(m.GetEntity(300).Equipment, before.Equipment) {
+				t.Fatal("second hand swap did not restore known and unknown slots")
+			}
+		})
+	}
+}
+
+func TestEquipmentHandSwapIgnoresUnrelatedEvents(t *testing.T) {
+	c := client.New("unused", "Grace", false)
+	c.SetState(jp.StatePlay)
+	m := New()
+	c.Register(m)
+	m.entities[300] = &Entity{ID: 300, Equipment: map[uint8]EquipmentItem{0: {Name: "minecraft:stone", Count: 1}}}
+	before := m.GetEntity(300)
+	for _, packet := range []*jp.WirePacket{
+		equipmentPacket(t, &packets.S2CEntityEvent{EntityId: 301, EntityStatus: 55}),
+		equipmentPacket(t, &packets.S2CEntityEvent{EntityId: 300, EntityStatus: 35}),
+		{PacketID: (&packets.S2CEntityEvent{}).ID(), Data: []byte{0, 0, 1, 44}},
+	} {
+		m.HandlePacket(packet)
+		if !reflect.DeepEqual(m.GetEntity(300).Equipment, before.Equipment) || m.GetEntity(301) != nil {
+			t.Fatal("unknown entity, unrelated status or truncated event changed equipment")
+		}
+	}
+	c.SetState(jp.StateConfiguration)
+	m.HandlePacket(equipmentPacket(t, &packets.S2CEntityEvent{EntityId: 300, EntityStatus: 55}))
+	if !reflect.DeepEqual(m.GetEntity(300).Equipment, before.Equipment) {
+		t.Fatal("non-play packet changed equipment")
 	}
 }

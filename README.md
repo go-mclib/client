@@ -38,6 +38,8 @@ own callbacks, context and storage.
 
 Physics tick callbacks run under the client's packet-state boundary. External controllers needing coherent cross-module state may use `Client.WithPacketState`; never call it from packet or physics-tick callbacks, and never wait for a server reply while holding it.
 
+Tracked entity equipment applies both partial `SetEquipment` packets and vanilla's `SWAP_HANDS` entity event (55). Hand swaps preserve unknown versus explicitly empty slots and leave armor unchanged. Fetch a fresh entity snapshot to observe updates; previously returned snapshots remain isolated, point-in-time copies.
+
 ## Disclaimer
 
 This project is a work in progress. It was made to learn more about the Minecraft protocol, and also because there isn't really a good framework for building Minecraft bots with Go.

@@ -142,6 +142,8 @@ func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 		m.handleSetPlayerTeam(pkt)
 	case packet_ids.S2CUpdateAttributesID:
 		m.handleUpdateAttributes(pkt)
+	case packet_ids.S2CEntityEventID:
+		m.handleEntityEvent(pkt)
 	case packet_ids.S2CSetEquipmentID:
 		m.handleSetEquipment(pkt)
 	case packet_ids.S2CAddEntityID:

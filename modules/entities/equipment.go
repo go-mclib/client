@@ -97,3 +97,31 @@ func (m *Module) handleSetEquipment(pkt *jp.WirePacket) {
 		e.Equipment[uint8(entry.Slot)] = ObserveItem(entry.Item)
 	}
 }
+
+func (m *Module) handleEntityEvent(pkt *jp.WirePacket) {
+	var event packets.S2CEntityEvent
+	if pkt.ReadInto(&event) != nil || event.EntityStatus != 55 {
+		return
+	}
+	// LivingEntity.handleHandSwap sends SWAP_HANDS (55) instead of separate
+	// SetEquipment entries. Move knowledge as well as values: an unobserved
+	// hand stays unknown, rather than becoming an explicitly empty stack.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e := m.entities[int32(event.EntityId)]
+	if e == nil || e.Equipment == nil {
+		return
+	}
+	mainhand, mainKnown := e.Equipment[0]
+	offhand, offKnown := e.Equipment[1]
+	if offKnown {
+		e.Equipment[0] = offhand
+	} else {
+		delete(e.Equipment, 0)
+	}
+	if mainKnown {
+		e.Equipment[1] = mainhand
+	} else {
+		delete(e.Equipment, 1)
+	}
+}
