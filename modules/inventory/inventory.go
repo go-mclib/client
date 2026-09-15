@@ -25,7 +25,15 @@ type Module struct {
 	stateID  int32
 	cursor   slotEntry
 
-	container *containerState // nil when no container is open
+	container       *containerState // nil when no container is open
+	ready           bool
+	revision        uint64
+	epoch           uint64
+	contentRevision uint64
+	changed         chan struct{}
+	transactions    chan struct{}
+	session         *inventorySession
+	pendingRequest  *pendingInventoryRequest
 
 	onSlotUpdate     []func(index int, item *items.ItemStack)
 	onHeldSlotChange []func(slot int)
@@ -40,15 +48,24 @@ func (m *Module) Name() string { return ModuleName }
 func (m *Module) Init(c *client.Client) {
 	m.client = c
 	c.OnTransfer(m.Reset)
+	c.OnDisconnect(m.Reset)
+	c.OnPlay(m.startSession)
 }
 
 func (m *Module) Reset() {
 	m.mu.Lock()
+	if m.session != nil {
+		m.session.cancel()
+		m.session = nil
+	}
+	m.epoch++
+	m.ready = false
 	m.slots = [TotalSlots]slotEntry{}
 	m.heldSlot = 0
 	m.stateID = 0
 	m.cursor = slotEntry{}
 	m.container = nil
+	m.notifyLocked()
 	m.mu.Unlock()
 }
 
@@ -93,6 +110,8 @@ func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 		m.handleSetHeldSlot(pkt)
 	case packet_ids.S2CSetPlayerInventoryID:
 		m.handleSetPlayerInventory(pkt)
+	case packet_ids.S2CSetCursorItemID:
+		m.handleSetCursorItem(pkt)
 	}
 }
 
@@ -103,17 +122,19 @@ func (m *Module) handleOpenScreen(pkt *jp.WirePacket) {
 		return
 	}
 
-	title := d.WindowTitle.Text
-	if d.WindowTitle.Translate != "" {
-		title = d.WindowTitle.Translate
+	if d.WindowId <= 0 {
+		return
 	}
+	title := d.WindowTitle.String()
 
 	m.mu.Lock()
+	m.epoch++
 	m.container = &containerState{
 		windowID: int32(d.WindowId),
 		menuType: MenuType(d.WindowType),
 		title:    title,
 	}
+	m.notifyLocked()
 	m.mu.Unlock()
 
 	for _, cb := range m.onContainerOpen {
@@ -139,39 +160,40 @@ func (m *Module) handleContainerSetContent(pkt *jp.WirePacket) {
 		return
 	}
 
-	m.container.stateID = int32(d.StateId)
-	containerSlotCount := max(len(d.Slots)-PlayerInvSlots, 0)
-
-	m.container.slots = make([]slotEntry, containerSlotCount)
-	for i := range containerSlotCount {
-		m.container.slots[i] = decodeSlotEntry(d.Slots[i])
+	if !m.installContainerContentLocked(d) {
+		m.mu.Unlock()
+		return
 	}
-
-	// update player inventory from the trailing 36 slots
-	for i := range min(PlayerInvSlots, len(d.Slots)-containerSlotCount) {
-		m.slots[SlotMainStart+i] = decodeSlotEntry(d.Slots[containerSlotCount+i])
-	}
-
-	m.cursor = decodeSlotEntry(d.CarriedItem)
+	m.contentRevision++
+	m.notifyLocked()
 	m.mu.Unlock()
 }
 
 func (m *Module) handlePlayerInvSetContent(d packets.S2CContainerSetContent) {
 	m.mu.Lock()
+	if len(d.Slots) != TotalSlots {
+		m.mu.Unlock()
+		return
+	}
 	m.stateID = int32(d.StateId)
-	count := min(len(d.Slots), TotalSlots)
+	count := len(d.Slots)
+	updated := make([]*items.ItemStack, count)
 	for i := range count {
-		m.slots[i] = decodeSlotEntry(d.Slots[i])
+		entry := decodeSlotEntry(d.Slots[i])
+		m.setPlayerSlotLocked(i, entry)
+		updated[i] = entry.item
 	}
-	for i := count; i < TotalSlots; i++ {
-		m.slots[i] = slotEntry{}
+	m.ready = true
+	if m.container == nil {
+		m.cursor = decodeSlotEntry(d.CarriedItem)
+		m.contentRevision++
 	}
-	m.cursor = decodeSlotEntry(d.CarriedItem)
+	m.notifyLocked()
 	m.mu.Unlock()
 
 	for i := range count {
 		for _, cb := range m.onSlotUpdate {
-			cb(i, m.slots[i].item)
+			cb(i, updated[i])
 		}
 	}
 }
@@ -183,14 +205,7 @@ func (m *Module) handleContainerSetSlot(pkt *jp.WirePacket) {
 		return
 	}
 
-	// WindowId -1 with Slot -1 means cursor-only update
-	if int32(d.WindowId) == -1 && int16(d.Slot) == -1 {
-		m.mu.Lock()
-		m.stateID = int32(d.StateId)
-		m.cursor = decodeSlotEntry(d.SlotData)
-		m.mu.Unlock()
-		return
-	}
+	// Cursor updates have their own packet in 26.2, not window -1.
 
 	// player inventory
 	if d.WindowId == 0 {
@@ -201,7 +216,8 @@ func (m *Module) handleContainerSetSlot(pkt *jp.WirePacket) {
 		entry := decodeSlotEntry(d.SlotData)
 		m.mu.Lock()
 		m.stateID = int32(d.StateId)
-		m.slots[idx] = entry
+		m.setPlayerSlotLocked(idx, entry)
+		m.notifyLocked()
 		m.mu.Unlock()
 		for _, cb := range m.onSlotUpdate {
 			cb(idx, entry.item)
@@ -211,17 +227,12 @@ func (m *Module) handleContainerSetSlot(pkt *jp.WirePacket) {
 
 	// container window
 	m.mu.Lock()
-	if m.container != nil && m.container.windowID == int32(d.WindowId) {
-		m.container.stateID = int32(d.StateId)
+	if m.container != nil && m.container.ready && m.container.windowID == int32(d.WindowId) {
 		idx := int(d.Slot)
-		containerSlotCount := len(m.container.slots)
-		if idx >= 0 && idx < containerSlotCount {
-			m.container.slots[idx] = decodeSlotEntry(d.SlotData)
-		} else if idx >= containerSlotCount {
-			playerIdx := SlotMainStart + (idx - containerSlotCount)
-			if playerIdx >= SlotMainStart && playerIdx < TotalSlots {
-				m.slots[playerIdx] = decodeSlotEntry(d.SlotData)
-			}
+		if idx >= 0 && idx < len(m.container.view) {
+			m.container.stateID = int32(d.StateId)
+			m.setContainerViewSlot(idx, decodeSlotEntry(d.SlotData))
+			m.notifyLocked()
 		}
 	}
 	m.mu.Unlock()
@@ -234,9 +245,14 @@ func (m *Module) handleContainerClose(pkt *jp.WirePacket) {
 	}
 
 	m.mu.Lock()
-	if m.container != nil && m.container.windowID == int32(d.WindowId) {
-		m.container = nil
+	if m.container == nil || m.container.windowID != int32(d.WindowId) {
+		m.mu.Unlock()
+		return
 	}
+	m.container = nil
+	m.ready = false
+	m.epoch++
+	m.notifyLocked()
 	m.mu.Unlock()
 
 	for _, cb := range m.onContainerClose {
@@ -257,6 +273,7 @@ func (m *Module) handleSetHeldSlot(pkt *jp.WirePacket) {
 
 	m.mu.Lock()
 	m.heldSlot = slot
+	m.notifyLocked()
 	m.mu.Unlock()
 
 	for _, cb := range m.onHeldSlotChange {
@@ -279,12 +296,37 @@ func (m *Module) handleSetPlayerInventory(pkt *jp.WirePacket) {
 	entry := decodeSlotEntry(d.SlotData)
 
 	m.mu.Lock()
-	m.slots[containerIdx] = entry
+	m.setPlayerSlotLocked(containerIdx, entry)
+	m.notifyLocked()
 	m.mu.Unlock()
 
 	for _, cb := range m.onSlotUpdate {
 		cb(containerIdx, entry.item)
 	}
+}
+
+func (m *Module) handleSetCursorItem(pkt *jp.WirePacket) {
+	var d packets.S2CSetCursorItem
+	if err := pkt.ReadInto(&d); err != nil {
+		return
+	}
+	m.mu.Lock()
+	m.cursor = decodeSlotEntry(d.CarriedItem)
+	m.notifyLocked()
+	m.mu.Unlock()
+}
+
+// notifyLocked invalidates outstanding snapshots even when values are unchanged:
+// a full resync is an authoritative response, not an optimistic local write.
+func (m *Module) notifyLocked() {
+	if p := m.pendingRequest; p != nil && (p.tx.epoch != m.epoch || p.tx.session != m.session || m.contentRevision > p.contentRevision) {
+		m.finishRequestLocked(false)
+	}
+	m.revision++
+	if m.changed != nil {
+		close(m.changed)
+	}
+	m.changed = make(chan struct{})
 }
 
 func decodeSlotEntry(raw ns.Slot) slotEntry {

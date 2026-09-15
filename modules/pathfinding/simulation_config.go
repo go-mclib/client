@@ -9,6 +9,8 @@ type simulationConfig struct {
 	jumpPower, speed, gravity              float64
 	frictionModifier, airDragModifier      float64
 	maxStep, width, height, sneakingHeight float64
+	blockedEdges                           map[[6]int]struct{}
+	frontiers                              map[[3]int]int
 }
 
 func defaultSimulationConfig() simulationConfig {

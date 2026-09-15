@@ -1,6 +1,7 @@
 package inventory
 
 import (
+	"context"
 	"fmt"
 	"slices"
 
@@ -131,104 +132,76 @@ func (m *Module) FindItems(itemID int32) []int {
 	return result
 }
 
-// SetHeldSlot changes the selected hotbar slot (0-8) and notifies the server.
+// SetHeldSlot submits a session-bound hotbar selection. Vanilla sends no success acknowledgement.
 func (m *Module) SetHeldSlot(slot int) error {
-	return m.SelectHotbar(slot, m.client.WritePacket)
+	snapshot := m.Snapshot()
+	_, err := m.Execute(context.Background(), Operation{Kind: "select_hotbar", WindowID: snapshot.WindowID, Revision: snapshot.Revision, Hotbar: slot})
+	return err
 }
 
-// SelectHotbar selects a slot using the caller's session-bound transport.
-// Local selection changes only after the transport accepts the packet.
+// SelectHotbar submits a selection using the caller's session-bound transport.
+// It never waits for inventory work: a concurrent transaction returns busy.
+// Success means sent, not server-confirmed.
 func (m *Module) SelectHotbar(slot int, send func(jp.Packet) error) error {
 	if slot < 0 || slot > 8 {
 		return fmt.Errorf("invalid hotbar slot %d", slot)
 	}
-
-	if err := send(&packets.C2SSetCarriedItem{
-		Slot: ns.Int16(slot),
-	}); err != nil {
+	snapshot := m.Snapshot()
+	tx, done, err := m.tryTransaction(snapshot.WindowID, snapshot.Revision)
+	if err != nil {
+		return err
+	}
+	defer done()
+	// Caller transports may enqueue rather than serialize immediately. The
+	// queued packet belongs to the session, not this short-lived gate lease.
+	selection := *tx
+	selection.ctx = tx.session.ctx
+	if err := send(transactionPacket{Packet: &packets.C2SSetCarriedItem{Slot: ns.Int16(slot)}, tx: &selection}); err != nil {
 		return err
 	}
 	m.mu.Lock()
+	if err := tx.checkLocked(); err != nil {
+		m.mu.Unlock()
+		return err
+	}
 	m.heldSlot = slot
+	m.notifyLocked()
 	m.mu.Unlock()
-
 	for _, cb := range m.onHeldSlotChange {
 		cb(slot)
 	}
 	return nil
 }
 
-// RequestHotbarSwap asks the server to swap a main-inventory stack with a
-// hotbar stack without predicting local contents. Empty ChangedSlots means
-// the server sends its authoritative changes; callers must wait for those.
+// RequestHotbarSwap submits a main-inventory/hotbar swap without waiting for
+// confirmation. It never predicts contents. The caller must observe server slot
+// updates; another inventory transaction cannot start until resync or timeout.
+// The supplied transport must be session-bound. A concurrent transaction returns busy.
 func (m *Module) RequestHotbarSwap(containerSlot, hotbarIndex int, send func(jp.Packet) error) error {
 	if containerSlot < SlotMainStart || containerSlot >= SlotHotbarStart || hotbarIndex < 0 || hotbarIndex > 8 {
 		return fmt.Errorf("invalid main-inventory/hotbar swap")
 	}
-	m.mu.RLock()
-	if m.container != nil || !m.cursor.item.IsEmpty() {
-		m.mu.RUnlock()
-		return fmt.Errorf("close the container and clear the cursor before swapping")
-	}
-	stateID := m.stateID
-	cursor := slotToHashed(m.cursor.raw)
-	m.mu.RUnlock()
-	return send(&packets.C2SContainerClick{
-		WindowId: 0, StateId: ns.VarInt(stateID), Slot: ns.Int16(containerSlot),
-		Button: ns.Int8(hotbarIndex), Mode: 2, CarriedItem: cursor,
-	})
+	return m.submitHotbarSwap(containerSlot, hotbarIndex, send)
 }
 
-// SwapToHotbar swaps an item from any container slot into a hotbar slot (0-8).
-// Uses the SWAP click mode.
+// SwapToHotbar swaps an active-view slot into hotbar index 0..8 and waits for
+// server confirmation. Slot indices use the current Snapshot's protocol view.
 func (m *Module) SwapToHotbar(containerSlot, hotbarIndex int) error {
-	if containerSlot < 0 || containerSlot >= TotalSlots {
-		return fmt.Errorf("invalid container slot %d", containerSlot)
-	}
-	if hotbarIndex < 0 || hotbarIndex > 8 {
-		return fmt.Errorf("invalid hotbar index %d", hotbarIndex)
-	}
-
-	hotbarSlot := SlotHotbarStart + hotbarIndex
-
-	m.mu.Lock()
-	stateID := m.stateID
-
-	// predict the swap
-	srcEntry := m.slots[containerSlot]
-	dstEntry := m.slots[hotbarSlot]
-	m.slots[containerSlot] = dstEntry
-	m.slots[hotbarSlot] = srcEntry
-
-	cursorHashed := slotToHashed(m.cursor.raw)
-	m.mu.Unlock()
-
-	err := m.client.WritePacket(&packets.C2SContainerClick{
-		WindowId: 0,
-		StateId:  ns.VarInt(stateID),
-		Slot:     ns.Int16(containerSlot),
-		Button:   ns.Int8(hotbarIndex),
-		Mode:     2, // SWAP
-		ChangedSlots: []packets.ChangedSlot{
-			{SlotNum: ns.Int16(containerSlot), Item: slotToHashed(dstEntry.raw)},
-			{SlotNum: ns.Int16(hotbarSlot), Item: slotToHashed(srcEntry.raw)},
-		},
-		CarriedItem: cursorHashed,
-	})
+	snapshot := m.Snapshot()
+	tx, done, err := m.beginTransaction(context.Background(), Operation{WindowID: snapshot.WindowID, Revision: snapshot.Revision})
 	if err != nil {
-		// revert prediction on send failure
-		m.mu.Lock()
-		m.slots[containerSlot] = srcEntry
-		m.slots[hotbarSlot] = dstEntry
-		m.mu.Unlock()
 		return err
 	}
-
-	for _, cb := range m.onSlotUpdate {
-		cb(containerSlot, dstEntry.item)
-		cb(hotbarSlot, srcEntry.item)
+	defer done()
+	if !tx.current.Ready {
+		if err := tx.click(-1, 0, 0, nil); err != nil {
+			return err
+		}
 	}
-	return nil
+	if !tx.current.Cursor.IsEmpty() {
+		return fmt.Errorf("clear the cursor before swapping")
+	}
+	return tx.hotbarSwap(containerSlot, hotbarIndex)
 }
 
 // HoldItem finds an item by ID in the hotbar and selects that slot.

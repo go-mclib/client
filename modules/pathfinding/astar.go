@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/go-mclib/client/modules/collisions"
 	"github.com/go-mclib/client/modules/entities"
@@ -27,14 +28,28 @@ func findPath(ctx context.Context, w *world.Module, col *collisions.Module, ents
 	startX, startY, startZ, goalX, goalY, goalZ, maxNodes int,
 	cfg simulationConfig,
 ) ([]PathNode, error) {
+	return searchPath(ctx, w, col, ents, startX, startY, startZ, goalX, goalY, goalZ, maxNodes, cfg, false)
+}
+
+// searchPath returns either the goal or a safe bounded segment. A segment's
+// endpoint is not a navigation success; the controller retains the ultimate goal.
+func searchPath(ctx context.Context, w *world.Module, col *collisions.Module, ents *entities.Module,
+	startX, startY, startZ, goalX, goalY, goalZ, maxNodes int,
+	cfg simulationConfig, partial bool,
+) ([]PathNode, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if !nodeLoaded(w, startX, startY, startZ, cfg) || !nodeLoaded(w, goalX, goalY, goalZ, cfg) {
-		return nil, fmt.Errorf("pathfinding: start or goal terrain is unloaded")
+	if !nodeLoaded(w, startX, startY, startZ, cfg) {
+		return nil, fmt.Errorf("pathfinding: start terrain is unloaded")
 	}
-	if _, ok := standSurface(col, goalX, goalY, goalZ, cfg.sneakingHeight, cfg); !ok {
-		return nil, fmt.Errorf("pathfinding: goal has no support or headroom")
+	if !partial {
+		if !nodeLoaded(w, goalX, goalY, goalZ, cfg) {
+			return nil, fmt.Errorf("pathfinding: goal terrain is unloaded")
+		}
+		if _, ok := standSurface(col, goalX, goalY, goalZ, cfg.sneakingHeight, cfg); !ok {
+			return nil, fmt.Errorf("pathfinding: goal has no support or headroom")
+		}
 	}
 	if _, ok := standSurface(col, startX, startY, startZ, cfg.sneakingHeight, cfg); !ok {
 		return nil, fmt.Errorf("pathfinding: start has no support or headroom")
@@ -52,6 +67,9 @@ func findPath(ctx context.Context, w *world.Module, col *collisions.Module, ents
 	}
 
 	explored := 0
+	var best, frontier *PathNode
+	bestScore, frontierScore := math.Inf(1), math.Inf(1)
+	deadline := time.Now().Add(200 * time.Millisecond)
 
 	for openSet.Len() > 0 {
 		if err := ctx.Err(); err != nil {
@@ -59,14 +77,12 @@ func findPath(ctx context.Context, w *world.Module, col *collisions.Module, ents
 		}
 		current := heap.Pop(openSet).(*PathNode)
 		cx, cy, cz := current.X, current.Y, current.Z
+		if partial && !navigationLoaded(w, float64(cx)+0.5, nodeSurfaceY(col, cx, cy, cz, cfg), float64(cz)+0.5, cfg) {
+			continue
+		}
 
 		if cx == goalX && cy == goalY && cz == goalZ {
 			return reconstructPath(current), nil
-		}
-
-		explored++
-		if explored >= maxNodes {
-			return nil, fmt.Errorf("pathfinding: max nodes (%d) reached", maxNodes)
 		}
 
 		// skip if this node has been superseded by a cheaper path
@@ -74,11 +90,44 @@ func findPath(ctx context.Context, w *world.Module, col *collisions.Module, ents
 		if best, ok := gScore[key]; ok && current.G > best {
 			continue
 		}
+		explored++
+		if partial && current.Parent != nil {
+			score := current.H + current.G*0.1 + float64(cfg.frontiers[key])*32
+			if current.H < start.H-0.5 && score < bestScore {
+				best, bestScore = current, score
+			}
+			boundary := iabs(cx-startX) >= 24 || iabs(cz-startZ) >= 24
+			for _, off := range cardinalOffsets {
+				if !navigationLoaded(w, float64(cx+off[0])+0.5, nodeSurfaceY(col, cx, cy, cz, cfg), float64(cz+off[1])+0.5, cfg) {
+					boundary = true
+				}
+			}
+			if boundary && cfg.frontiers[key] < 2 && score < frontierScore {
+				frontier, frontierScore = current, score
+			}
+			if iabs(cx-startX) >= 24 || iabs(cz-startZ) >= 24 {
+				continue
+			}
+		}
+		if explored >= maxNodes || partial && time.Now().After(deadline) {
+			break
+		}
 
 		// generate all movement types
 		tryCardinalMoves(w, col, ents, current, goalX, goalY, goalZ, gScore, openSet, cfg)
 		tryDiagonalMoves(w, col, ents, current, goalX, goalY, goalZ, gScore, openSet, cfg)
 		tryParkourMoves(ctx, w, col, current, goalX, goalY, goalZ, gScore, openSet, cfg)
+	}
+	if partial {
+		// A cheap boundary behind us must not outrank closer supported progress
+		// (notably slow crouch corridors) merely because it is a frontier.
+		if best != nil && cfg.frontiers[[3]int{best.X, best.Y, best.Z}] < 2 &&
+			(frontier == nil || bestScore <= frontierScore) {
+			return reconstructPath(best), nil
+		}
+		if frontier != nil {
+			return reconstructPath(frontier), nil
+		}
 	}
 
 	return nil, fmt.Errorf("pathfinding: no path found")
@@ -113,6 +162,9 @@ func tryCardinalMoves(w *world.Module, col *collisions.Module, ents *entities.Mo
 
 			ny := cy + dy
 
+			if edgeBlocked(cfg, current, nx, ny, nz) {
+				continue
+			}
 			cost, sneaking, _ := moveCost(w, col, ents, nx, ny, nz, cfg)
 			if cost < 0 {
 				continue
@@ -180,6 +232,9 @@ func tryMove(w *world.Module, col *collisions.Module, ents *entities.Module,
 	gScore map[[3]int]float64, openSet *nodeHeap,
 	cfg simulationConfig,
 ) {
+	if edgeBlocked(cfg, current, nx, ny, nz) {
+		return
+	}
 	cx, cz := current.X, current.Z
 
 	cost, sneaking, destFy := moveCost(w, col, ents, nx, ny, nz, cfg)
@@ -192,7 +247,13 @@ func tryMove(w *world.Module, col *collisions.Module, ents *entities.Module,
 		height = cfg.sneakingHeight
 	}
 
-	if !canPassBetween(w, col, cx, cz, nx, nz, srcFy, destFy, height, cfg) {
+	if math.Abs(srcFy-destFy) < 0.08 {
+		// Level endpoints are not proof of a level edge: a diagonal bed/slab
+		// corner can step the sweep up and leave it floating over the goal.
+		if !walkCorridor(w, col, float64(cx)+0.5, srcFy, float64(cz)+0.5, float64(nx)+0.5, destFy, float64(nz)+0.5, sneaking, cfg) {
+			return
+		}
+	} else if !canPassBetween(w, col, cx, cz, nx, nz, srcFy, destFy, height, cfg) {
 		return
 	}
 
@@ -222,11 +283,17 @@ func tryDoorMove(w *world.Module, col *collisions.Module, _ *entities.Module,
 	gScore map[[3]int]float64, openSet *nodeHeap,
 	cfg simulationConfig,
 ) {
+	if edgeBlocked(cfg, current, nx, ny, nz) {
+		return
+	}
 	doorX, doorY, doorZ, found := findClosedWoodenDoor(w, nx, ny, nz)
 	if !found || !nodeLoaded(w, nx, ny, nz, cfg) {
 		return
 	}
 	if _, ok := standSurface(col, current.X, current.Y, current.Z, cfg.height, cfg); !ok {
+		return
+	}
+	if _, supported := col.SupportSurfaceY(nx, ny, nz, cfg.width); !supported || moveCostInner(w, nil, nx, ny, nz, false) < 0 {
 		return
 	}
 
@@ -273,6 +340,9 @@ func tryDiagonalMoves(w *world.Module, col *collisions.Module, ents *entities.Mo
 		// try same level and one below
 		for _, dy := range [2]int{0, -1} {
 			ny := cy + dy
+			if edgeBlocked(cfg, current, nx, ny, nz) {
+				continue
+			}
 
 			cost, sneaking, destFy := moveCost(w, col, ents, nx, ny, nz, cfg)
 			if cost < 0 {
@@ -288,7 +358,11 @@ func tryDiagonalMoves(w *world.Module, col *collisions.Module, ents *entities.Mo
 			if dy < 0 {
 				traverseY = srcFy
 			}
-			if !canPassBetween(w, col, cx, cz, nx, nz, srcFy, traverseY, height, cfg) {
+			if dy == 0 && math.Abs(srcFy-destFy) < 0.08 {
+				if !walkCorridor(w, col, float64(cx)+0.5, srcFy, float64(cz)+0.5, float64(nx)+0.5, destFy, float64(nz)+0.5, sneaking, cfg) {
+					continue
+				}
+			} else if !canPassBetween(w, col, cx, cz, nx, nz, srcFy, traverseY, height, cfg) {
 				continue
 			}
 
@@ -327,9 +401,18 @@ func tryParkourMoves(ctx context.Context, w *world.Module, col *collisions.Modul
 	landings := simulateJumps(ctx, col, w, cx, cy, cz, cfg)
 	for _, landing := range landings {
 		nx, ny, nz := landing.X, landing.Y, landing.Z
+		if edgeBlocked(cfg, current, nx, ny, nz) {
+			continue
+		}
 
 		// verify destination is standable
 		if !canStandAt(w, col, nx, ny, nz, cfg) {
+			continue
+		}
+		// Parkour solves discontinuities, not ordinary ground travel. A jump
+		// omits surface/crouch/descent costs and otherwise becomes a spurious
+		// shortcut on ice or down a perfectly walkable slope.
+		if ordinaryJumpCorridor(ctx, w, col, current, landing, cfg) {
 			continue
 		}
 
@@ -356,6 +439,43 @@ func tryParkourMoves(ctx context.Context, w *world.Module, col *collisions.Modul
 	}
 }
 
+// ordinaryJumpCorridor reuses the same cardinal edge generator as A*, including
+// its support, step-height, descent-column, sneak and failed-edge checks.
+func ordinaryJumpCorridor(ctx context.Context, w *world.Module, col *collisions.Module, from *PathNode, landing jumpLanding, cfg simulationConfig) bool {
+	dx, dz := landing.X-from.X, landing.Z-from.Z
+	if dx != 0 && dz != 0 {
+		return false
+	}
+	count := iabs(dx) + iabs(dz)
+	if count == 0 || count > simMaxTicks {
+		return false
+	}
+	ox, oz := sign(dx), sign(dz)
+	current := from
+	open := make(nodeHeap, 0, 24)
+	scores := make(map[[3]int]float64, 24)
+	for range count {
+		if ctx.Err() != nil {
+			return false
+		}
+		clear(scores)
+		open = open[:0]
+		tryCardinalMoves(w, col, nil, current, landing.X, landing.Y, landing.Z, scores, &open, cfg)
+		var next *PathNode
+		for _, candidate := range open {
+			if candidate.X == current.X+ox && candidate.Z == current.Z+oz && !candidate.InteractDoor &&
+				(next == nil || candidate.G < next.G) {
+				next = candidate
+			}
+		}
+		if next == nil {
+			return false
+		}
+		current = next
+	}
+	return current.Y == landing.Y
+}
+
 // heuristic uses Euclidean distance scaled by best-case speed (sprint cost).
 func heuristic(x1, y1, z1, x2, y2, z2 int) float64 {
 	dx := float64(x1 - x2)
@@ -374,6 +494,11 @@ func reconstructPath(node *PathNode) []PathNode {
 		path[i], path[j] = path[j], path[i]
 	}
 	return path
+}
+
+func edgeBlocked(cfg simulationConfig, from *PathNode, x, y, z int) bool {
+	_, blocked := cfg.blockedEdges[[6]int{from.X, from.Y, from.Z, x, y, z}]
+	return blocked
 }
 
 // nodeHeap implements heap.Interface for PathNode priority queue.

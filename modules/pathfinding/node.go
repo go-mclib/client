@@ -108,6 +108,53 @@ func terrainLoaded(w *world.Module, x, y, z, height float64, cfg simulationConfi
 	return true
 }
 
+// navigationLoaded includes the same horizontal safety halo as live physics.
+// A frontier must stop before that halo reaches an unknown chunk, not at the
+// last block center where the physics loop would freeze with residual input.
+func navigationLoaded(w *world.Module, x, y, z float64, cfg simulationConfig) bool {
+	if !terrainLoaded(w, x, y, z, cfg.height+cfg.maxStep, cfg) {
+		return false
+	}
+	half := cfg.width/2 + 1
+	for _, bx := range [2]int{int(math.Floor(x - half)), int(math.Floor(x + half))} {
+		for _, bz := range [2]int{int(math.Floor(z - half)), int(math.Floor(z + half))} {
+			if !w.IsChunkLoaded(int32(bx>>4), int32(bz>>4)) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// walkCorridor validates an actual-position shortcut, including support at
+// every quarter-block sample. Endpoint visibility alone cuts obstacle corners
+// and turns walk edges into unplanned jumps over holes.
+func walkCorridor(w *world.Module, col *collisions.Module, x, y, z, tx, ty, tz float64, sneaking bool, cfg simulationConfig) bool {
+	height := cfg.height
+	if sneaking {
+		height = cfg.sneakingHeight
+	}
+	steps := max(1, int(math.Ceil(math.Hypot(tx-x, tz-z)*4)))
+	dx, dz := (tx-x)/float64(steps), (tz-z)/float64(steps)
+	for range steps {
+		if !navigationLoaded(w, x+dx, y, z+dz, cfg) {
+			return false
+		}
+		ax, ay, az, _, _ := col.CollideMovement(x, y, z, cfg.width, height, dx, 0, dz, true, cfg.maxStep)
+		if math.Abs(ax-dx) > collisions.Epsilon || math.Abs(az-dz) > collisions.Epsilon {
+			return false
+		}
+		x, y, z = x+ax, y+ay, z+az
+		if !col.IsOnGround(x, y, z, cfg.width) || !col.CanFitAt(x, y, z, cfg.width, height) {
+			return false
+		}
+		if moveCostInner(w, nil, int(math.Floor(x)), int(math.Floor(y)), int(math.Floor(z)), sneaking) < 0 {
+			return false
+		}
+	}
+	return math.Abs(y-ty) < 0.08
+}
+
 func moveCostInner(w *world.Module, ents *entities.Module, x, y, z int, sneaking bool) float64 {
 	var cost float64
 	if sneaking {
@@ -123,6 +170,12 @@ func moveCostInner(w *world.Module, ents *entities.Module, x, y, z int, sneaking
 	// danger from block below (magma, campfire, ice)
 	belowState := w.GetBlock(x, y-1, z)
 	cost += blockDangerCost(belowState)
+	// Damage is not a cheap detour when the alternative is a long route.
+	// Keep slowdown surfaces as costs, but never deliberately walk onto fire,
+	// lava, cactus, magma or lit campfires.
+	if blockDangerCost(feetState) >= 50 || blockDangerCost(belowState) >= 50 {
+		return -1
+	}
 
 	// adjacent lava
 	for _, offset := range [4][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {

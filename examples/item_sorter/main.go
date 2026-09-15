@@ -231,7 +231,6 @@ func (sr *sorter) openChest(pos blockPos) bool {
 func (sr *sorter) interactChest(pos blockPos) bool {
 	if sr.inv.ContainerOpen() {
 		sr.closeContainer()
-		time.Sleep(100 * time.Millisecond)
 	}
 
 	sr.s.LookAt(float64(pos.x)+0.5, float64(pos.y)+0.5, float64(pos.z)+0.5)
@@ -254,8 +253,25 @@ func (sr *sorter) interactChest(pos blockPos) bool {
 
 	select {
 	case <-ch:
-		time.Sleep(100 * time.Millisecond)
-		return true
+		deadline := time.NewTimer(3 * time.Second)
+		defer deadline.Stop()
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			snapshot := sr.inv.Snapshot()
+			if snapshot.WindowID == 0 {
+				return false
+			}
+			if snapshot.Ready {
+				return true
+			}
+			select {
+			case <-ticker.C:
+			case <-deadline.C:
+				sr.c.Logger.Println("chest content synchronization timed out")
+				return false
+			}
+		}
 	case <-time.After(3 * time.Second):
 		sr.c.Logger.Printf("chest open timed out at %d,%d,%d", pos.x, pos.y, pos.z)
 		return false
@@ -269,7 +285,9 @@ func (sr *sorter) closeContainer() {
 	sr.mu.Lock()
 	sr.expectClose = true
 	sr.mu.Unlock()
-	_ = sr.inv.CloseContainer()
+	if err := sr.inv.CloseContainer(); err != nil {
+		sr.c.Logger.Printf("container close not confirmed: %v", err)
+	}
 }
 
 // drainCloseCh clears any stale server-close signals.
@@ -330,9 +348,9 @@ func (sr *sorter) debounceItems() bool {
 }
 
 // depositItem stores all stacks of itemID into the open container.
-// Returns (moved, full): moved is how many stacks were stored,
-// full is true if the chest ran out of space before all stacks were stored.
-func (sr *sorter) depositItem(itemID int32) (moved int, full bool) {
+// Returns (moved, blocked): moved counts fully transferred stacks; blocked
+// means some source remains (full destination, rejection, or interrupted transfer).
+func (sr *sorter) depositItem(itemID int32) (moved int, blocked bool) {
 	slotCount := sr.inv.ContainerSlotCount()
 	for i := range 36 {
 		if !sr.inv.ContainerOpen() {
@@ -342,33 +360,15 @@ func (sr *sorter) depositItem(itemID int32) (moved int, full bool) {
 		if item == nil || item.IsEmpty() || item.ID != itemID {
 			continue
 		}
-		if !sr.containerHasSpace(itemID) {
-			sr.c.Logger.Println("chest is full")
-			return moved, true
-		}
 		viewIdx := slotCount + i
 		sr.c.Logger.Printf("  storing %s x%d", items.ItemName(item.ID), item.Count)
 		if err := sr.inv.ContainerShiftClick(viewIdx); err != nil {
 			sr.c.Logger.Printf("  shift-click failed: %v", err)
-			continue
+			return moved, true
 		}
 		moved++
-		time.Sleep(50 * time.Millisecond)
 	}
 	return moved, false
-}
-
-func (sr *sorter) containerHasSpace(itemID int32) bool {
-	for i := range sr.inv.ContainerSlotCount() {
-		cs := sr.inv.ContainerSlot(i)
-		if cs == nil || cs.IsEmpty() {
-			return true
-		}
-		if cs.ID == itemID && cs.Components != nil && cs.Count < cs.Components.MaxStackSize {
-			return true
-		}
-	}
-	return false
 }
 
 func (sr *sorter) takeAllFromContainer() int {
@@ -386,7 +386,6 @@ func (sr *sorter) takeAllFromContainer() int {
 			continue
 		}
 		taken++
-		time.Sleep(50 * time.Millisecond)
 	}
 	return taken
 }
@@ -540,11 +539,11 @@ func (sr *sorter) depositAll() {
 				continue
 			}
 			for _, id := range itemIDs {
-				moved, full := sr.depositItem(id)
+				moved, blocked := sr.depositItem(id)
 				if moved > 0 {
 					sr.c.Logger.Printf("stored %d stacks of %s", moved, items.ItemName(id))
 				}
-				if full {
+				if blocked {
 					overflowIDs = append(overflowIDs, id)
 				}
 				if !sr.inv.ContainerOpen() {

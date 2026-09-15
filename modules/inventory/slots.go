@@ -1,11 +1,5 @@
 package inventory
 
-import (
-	"hash/crc32"
-
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
-)
-
 const (
 	ModuleName = "inventory"
 	TotalSlots = 46
@@ -23,8 +17,6 @@ const (
 	PlayerInvSlots     = 36 // main(27) + hotbar(9) appended to every container view
 )
 
-var crc32c = crc32.MakeTable(crc32.Castagnoli)
-
 // playerInvToContainer maps an Inventory.java slot index to the InventoryMenu
 // container slot index used by the protocol.
 func playerInvToContainer(invSlot int) int {
@@ -40,25 +32,4 @@ func playerInvToContainer(invSlot int) int {
 	default:
 		return -1
 	}
-}
-
-// slotToHashed converts a raw protocol Slot to a HashedSlot for use in
-// client-to-server click packets. Component data is replaced with CRC32C hashes.
-func slotToHashed(s ns.Slot) ns.HashedSlot {
-	if s.IsEmpty() {
-		return ns.EmptyHashedSlot()
-	}
-	hs := ns.HashedSlot{
-		Present: true,
-		ItemID:  s.ItemID,
-		Count:   s.Count,
-	}
-	for _, comp := range s.Components.Add {
-		hs.Components.Add = append(hs.Components.Add, ns.HashedComponent{
-			ID:   comp.ID,
-			Hash: ns.Int32(crc32.Checksum(comp.Data, crc32c)),
-		})
-	}
-	hs.Components.Remove = s.Components.Remove
-	return hs
 }

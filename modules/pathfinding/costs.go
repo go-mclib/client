@@ -27,7 +27,7 @@ const (
 	playerSneakingHeight = collisions.PlayerSneakingHeight
 	eyeHeight            = self.EyeHeight
 
-	safeFallDistance = 4
+	safeFallDistance = 3
 )
 
 // pre-computed costs

@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/go-mclib/client"
@@ -57,6 +58,28 @@ func main() {
 		}
 
 		msg := strings.TrimSpace(string(d.Body.Content))
+		// Coordinates need not be in render distance: terrain is streamed in
+		// bounded segments while this one operation retains the ultimate goal.
+		fields := strings.Fields(msg)
+		if len(fields) == 4 && strings.EqualFold(fields[0], "goto") {
+			var goal [3]float64
+			for i := range goal {
+				value, err := strconv.ParseFloat(fields[i+1], 64)
+				if err != nil {
+					ch.SendMessage("Usage: goto <x> <y> <z>")
+					return
+				}
+				goal[i] = value
+			}
+			if err := pf.NavigateTo(goal[0], goal[1], goal[2]); err != nil {
+				ch.SendMessage(fmt.Sprintf("Navigation rejected: %v", err))
+			}
+			return
+		}
+		if strings.EqualFold(msg, "stop") {
+			pf.Stop()
+			return
+		}
 		if !strings.EqualFold(msg, "come") {
 			return
 		}

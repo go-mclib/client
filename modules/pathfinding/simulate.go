@@ -116,6 +116,9 @@ func jumpTerrain(w *world.Module, x, y, z, nx, ny, nz float64, cfg simulationCon
 				if !loaded {
 					return false
 				}
+				if blockDangerCost(state) >= 50 {
+					return false
+				}
 				id, props := blocks.StateProperties(int(state))
 				if props["waterlogged"] == "true" {
 					return false

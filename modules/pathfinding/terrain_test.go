@@ -23,6 +23,7 @@ func navigationTerrain(t *testing.T) (*Module, *chunks.ChunkColumn) {
 	c := client.New("", "navigation-test", false)
 	c.SetState(jp.StatePlay)
 	m := New()
+	m.client = c
 	m.self, m.world, m.collisions, m.physics = self.New(), world.New(), collisions.New(), physics.New()
 	c.Register(m.self)
 	c.Register(m.world)
@@ -32,6 +33,9 @@ func navigationTerrain(t *testing.T) (*Module, *chunks.ChunkColumn) {
 		t.Fatal(err)
 	}
 	if err := m.physics.Wire(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Wire(); err != nil {
 		t.Fatal(err)
 	}
 	column := chunks.NewColumn(0, 0)
@@ -136,21 +140,36 @@ func TestJumpRejectsUnknownSweptTerrainAndCancelledContext(t *testing.T) {
 	}
 }
 
-func TestNoProgressCannotReplanSameWallRouteForever(t *testing.T) {
+func TestFailedEdgeIsExcludedFromRecoveryRoute(t *testing.T) {
 	m, _ := navigationTerrain(t)
+	defer m.Stop()
 	m.navigationContext = context.Background()
 	m.navigating = true
-	m.path = []PathNode{{X: 5, Y: 64, Z: 8}}
-	m.goalX, m.goalY, m.goalZ = 5.5, 64, 8.5
+	m.path = []PathNode{{X: 4, Y: 64, Z: 8}, {X: 5, Y: 64, Z: 8}}
+	m.pathIndex = 1
+	m.goalX, m.goalY, m.goalZ = 7.5, 64, 8.5
 	m.bestWaypointDistance = math.Inf(1)
 	m.physics.SetInput(1, 0, false)
-	// Sliding sideways or being corrected back never improves target distance.
-	for i := 0; i < 45 && m.navigating; i++ {
-		m.detectStuck(1 + float64(i%2)*0.1)
+	m.mu.Lock()
+	for range 43 {
+		m.detectStuck(1)
 	}
+	cfg := m.simulationConfig()
+	cfg.blockedEdges = m.blockedEdges
+	m.mu.Unlock()
 	forward, strafe, jump := m.physics.Input()
-	if m.navigating || forward != 0 || strafe != 0 || jump {
-		t.Fatal("unchanged route kept resetting progress and driving into the wall")
+	if forward != 0 || strafe != 0 || jump {
+		t.Fatal("failed edge retained movement input")
+	}
+	path, err := findPath(context.Background(), m.world, m.collisions, nil, 4, 64, 8, 7, 64, 8, 1000, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i < len(path); i++ {
+		a, b := path[i-1], path[i]
+		if a.X == 4 && a.Z == 8 && b.X == 5 && b.Z == 8 {
+			t.Fatal("recovery repeated the rejected edge")
+		}
 	}
 }
 
