@@ -28,6 +28,8 @@ github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f h1:Y/CXytFA4m6
 github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f/go.mod h1:vw97MGsxSvLiUE2X8qFplwetxpGLQrlU1Q9AUEIzCaM=
 github.com/go-mclib/data v0.0.0-20260915044945-8957c18fe1a8 h1:6DEVRDdQ7DQ2AAL4Hf3da14Kg5cwR6TfLQMS7VpT0Ao=
 github.com/go-mclib/data v0.0.0-20260915044945-8957c18fe1a8/go.mod h1:7zjLTB2KwMiQVcRXrxK2m+2ssYgxOeUmY6311bLVD9Y=
+github.com/go-mclib/data v0.0.0-20260916164751-62db3b240f53 h1:YAx6Tb4QTRs1lVYAUzdsEmhkGOljXu0Xg7u1FM14b7U=
+github.com/go-mclib/data v0.0.0-20260916164751-62db3b240f53/go.mod h1:7zjLTB2KwMiQVcRXrxK2m+2ssYgxOeUmY6311bLVD9Y=
 github.com/go-mclib/protocol v0.0.0-20260915044803-070acbb8d0aa h1:54ZpGhHOI6+QArIqY8O/Wh6HHOza11LSkTlahF3CNdQ=
 github.com/go-mclib/protocol v0.0.0-20260915044803-070acbb8d0aa/go.mod h1:vapFPL9o6TXBXusIpzO5LILlZm4RC9k2l+6LTnXJZAQ=
 github.com/go-mclib/protocol v0.0.0-20260915052648-6c01ecdcc533 h1:o8Q0GSnvrDgia0vWsFdmgJOMRWpQbGfzboRB1H9HVfQ=

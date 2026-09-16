@@ -158,6 +158,7 @@ func (m *Module) handleChunkData(pkt *jp.WirePacket) {
 	cx, cz := int32(d.ChunkX), int32(d.ChunkZ)
 	key := ChunkKey(cx, cz)
 	m.mu.Lock()
+	m.clearChunkBlockEntitiesLocked(cx, cz)
 	m.chunks[key] = column
 	// store block entities from chunk data
 	for _, be := range column.BlockEntities {
@@ -167,7 +168,7 @@ func (m *Module) handleChunkData(pkt *jp.WirePacket) {
 		if c, ok := be.Data.(nbt.Compound); ok {
 			m.blockEntities[[3]int{x, y, z}] = &BlockEntityData{
 				Type: int32(be.Type),
-				Data: c,
+				Data: cloneNBT(c).(nbt.Compound),
 			}
 		}
 	}
@@ -186,14 +187,9 @@ func (m *Module) handleUnloadChunk(pkt *jp.WirePacket) {
 
 	cx, cz := int32(d.ChunkX), int32(d.ChunkZ)
 	key := ChunkKey(cx, cz)
-	baseX, baseZ := int(cx)*16, int(cz)*16
 	m.mu.Lock()
 	delete(m.chunks, key)
-	for key := range m.blockEntities {
-		if key[0] >= baseX && key[0] < baseX+16 && key[2] >= baseZ && key[2] < baseZ+16 {
-			delete(m.blockEntities, key)
-		}
-	}
+	m.clearChunkBlockEntitiesLocked(cx, cz)
 	m.mu.Unlock()
 
 	for _, cb := range m.onChunkUnload {
@@ -226,20 +222,11 @@ func (m *Module) handleBlockUpdate(pkt *jp.WirePacket) {
 		return
 	}
 
-	chunkX, chunkZ := chunks.ChunkPos(int(d.Location.X), int(d.Location.Z))
-
 	bx, by, bz := int(d.Location.X), int(d.Location.Y), int(d.Location.Z)
 	stateID := int32(d.BlockId)
 
 	m.mu.Lock()
-	chunk := m.chunks[ChunkKey(chunkX, chunkZ)]
-	if chunk != nil {
-		chunk.SetBlockState(bx, by, bz, stateID)
-	}
-	// clean up stale block entity when block changes to air
-	if stateID == 0 {
-		delete(m.blockEntities, [3]int{bx, by, bz})
-	}
+	m.updateBlockLocked(bx, by, bz, stateID)
 	m.mu.Unlock()
 
 	for _, cb := range m.onBlockUpdate {
@@ -256,24 +243,12 @@ func (m *Module) handleSectionBlocksUpdate(pkt *jp.WirePacket) {
 	sectionX, sectionY, sectionZ := chunks.DecodeSectionPosition(int64(d.ChunkSectionPosition))
 
 	m.mu.Lock()
-	chunk := m.chunks[ChunkKey(sectionX, sectionZ)]
-	if chunk != nil {
-		sectionIndex := chunk.SectionIndex(int(sectionY) * 16)
-		if sectionIndex >= 0 && sectionIndex < len(chunk.Sections) {
-			section := chunk.Sections[sectionIndex]
-			if section != nil {
-				for _, block := range d.Blocks {
-					stateID, localX, localY, localZ := chunks.DecodeBlockEntry(int64(block))
-					section.SetBlockState(localX, localY, localZ, stateID)
-					if stateID == 0 {
-						wx := int(sectionX)*16 + localX
-						wy := int(sectionY)*16 + localY
-						wz := int(sectionZ)*16 + localZ
-						delete(m.blockEntities, [3]int{wx, wy, wz})
-					}
-				}
-			}
-		}
+	for _, block := range d.Blocks {
+		stateID, localX, localY, localZ := chunks.DecodeBlockEntry(int64(block))
+		wx := int(sectionX)*16 + localX
+		wy := int(sectionY)*16 + localY
+		wz := int(sectionZ)*16 + localZ
+		m.updateBlockLocked(wx, wy, wz, stateID)
 	}
 	m.mu.Unlock()
 

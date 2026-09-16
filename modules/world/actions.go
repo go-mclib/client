@@ -2,6 +2,7 @@ package world
 
 import (
 	"github.com/go-mclib/data/chunks"
+	"github.com/go-mclib/nbt"
 )
 
 // GetBlock returns the block state ID at the given world coordinates.
@@ -57,9 +58,13 @@ func (m *Module) GetLoadedChunkCount() int {
 	return len(m.chunks)
 }
 
-// GetBlockEntity returns the block entity data at the given position, or nil.
+// GetBlockEntity returns an independent snapshot, or nil if none was observed.
 func (m *Module) GetBlockEntity(x, y, z int) *BlockEntityData {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.blockEntities[[3]int{x, y, z}]
+	entity := m.blockEntities[[3]int{x, y, z}]
+	if entity == nil {
+		return nil
+	}
+	return &BlockEntityData{Type: entity.Type, Data: cloneNBT(entity.Data).(nbt.Compound)}
 }
