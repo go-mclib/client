@@ -26,8 +26,8 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f h1:Y/CXytFA4m6baUTXGLOoWe4PQhGxaX0KpnayAqC48p4=
 github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f/go.mod h1:vw97MGsxSvLiUE2X8qFplwetxpGLQrlU1Q9AUEIzCaM=
-github.com/go-mclib/data v0.0.0-20260917140843-753463987910 h1:FPtUONFsH+koiONqkE32W/nV8sXfwQWatLlDX1VxwpI=
-github.com/go-mclib/data v0.0.0-20260917140843-753463987910/go.mod h1:D43SOOubpRSZTAKkUCf/yP4xNLxRtHu2AGUTSyT4X7E=
+github.com/go-mclib/data v0.0.0-20260917142459-7b93e934effb h1:OVqlqe4Hu9wvtRbAXkfgMquA+sjhJUCDuqmNGEYITM8=
+github.com/go-mclib/data v0.0.0-20260917142459-7b93e934effb/go.mod h1:D43SOOubpRSZTAKkUCf/yP4xNLxRtHu2AGUTSyT4X7E=
 github.com/go-mclib/protocol v0.0.0-20260917131707-73d35259594b h1:lpXpSAoce8RfQr5GwB+v3YS12ebtz75kgNzs7vvBSbA=
 github.com/go-mclib/protocol v0.0.0-20260917131707-73d35259594b/go.mod h1:vapFPL9o6TXBXusIpzO5LILlZm4RC9k2l+6LTnXJZAQ=
 github.com/lucasb-eyer/go-colorful v1.3.0 h1:2/yBRLdWBZKrf7gB40FoiKfAWYQ0lqNcbuQwVHXptag=
