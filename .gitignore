@@ -7,3 +7,6 @@ minecraft_source
 integration_tests/*.jar
 integration_tests/*/
 !integration_tests/*/server.properties
+
+go.work
+go.work.sum

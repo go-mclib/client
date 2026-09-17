@@ -66,8 +66,7 @@ This project is a work in progress. It was made to learn more about the Minecraf
 
 - [`go-mclib/data`](https://github.com/go-mclib/data)
 - [`go-mclib/protocol`](https://github.com/go-mclib/protocol)
-
-The current dependency chain also uses the unpublished `github.com/go-mclib/nbt` workspace module. Consumers must supply that module locally; GraceBot retains its existing local replacement.
+- [`go-mclib/nbt`](https://github.com/go-mclib/nbt)
 
 ## Usage
 

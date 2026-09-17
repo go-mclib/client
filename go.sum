@@ -26,10 +26,12 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f h1:Y/CXytFA4m6baUTXGLOoWe4PQhGxaX0KpnayAqC48p4=
 github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f/go.mod h1:vw97MGsxSvLiUE2X8qFplwetxpGLQrlU1Q9AUEIzCaM=
-github.com/go-mclib/data v0.0.0-20260917142459-7b93e934effb h1:OVqlqe4Hu9wvtRbAXkfgMquA+sjhJUCDuqmNGEYITM8=
-github.com/go-mclib/data v0.0.0-20260917142459-7b93e934effb/go.mod h1:D43SOOubpRSZTAKkUCf/yP4xNLxRtHu2AGUTSyT4X7E=
-github.com/go-mclib/protocol v0.0.0-20260917131707-73d35259594b h1:lpXpSAoce8RfQr5GwB+v3YS12ebtz75kgNzs7vvBSbA=
-github.com/go-mclib/protocol v0.0.0-20260917131707-73d35259594b/go.mod h1:vapFPL9o6TXBXusIpzO5LILlZm4RC9k2l+6LTnXJZAQ=
+github.com/go-mclib/data v0.0.0-20260917155106-4cca9d7f011f h1:GgTdmW3+DBzLmllxJbfICLT16+dpJDpn5t6/N2UNSFA=
+github.com/go-mclib/data v0.0.0-20260917155106-4cca9d7f011f/go.mod h1:x55BrZk7eS+Ede0FUOICw5QEREyucIFSMB0GQAuirzc=
+github.com/go-mclib/nbt v0.1.0 h1:QoUm5C59yOHEhrVqCKLgJN9FC1ZUViUvboVkwOv045A=
+github.com/go-mclib/nbt v0.1.0/go.mod h1:+x+ZNoaxWssfBPMDC+7KOwitLjtePY3Wt/HqRMciRWc=
+github.com/go-mclib/protocol v0.0.0-20260917154622-8c6e1640304a h1:fy5cs0EP6nOB0JDWAwGozUei1UwNtZMskw7pnKuIPtA=
+github.com/go-mclib/protocol v0.0.0-20260917154622-8c6e1640304a/go.mod h1:efK3tqUfPkyhH0gdQp6KmUfQ/QAWW2R2E0p1zJ+08xg=
 github.com/lucasb-eyer/go-colorful v1.3.0 h1:2/yBRLdWBZKrf7gB40FoiKfAWYQ0lqNcbuQwVHXptag=
 github.com/lucasb-eyer/go-colorful v1.3.0/go.mod h1:R4dSotOR9KMtayYi1e77YzuveK+i7ruzyGqttikkLy0=
 github.com/mattn/go-isatty v0.0.20 h1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWEY=
