@@ -2,10 +2,13 @@ package protocol
 
 import (
 	"bytes"
+	"slices"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/go-mclib/client"
+	"github.com/go-mclib/data"
 	"github.com/go-mclib/data/packet_ids"
 	"github.com/go-mclib/data/packets"
 	"github.com/go-mclib/protocol/crypto"
@@ -15,7 +18,7 @@ import (
 
 const (
 	ModuleName      = "protocol"
-	ProtocolVersion = 776 // 26.2
+	ProtocolVersion = data.ProtocolVersion
 )
 
 // Module drives the client through login -> configuration -> play.
@@ -31,6 +34,10 @@ type Module struct {
 	tags         *packets.S2CUpdateTagsConfiguration
 	featureFlags []ns.Identifier
 	knownPacks   []packets.KnownPack
+
+	effectsMu     sync.RWMutex
+	postEffects   []ns.Identifier
+	onPostEffects []func(effects []ns.Identifier)
 }
 
 func New() *Module {
@@ -43,6 +50,7 @@ func (m *Module) Init(c *client.Client) {
 	m.client = c
 	c.OnConnect(m.onConnect)
 	c.OnTransfer(m.Reset)
+	c.OnDisconnect(m.Reset)
 }
 
 func (m *Module) Reset() {
@@ -50,6 +58,7 @@ func (m *Module) Reset() {
 	m.tags = nil
 	m.featureFlags = nil
 	m.knownPacks = nil
+	m.setPostEffects(nil)
 }
 
 // From retrieves the protocol module from a client.
@@ -79,6 +88,27 @@ func (m *Module) FeatureFlags() []ns.Identifier {
 // KnownPacks returns the negotiated known packs from configuration.
 func (m *Module) KnownPacks() []packets.KnownPack {
 	return m.knownPacks
+}
+
+// PostEffects returns an independent snapshot of the active post-processing effects.
+func (m *Module) PostEffects() []ns.Identifier {
+	m.effectsMu.RLock()
+	defer m.effectsMu.RUnlock()
+	return slices.Clone(m.postEffects)
+}
+
+// OnPostEffects observes replacement lists in configuration and play; empty clears.
+func (m *Module) OnPostEffects(cb func(effects []ns.Identifier)) {
+	m.onPostEffects = append(m.onPostEffects, cb)
+}
+
+func (m *Module) setPostEffects(effects []ns.Identifier) {
+	m.effectsMu.Lock()
+	m.postEffects = slices.Clone(effects)
+	m.effectsMu.Unlock()
+	for _, cb := range m.onPostEffects {
+		cb(slices.Clone(effects))
+	}
 }
 
 func (m *Module) onConnect() {
@@ -200,6 +230,11 @@ func (m *Module) handleConfiguration(pkt *jp.WirePacket) {
 
 	// parse and store typed config state
 	switch pkt.PacketID {
+	case packet_ids.S2CPostEffectsConfigurationID:
+		var d packets.S2CPostEffectsConfiguration
+		if pkt.ReadInto(&d) == nil {
+			m.setPostEffects(d.Effects)
+		}
 	case packet_ids.S2CRegistryDataID:
 		var d packets.S2CRegistryData
 		if err := pkt.ReadInto(&d); err == nil {
@@ -273,6 +308,11 @@ func (m *Module) handlePlay(pkt *jp.WirePacket) {
 	c := m.client
 
 	switch pkt.PacketID {
+	case packet_ids.S2CPostEffectsPlayID:
+		var d packets.S2CPostEffectsPlay
+		if pkt.ReadInto(&d) == nil {
+			m.setPostEffects(d.Effects)
+		}
 	case packet_ids.S2CDisconnectPlayID:
 		var d packets.S2CDisconnectPlay
 		if err := pkt.ReadInto(&d); err == nil {

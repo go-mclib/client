@@ -38,6 +38,7 @@ type Module struct {
 	onChunkLoad         []func(x, z int32)
 	onChunkUnload       []func(x, z int32)
 	onBlockUpdate       []func(x, y, z int, stateID int32)
+	onTransientBlock    []func(x, y, z int, stateID int32)
 	onViewDistChange    []func(distance int32)
 	onCenterChunkChange []func(x, z int32)
 }
@@ -104,6 +105,11 @@ func (m *Module) OnChunkUnload(cb func(x, z int32)) { m.onChunkUnload = append(m
 func (m *Module) OnBlockUpdate(cb func(x, y, z int, stateID int32)) {
 	m.onBlockUpdate = append(m.onBlockUpdate, cb)
 }
+
+// OnTransientBlock observes temporary visual blocks, never persistent world updates.
+func (m *Module) OnTransientBlock(cb func(x, y, z int, stateID int32)) {
+	m.onTransientBlock = append(m.onTransientBlock, cb)
+}
 func (m *Module) OnViewDistanceChange(cb func(distance int32)) {
 	m.onViewDistChange = append(m.onViewDistChange, cb)
 }
@@ -116,6 +122,13 @@ func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 		return
 	}
 	switch pkt.PacketID {
+	case packet_ids.S2CAddTransientBlockID:
+		var d packets.S2CAddTransientBlock
+		if pkt.ReadInto(&d) == nil {
+			for _, cb := range m.onTransientBlock {
+				cb(d.Location.X, d.Location.Y, d.Location.Z, int32(d.BlockState))
+			}
+		}
 	case packet_ids.S2CLevelChunkWithLightID:
 		m.handleChunkData(pkt)
 	case packet_ids.S2CForgetLevelChunkID:

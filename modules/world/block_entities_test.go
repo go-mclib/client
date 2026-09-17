@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/go-mclib/client"
 	"github.com/go-mclib/data/chunks"
 	"github.com/go-mclib/data/packets"
 	"github.com/go-mclib/data/registries"
@@ -67,6 +68,33 @@ func TestBlockEntityInvalidationOnBlockPackets(t *testing.T) {
 				t.Fatal("non-air replacement retained stale entity")
 			}
 		})
+	}
+}
+
+func TestTransientBlockIsVisualOnly(t *testing.T) {
+	c := client.New("unused", "test", false)
+	c.SetState(jp.StatePlay)
+	m := New()
+	c.Register(m)
+	column := discoveryColumn(m, 0, 0)
+	original := discoveryState(t, "oak_wall_sign", nil)
+	column.SetBlockState(1, 70, 1, original)
+	m.blockEntities[[3]int{1, 70, 1}] = signFixture(nbt.String("retained"), nbt.String(""))
+	updates := 0
+	m.OnBlockUpdate(func(_, _, _ int, _ int32) { updates++ })
+	var visual [4]int
+	m.OnTransientBlock(func(x, y, z int, state int32) { visual = [4]int{x, y, z, int(state)} })
+	replacement := discoveryState(t, "stone", nil)
+	wire, err := jp.ToWire(&packets.S2CAddTransientBlock{Location: ns.Position{X: 1, Y: 70, Z: 1}, BlockState: ns.VarInt(replacement)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.HandlePacket(wire)
+	if visual != [4]int{1, 70, 1, int(replacement)} {
+		t.Fatalf("transient event lost: %v", visual)
+	}
+	if updates != 0 || m.GetBlock(1, 70, 1) != original || m.GetBlockEntity(1, 70, 1) == nil {
+		t.Fatal("temporary visual changed authoritative blocks or block entities")
 	}
 }
 

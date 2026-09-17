@@ -11,9 +11,9 @@ import (
 func (c *Client) BreakBlock(x, y, z int, face int8, start bool) error {
 	var status ns.VarInt
 	if start {
-		status = 0 // started digging
+		status = packets.PlayerActionStartDestroyBlock
 	} else {
-		status = 2 // finished digging
+		status = packets.PlayerActionStopDestroyBlock
 	}
 	return c.WritePacket(&packets.C2SPlayerAction{
 		Status:   status,
@@ -26,7 +26,17 @@ func (c *Client) BreakBlock(x, y, z int, face int8, start bool) error {
 // CancelBreakBlock cancels the current block breaking action.
 func (c *Client) CancelBreakBlock(x, y, z int, face int8) error {
 	return c.WritePacket(&packets.C2SPlayerAction{
-		Status:   1, // cancelled digging
+		Status:   packets.PlayerActionAbortDestroyBlock,
+		Location: ns.Position{X: x, Y: y, Z: z},
+		Face:     ns.Int8(face),
+		Sequence: ns.VarInt(c.NextBISequence()),
+	})
+}
+
+// ChangeBreakDirection updates the face of the block currently being mined.
+func (c *Client) ChangeBreakDirection(x, y, z int, face int8) error {
+	return c.WritePacket(&packets.C2SPlayerAction{
+		Status:   packets.PlayerActionChangeDestroyDirection,
 		Location: ns.Position{X: x, Y: y, Z: z},
 		Face:     ns.Int8(face),
 		Sequence: ns.VarInt(c.NextBISequence()),
@@ -54,9 +64,9 @@ func (c *Client) InteractBlock(x, y, z int, face int8, hand int8, cursorX, curso
 	return c.PlaceBlock(x, y, z, face, hand, cursorX, cursorY, cursorZ)
 }
 
-// SwingArm swings the player's arm (animation).
-func (c *Client) SwingArm(hand int8) error {
-	return c.WritePacket(&packets.C2SSwing{Hand: ns.VarInt(hand)})
+// Punch performs a main-hand air attack and resets the attack cooldown.
+func (c *Client) Punch() error {
+	return c.WritePacket(&packets.C2SPunch{})
 }
 
 // SetCreativeSlot sets an inventory slot to the given item (creative mode only).
@@ -77,9 +87,9 @@ func (c *Client) SetHeldSlot(slot int16) error {
 func (c *Client) DropItem(dropStack bool) error {
 	var status ns.VarInt
 	if dropStack {
-		status = 3
+		status = packets.PlayerActionDropAllItems
 	} else {
-		status = 4
+		status = packets.PlayerActionDropItem
 	}
 	return c.WritePacket(&packets.C2SPlayerAction{
 		Status:   status,

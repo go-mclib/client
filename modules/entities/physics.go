@@ -12,6 +12,7 @@ import (
 	"github.com/go-mclib/data/packets"
 	"github.com/go-mclib/data/registries"
 	jp "github.com/go-mclib/protocol/java_protocol"
+	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
 )
 
 // IsBoat identifies registered AbstractBoat types, including bamboo rafts.
@@ -42,23 +43,113 @@ func decodeEntityDelta(base float64, delta int16) float64 {
 }
 
 func (e *Entity) moveTo(x, y, z float64, yaw, pitch float32, absolute bool) {
-	if e.interpolationSteps > 0 && e.X == x && e.Y == y && e.Z == z && e.Yaw == yaw && e.Pitch == pitch {
+	e.movePath(packets.PositionPath{X: ns.Float64(x), Y: ns.Float64(y), Z: ns.Float64(z)}, yaw, pitch, absolute)
+}
+
+func (e *Entity) moveDelta(delta packets.VecDelta, yaw, pitch float32) {
+	if len(delta.Steps) == 0 {
+		e.moveTo(decodeEntityDelta(e.X, int16(delta.X)), decodeEntityDelta(e.Y, int16(delta.Y)), decodeEntityDelta(e.Z, int16(delta.Z)), yaw, pitch, false)
+		return
+	}
+	path := packets.PositionPath{Steps: make([]packets.PositionStep, len(delta.Steps))}
+	x, y, z := e.X, e.Y, e.Z
+	for i, step := range delta.Steps {
+		x = decodeEntityDelta(x, int16(step.X))
+		y = decodeEntityDelta(y, int16(step.Y))
+		z = decodeEntityDelta(z, int16(step.Z))
+		path.Steps[i] = packets.PositionStep{X: ns.Float64(x), Y: ns.Float64(y), Z: ns.Float64(z), TickOffset: step.Ticks}
+	}
+	e.movePath(path, yaw, pitch, false)
+}
+
+// Living entities use Java's queued SteppedInterpolationHandler, including
+// tick offsets and backlog catch-up. Boats retain linear interpolation.
+func (e *Entity) movePath(path packets.PositionPath, yaw, pitch float32, absolute bool) {
+	x, y, z := float64(path.X), float64(path.Y), float64(path.Z)
+	if len(path.Steps) > 0 {
+		last := path.Steps[len(path.Steps)-1]
+		x, y, z = float64(last.X), float64(last.Y), float64(last.Z)
+	}
+	samePosition := e.X == x && e.Y == y && e.Z == z
+	if (e.interpolationSteps > 0 || len(e.positionSteps) > 0) && samePosition && e.Yaw == yaw && e.Pitch == pitch {
 		return
 	}
 	e.X, e.Y, e.Z, e.Yaw, e.Pitch = x, y, z, yaw, pitch
-	e.startInterpolation(absolute)
-}
-
-func (e *Entity) startInterpolation(absolute bool) {
-	dx, dy, dz := e.X-e.physicsX, e.Y-e.physicsY, e.Z-e.physicsZ
-	// Shulkers explicitly return null from getInterpolation(). Other living
-	// entities and boats use InterpolationHandler's three simulation steps.
-	if e.TypeName == "minecraft:shulker" || !dataentities.IsAttackable(e.TypeName) && !IsBoat(e.TypeName) || absolute && dx*dx+dy*dy+dz*dz > 4096 {
-		e.physicsX, e.physicsY, e.physicsZ = e.X, e.Y, e.Z
+	dx, dy, dz := x-e.physicsX, y-e.physicsY, z-e.physicsZ
+	living := dataentities.IsAttackable(e.TypeName)
+	if e.TypeName == "minecraft:shulker" || !living && !IsBoat(e.TypeName) || absolute && dx*dx+dy*dy+dz*dz > 4096 {
+		e.physicsX, e.physicsY, e.physicsZ = x, y, z
 		e.interpolationSteps = 0
+		e.positionSteps = nil
+		e.remainingTicks = 0
+		e.interpolationSpeed = 1
 		return
 	}
-	e.interpolationSteps = 3
+	if !living {
+		e.interpolationSteps = 3
+		return
+	}
+	if len(e.positionSteps) == 0 {
+		e.stepStartX, e.stepStartY, e.stepStartZ = e.physicsX, e.physicsY, e.physicsZ
+		e.currentStepTicks = 1
+		e.remainingTicks = 0
+		e.interpolationSpeed = 1
+	}
+	if len(path.Steps) == 0 || samePosition {
+		e.positionSteps = append(e.positionSteps, packets.PositionStep{
+			X: ns.Float64(x), Y: ns.Float64(y), Z: ns.Float64(z), TickOffset: ns.VarInt(e.interpolationInterval()),
+		})
+		e.remainingTicks += e.interpolationInterval()
+	} else {
+		if len(e.positionSteps) == 0 {
+			e.positionSteps = path.Steps
+		} else {
+			e.positionSteps = append(e.positionSteps, path.Steps...)
+		}
+		for _, step := range path.Steps {
+			e.remainingTicks += float32(step.TickOffset)
+		}
+	}
+}
+
+func (e *Entity) interpolationInterval() float32 {
+	// EntityTypes overrides the default three-tick interval for these living types.
+	switch e.TypeName {
+	case "minecraft:allay", "minecraft:mannequin", "minecraft:player":
+		return 2
+	default:
+		return 3
+	}
+}
+
+func (e *Entity) tickPositionPath() {
+	for len(e.positionSteps) > 0 {
+		step := e.positionSteps[0]
+		offset := float32(step.TickOffset)
+		if e.currentStepTicks < offset {
+			alpha := float64(e.currentStepTicks / offset)
+			e.physicsX = e.stepStartX + alpha*(float64(step.X)-e.stepStartX)
+			e.physicsY = e.stepStartY + alpha*(float64(step.Y)-e.stepStartY)
+			e.physicsZ = e.stepStartZ + alpha*(float64(step.Z)-e.stepStartZ)
+			break
+		}
+		e.currentStepTicks -= offset
+		e.stepStartX, e.stepStartY, e.stepStartZ = float64(step.X), float64(step.Y), float64(step.Z)
+		e.positionSteps = e.positionSteps[1:]
+	}
+	if len(e.positionSteps) == 0 {
+		e.physicsX, e.physicsY, e.physicsZ = e.X, e.Y, e.Z
+	}
+	interval := e.interpolationInterval()
+	targetSpeed := max(e.remainingTicks/interval, float32(1))
+	e.interpolationSpeed += (float32(1) / interval) * (targetSpeed - e.interpolationSpeed)
+	ticks := e.interpolationSpeed
+	if ticks >= e.remainingTicks {
+		ticks = e.remainingTicks
+		e.interpolationSpeed = 1
+	}
+	e.currentStepTicks += ticks
+	e.remainingTicks -= ticks
 }
 
 // TickPhysics advances remote collision positions once per client game tick.
@@ -69,7 +160,9 @@ func (m *Module) TickPhysics() {
 	defer m.mu.Unlock()
 	for _, id := range m.entityOrder {
 		e := m.entities[id]
-		if e.interpolationSteps > 0 {
+		if len(e.positionSteps) > 0 {
+			e.tickPositionPath()
+		} else if e.interpolationSteps > 0 {
 			alpha := 1 / float64(e.interpolationSteps)
 			e.physicsX += alpha * (e.X - e.physicsX)
 			e.physicsY += alpha * (e.Y - e.physicsY)

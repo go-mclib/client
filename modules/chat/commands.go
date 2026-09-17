@@ -10,6 +10,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/go-mclib/data/registries"
 	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
 )
 
@@ -114,10 +115,11 @@ func parseCommandTree(data []byte) (*commandTree, error) {
 				return nil, e
 			}
 			n.parser = int(id)
-			// Static protocol 776 argument_type registry. Unknown parsers cannot be
-			// skipped because their property payload length is not on the wire.
-			switch n.parser {
-			case 1, 2, 3, 4:
+			// Resolve the generated registry before reading parser-specific properties.
+			// Unknown parsers cannot be skipped: payload lengths are not on the wire.
+			parser := registries.CommandArgumentType.ByID(int32(id))
+			switch parser {
+			case "brigadier:float", "brigadier:double", "brigadier:integer", "brigadier:long":
 				flags, e := b.ReadByte()
 				if e != nil {
 					return nil, e
@@ -126,7 +128,7 @@ func parseCommandTree(data []byte) (*commandTree, error) {
 					return nil, fmt.Errorf("invalid numeric parser flags")
 				}
 				size := 4
-				if n.parser == 2 || n.parser == 4 {
+				if parser == "brigadier:double" || parser == "brigadier:long" {
 					size = 8
 				}
 				for mask := byte(1); mask <= 2; mask <<= 1 {
@@ -136,7 +138,7 @@ func parseCommandTree(data []byte) (*commandTree, error) {
 						}
 					}
 				}
-			case 5:
+			case "brigadier:string":
 				mode, e := b.ReadVarInt()
 				if e != nil {
 					return nil, e
@@ -145,27 +147,27 @@ func parseCommandTree(data []byte) (*commandTree, error) {
 					return nil, fmt.Errorf("invalid string parser mode")
 				}
 				n.stringMode = int(mode)
-			case 6:
+			case "minecraft:entity":
 				if n.entityFlags, e = b.ReadByte(); e != nil {
 					return nil, e
 				}
 				if n.entityFlags&^byte(3) != 0 {
 					return nil, fmt.Errorf("invalid entity parser flags")
 				}
-			case 31:
+			case "minecraft:score_holder":
 				if _, e = b.ReadByte(); e != nil {
 					return nil, e
 				}
-			case 43:
+			case "minecraft:time":
 				if _, e = b.ReadInt32(); e != nil {
 					return nil, e
 				}
-			case 44, 45, 46, 47, 48:
+			case "minecraft:resource_or_tag", "minecraft:resource_or_tag_key", "minecraft:resource", "minecraft:resource_key", "minecraft:resource_selector":
 				if _, e = b.ReadString(32767); e != nil {
 					return nil, e
 				}
 			default:
-				if n.parser < 0 || n.parser > 56 {
+				if parser == "" {
 					return nil, fmt.Errorf("unsupported command parser ID %d", n.parser)
 				}
 			}
@@ -209,7 +211,7 @@ func (t *commandTree) hasSignable(id int, seen map[int]bool) bool {
 	}
 	seen[id] = true
 	n := t.nodes[id]
-	if n.parser == 20 {
+	if int32(n.parser) == registries.CommandArgumentType.Get("minecraft:message") {
 		return true
 	}
 	if n.redirect >= 0 && n.redirect != t.root && t.hasSignable(n.redirect, seen) {
@@ -298,7 +300,7 @@ func (t *commandTree) walk(id int, input string, pos int, args []signableArgumen
 	if err != nil {
 		return nil, fmt.Errorf("argument %s: %w", c.name, err)
 	}
-	if c.parser == 20 {
+	if int32(c.parser) == registries.CommandArgumentType.Get("minecraft:message") {
 		if commandUTF16Length(c.name) > 16 || len(args) >= 8 {
 			return nil, fmt.Errorf("signature name or count exceeds protocol limit")
 		}
@@ -321,8 +323,8 @@ func commandUTF16Length(s string) int {
 // Only parsers whose acceptance and span we can establish are used before a
 // signed descendant. Other commands still use the ordinary unsigned path.
 func commandArgumentEnd(n commandNode, input string, start int, allowSelectors bool) (int, error) {
-	switch n.parser {
-	case 20:
+	switch registries.CommandArgumentType.ByID(int32(n.parser)) {
+	case "minecraft:message":
 		if commandUTF16Length(input[start:]) > 256 {
 			return 0, fmt.Errorf("message exceeds 256 UTF-16 units")
 		}
@@ -338,12 +340,12 @@ func commandArgumentEnd(n commandNode, input string, start int, allowSelectors b
 			}
 		}
 		return len(input), nil
-	case 6:
+	case "minecraft:entity":
 		if !allowSelectors && input[start] == '@' {
 			return 0, fmt.Errorf("entity selector permission is not established; use a player name")
 		}
 		return commandEntityEnd(input, start, n.entityFlags)
-	case 5:
+	case "brigadier:string":
 		if n.stringMode == 2 {
 			return len(input), nil
 		}
@@ -352,7 +354,7 @@ func commandArgumentEnd(n commandNode, input string, start int, allowSelectors b
 			err = fmt.Errorf("expected string")
 		}
 		return end, err
-	case 0:
+	case "brigadier:bool":
 		end, token, err := commandString(input, start, false)
 		if err == nil && token != "true" && token != "false" {
 			err = fmt.Errorf("expected boolean")

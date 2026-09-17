@@ -10,12 +10,13 @@ import (
 	dataentities "github.com/go-mclib/data/entities"
 	"github.com/go-mclib/data/packets"
 	"github.com/go-mclib/data/registries"
+	jp "github.com/go-mclib/protocol/java_protocol"
 	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
 )
 
 func TestPhysicsPositionInterpolatesRetargetsAndSnaps(t *testing.T) {
 	m := New()
-	e := &Entity{ID: 1, TypeName: "minecraft:player", Width: 0.6, Height: 1.8}
+	e := &Entity{ID: 1, TypeName: "minecraft:oak_boat", Width: 0.6, Height: 1.8}
 	m.trackEntityLocked(e)
 	e.moveTo(3, 0, 0, 0, 0, false)
 	m.TickPhysics()
@@ -54,6 +55,83 @@ func TestRelativePositionUsesJavaCodecRounding(t *testing.T) {
 	}
 	if got := decodeEntityDelta(base, 0); got != base {
 		t.Fatalf("zero delta quantized an unchanged coordinate: %g", got)
+	}
+}
+
+func TestSteppedMovementPreservesCollisionRouteAndVelocity(t *testing.T) {
+	m := New()
+	e := &Entity{ID: 1, TypeName: "minecraft:zombie", Width: 0.6, Height: 1.8, VelX: 0.5, VelY: -0.25, VelZ: 0.75}
+	m.trackEntityLocked(e)
+	m.handleMoveEntityPos(equipmentPacket(t, &packets.S2CMoveEntityPos{
+		EntityId: 1, Delta: packets.VecDelta{Steps: []packets.VecDeltaStep{
+			{Ticks: 2, X: 8192},
+			{Ticks: 1, Z: 12288},
+		}},
+	}))
+	if target := m.GetEntity(1); target.X != 2 || target.Z != 3 {
+		t.Fatalf("relative steps did not accumulate into codec target: %+v", target)
+	}
+	for _, position := range [][2]float64{{1, 0}, {2, 0}, {2, 3}} {
+		m.TickPhysics()
+		got := m.PhysicsEntitiesInAABB(position[0]-0.1, 0, position[1]-0.1, position[0]+0.1, 2, position[1]+0.1)
+		if len(got) != 1 || got[0].X != position[0] || got[0].Z != position[1] {
+			t.Fatalf("stepped collision route skipped %v: %+v", position, got)
+		}
+	}
+	m.handleEntityPositionSync(equipmentPacket(t, &packets.S2CEntityPositionSync{
+		EntityId: 1, Path: packets.PositionPath{Steps: []packets.PositionStep{
+			{X: 4, Z: 3, TickOffset: 2}, {X: 4, Z: 6, TickOffset: 1},
+		}},
+	}))
+	m.TickPhysics()
+	got := m.PhysicsEntitiesInAABB(2.9, 0, 2.9, 3.1, 2, 3.1)
+	if len(got) != 1 || got[0].X != 3 || got[0].Z != 3 {
+		t.Fatalf("absolute path collapsed into its endpoint: %+v", got)
+	}
+	m.handleEntityPositionSync(equipmentPacket(t, &packets.S2CEntityPositionSync{
+		EntityId: 1, Path: packets.PositionPath{X: 100},
+	}))
+	if target := m.GetEntity(1); target.VelX != 0.5 || target.VelY != -0.25 || target.VelZ != 0.75 {
+		t.Fatalf("position-only sync changed velocity: %+v", target)
+	}
+	got = m.PhysicsEntitiesInAABB(99.9, 0, -0.1, 100.1, 2, 0.1)
+	if len(got) != 1 || got[0].X != 100 {
+		t.Fatalf("large sync retained queued path: %+v", got)
+	}
+}
+
+func TestLivingMovementQueuesTargetsAndUsesEntityInterval(t *testing.T) {
+	m := New()
+	e := &Entity{ID: 1, TypeName: "minecraft:player", Width: 0.6, Height: 1.8}
+	m.trackEntityLocked(e)
+	e.moveTo(2, 0, 0, 0, 0, false)
+	m.TickPhysics()
+	if got := m.PhysicsEntitiesInAABB(0.9, 0, -1, 1.1, 2, 1); len(got) != 1 || got[0].X != 1 {
+		t.Fatalf("player did not use its two-tick update interval: %+v", got)
+	}
+	e.moveTo(4, 0, 0, 0, 0, false)
+	m.TickPhysics()
+	if got := m.PhysicsEntitiesInAABB(1.9, 0, -1, 2.1, 2, 1); len(got) != 1 || got[0].X != 2 {
+		t.Fatalf("new target replaced unfinished queued segment: %+v", got)
+	}
+}
+
+func TestSwingAnimationDispatchIsSeparateFromCriticalAnimation(t *testing.T) {
+	c := client.New("unused", "test", false)
+	c.SetState(jp.StatePlay)
+	m := New()
+	c.Register(m)
+	var swing [4]int32
+	var animate uint8 = 255
+	m.OnSwingAnimation(func(entityID, hand, kind, duration int32) { swing = [4]int32{entityID, hand, kind, duration} })
+	m.OnEntityAnimation(func(_ int32, kind uint8) { animate = kind })
+	m.HandlePacket(equipmentPacket(t, &packets.S2CSwingAnimation{EntityId: 7, Hand: 1, Type: 2, Duration: 0}))
+	if swing != [4]int32{7, 1, 2, 0} || animate != 255 {
+		t.Fatalf("swing hand/type/zero duration lost or treated as Animate: %v %d", swing, animate)
+	}
+	m.HandlePacket(equipmentPacket(t, &packets.S2CAnimate{EntityId: 7, Animation: 1}))
+	if animate != 1 || swing != [4]int32{7, 1, 2, 0} {
+		t.Fatal("critical animation overwrote swing event")
 	}
 }
 

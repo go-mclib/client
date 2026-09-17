@@ -214,11 +214,8 @@ func (m *Module) handlePlayerPosition(pkt *jp.WirePacket) {
 	if !suppress {
 		_ = m.client.WritePacket(&packets.C2SAcceptTeleportation{
 			TeleportId: d.TeleportId,
-		})
-		_ = m.client.WritePacket(&packets.C2SMovePlayerPosRot{
-			X: ns.Float64(x), FeetY: ns.Float64(y), Z: ns.Float64(z),
+			X:          ns.Float64(x), Y: ns.Float64(y), Z: ns.Float64(z),
 			Yaw: ns.Float32(yaw), Pitch: ns.Float32(pitch),
-			Flags: 0,
 		})
 	}
 

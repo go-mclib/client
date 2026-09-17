@@ -2,6 +2,8 @@
 
 A higher-level framework for building Minecraft (chat)bots with Go.
 
+Targets Minecraft Java Edition **26.3 (protocol 777)** only.
+
 ## Dependency Chain
 
 ```markdown
@@ -21,7 +23,7 @@ The SDK provides session-scoped chat, world, inventory, physics, navigation and 
 - [x] Authoritative inventory and open-container snapshots; stack moves, splits, swaps, sorting, exact drops, hotbar selection and cursor recovery;
 - [ ] Menu-specific crafting and automated trade execution;
 - [x] Loaded-entity observation, interaction and cooldown-aware combat;
-- [x] Vanilla 26.2 collision shapes, stair stepping, fluids, entity pushing and special-block movement;
+- [x] Vanilla 26.3 collision shapes, stair stepping, fluids, entity pushing and special-block movement;
 - [x] Cancellable, streamed-terrain A* navigation with velocity-aware steering and changed-terrain recovery.
 
 Context-aware sends reject stale sessions and bound queue waits. Packet submission alone is not proof of a server-side effect; consumers must observe the appropriate world, inventory or entity confirmation.
@@ -40,11 +42,15 @@ Physics tick callbacks run under the client's packet-state boundary. External co
 
 Tracked entity equipment applies both partial `SetEquipment` packets and vanilla's `SWAP_HANDS` entity event (55). Hand swaps preserve unknown versus explicitly empty slots and leave armor unchanged. Fetch a fresh entity snapshot to observe updates; previously returned snapshots remain isolated, point-in-time copies.
 
+Remote living-entity collision positions follow timed movement paths (including accumulated relative steps), independently of packet-facing target coordinates and authoritative velocity. `entities.Module.OnSwingAnimation` reports entity ID, hand, animation type and duration; `OnEntityAnimation` reports wake-up (0), critical (1) and magic-critical (2), not swings. `Client.Punch()` sends a main-hand air punch, not a cosmetic swing after a successful attack or use.
+
+`protocol.Module.PostEffects()` returns the current replacement list of visual effects from configuration/play; `OnPostEffects` observes changes and empty-list clearing. `world.Module.OnTransientBlock` observes temporary visual blocks without modifying persistent chunk or block-entity storage.
+
 `inventory.Module.Snapshot()` returns an independent active-menu view with `WindowID`, `Revision`, `Ready`, slots and cursor. Window zero uses the 46 player protocol slots; open menus use their own slot order followed by player storage where applicable. Use `Execute(ctx, Operation{...})` outside packet/physics callbacks. Supply the observed window and revision to reject stale operations. Each click requests a full server resynchronization and waits for authoritative contents before proceeding; slot counts are never optimistically changed. `confirmed`, `sent`, `partial` and `failed` distinguish observation from submission. Hotbar selection has no vanilla acknowledgement and therefore reports `sent`. Interrupted work is not rolled back; inspect the returned snapshot, recover cursor contents with `From: -1`, and never blindly retry a drop.
 
 Legacy `ContainerClick`, `RightClick`, `ShiftClick` and `SwapToHotbar` also wait for authoritative synchronization. Call them outside dispatch callbacks. `RequestHotbarSwap` and `SelectHotbar` remain nonblocking for queued physics-tick senders; they reject conflicting transactions and fence stale sessions. Generic transactions do not promise crafting/output-slot side effects or unknown menu layouts. Container opening is a separate interaction, not a read of hidden contents.
 
-`interaction.UseBlock` and `interaction.UseEntity` right-click using main/offhand, observed geometry, interaction-range attributes and loaded line of sight. Pass the captured session's send callback; a physics caller can queue packets without waiting for the network. Packet submission is not confirmation: observe a server-opened menu, block change, passenger update or another appropriate effect. Entity interaction uses the vanilla 26.2 interaction record, not the old attack/interact discriminator.
+`interaction.UseBlock` and `interaction.UseEntity` right-click using main/offhand, observed geometry, interaction-range attributes and loaded line of sight. Pass the captured session's send callback; a physics caller can queue packets without waiting for the network. Packet submission is not confirmation: observe a server-opened menu, block change, passenger update or another appropriate effect. Entity interaction uses the vanilla 26.3 interaction record, not the old attack/interact discriminator. Successful attack/use requests do not send an additional punch.
 
 `world.FindBlocks(ctx, BlockQuery{...})` returns nearest loaded matches by block-center distance, exact block names and/or attached wall-sign text. Radius is 1–128 and limit 1–50. `Complete` reports observation coverage; `Truncated` reports omitted known matches, not unknown terrain. `ContainerLabels` follows ordinary wall-sign facing to its supporting container and returns independent front/back text snapshots. Standing/hanging or merely nearby signs do not label containers; sign text is untrusted data. `GetBlockEntity` also returns an owned snapshot.
 

@@ -24,21 +24,24 @@ type Entity struct {
 	TypeID   int32
 	TypeName string
 
-	X, Y, Z                      float64
-	Yaw, Pitch                   float32
-	HeadYaw                      float32
-	VelX, VelY, VelZ             float64
-	OnGround                     bool
-	Width, Height                float64
-	EyeHeight                    float64
-	SpawnData                    int32 // extra data from S2CAddEntity (e.g. block state for falling blocks)
-	Metadata                     entities.Metadata
-	Equipment                    map[uint8]EquipmentItem
-	physicsX, physicsY, physicsZ float64
-	interpolationSteps           int
-	peekAmount                   float32
-	scoreName                    string
-	scale                        float32 // zero until the server synchronizes the scale attribute
+	X, Y, Z                                              float64
+	Yaw, Pitch                                           float32
+	HeadYaw                                              float32
+	VelX, VelY, VelZ                                     float64
+	OnGround                                             bool
+	Width, Height                                        float64
+	EyeHeight                                            float64
+	SpawnData                                            int32 // extra data from S2CAddEntity (e.g. block state for falling blocks)
+	Metadata                                             entities.Metadata
+	Equipment                                            map[uint8]EquipmentItem
+	physicsX, physicsY, physicsZ                         float64
+	interpolationSteps                                   int
+	positionSteps                                        []packets.PositionStep
+	stepStartX, stepStartY, stepStartZ                   float64
+	currentStepTicks, remainingTicks, interpolationSpeed float32
+	peekAmount                                           float32
+	scoreName                                            string
+	scale                                                float32 // zero until the server synchronizes the scale attribute
 }
 
 type Module struct {
@@ -62,6 +65,7 @@ type Module struct {
 	onEntityVelocity  []func(e *Entity)
 	onEntityDamage    []func(entityID, sourceTypeID, sourceCauseID, sourceDirectID int32)
 	onEntityAnimation []func(entityID int32, animation uint8)
+	onSwingAnimation  []func(entityID, hand, animationType, duration int32)
 	onHurtAnimation   []func(entityID int32, yaw float32)
 }
 
@@ -120,6 +124,12 @@ func (m *Module) OnEntityDamage(cb func(entityID, sourceTypeID, sourceCauseID, s
 func (m *Module) OnEntityAnimation(cb func(entityID int32, animation uint8)) {
 	m.onEntityAnimation = append(m.onEntityAnimation, cb)
 }
+
+// OnSwingAnimation observes hand (0 main, 1 off), type (0 none, 1 whack,
+// 2 stab), and duration in ticks separately from wake/critical animations.
+func (m *Module) OnSwingAnimation(cb func(entityID, hand, animationType, duration int32)) {
+	m.onSwingAnimation = append(m.onSwingAnimation, cb)
+}
 func (m *Module) OnHurtAnimation(cb func(entityID int32, yaw float32)) {
 	m.onHurtAnimation = append(m.onHurtAnimation, cb)
 }
@@ -168,6 +178,8 @@ func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 		m.handleDamageEvent(pkt)
 	case packet_ids.S2CAnimateID:
 		m.handleAnimate(pkt)
+	case packet_ids.S2CSwingAnimationID:
+		m.handleSwingAnimation(pkt)
 	case packet_ids.S2CHurtAnimationID:
 		m.handleHurtAnimation(pkt)
 	}
@@ -280,7 +292,7 @@ func (m *Module) handleMoveEntityPos(pkt *jp.WirePacket) {
 	m.mu.Lock()
 	e := m.entities[int32(d.EntityId)]
 	if e != nil {
-		e.moveTo(decodeEntityDelta(e.X, int16(d.DeltaX)), decodeEntityDelta(e.Y, int16(d.DeltaY)), decodeEntityDelta(e.Z, int16(d.DeltaZ)), e.Yaw, e.Pitch, false)
+		e.moveDelta(d.Delta, e.Yaw, e.Pitch)
 		e.OnGround = bool(d.OnGround)
 		if len(m.onEntityMove) > 0 {
 			e = cloneEntity(e)
@@ -304,7 +316,7 @@ func (m *Module) handleMoveEntityPosRot(pkt *jp.WirePacket) {
 	m.mu.Lock()
 	e := m.entities[int32(d.EntityId)]
 	if e != nil {
-		e.moveTo(decodeEntityDelta(e.X, int16(d.DeltaX)), decodeEntityDelta(e.Y, int16(d.DeltaY)), decodeEntityDelta(e.Z, int16(d.DeltaZ)), float32(d.Yaw.Degrees()), float32(d.Pitch.Degrees()), false)
+		e.moveDelta(d.Delta, float32(d.Yaw.Degrees()), float32(d.Pitch.Degrees()))
 		e.OnGround = bool(d.OnGround)
 		if len(m.onEntityMove) > 0 {
 			e = cloneEntity(e)
@@ -368,10 +380,7 @@ func (m *Module) handleEntityPositionSync(pkt *jp.WirePacket) {
 	m.mu.Lock()
 	e := m.entities[int32(d.EntityId)]
 	if e != nil {
-		e.moveTo(float64(d.X), float64(d.Y), float64(d.Z), float32(d.Yaw), float32(d.Pitch), true)
-		e.VelX = float64(d.VelocityX)
-		e.VelY = float64(d.VelocityY)
-		e.VelZ = float64(d.VelocityZ)
+		e.movePath(d.Path, float32(d.Yaw), float32(d.Pitch), true)
 		e.OnGround = bool(d.OnGround)
 		if len(m.onEntityMove) > 0 {
 			e = cloneEntity(e)
@@ -423,6 +432,16 @@ func (m *Module) handleAnimate(pkt *jp.WirePacket) {
 
 	for _, cb := range m.onEntityAnimation {
 		cb(int32(d.EntityId), uint8(d.Animation))
+	}
+}
+
+func (m *Module) handleSwingAnimation(pkt *jp.WirePacket) {
+	var d packets.S2CSwingAnimation
+	if pkt.ReadInto(&d) != nil {
+		return
+	}
+	for _, cb := range m.onSwingAnimation {
+		cb(int32(d.EntityId), int32(d.Hand), int32(d.Type), int32(d.Duration))
 	}
 }
 

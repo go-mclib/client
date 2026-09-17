@@ -164,7 +164,7 @@ func getFluidFlow(w fluidBlockReader, kind uint8, bx, by, bz int) (flowX, flowY,
 		neighborHeight := float32(neighborAmount) / float32(9)
 		var distance float32
 		if neighborHeight == 0 {
-			if !block_shapes.BlocksMotion(state) {
+			if !block_shapes.BlocksFluidFlow(state) {
 				belowKind, belowAmount, _ := block_shapes.FluidState(w.GetBlock(nx, by-1, nz))
 				if belowKind == kind && belowAmount > 0 {
 					neighborHeight = float32(belowAmount) / float32(9)

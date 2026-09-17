@@ -115,11 +115,10 @@ func UseBlock(c *client.Client, x, y, z, hand int, send func(jp.Packet) error) (
 	if err != nil {
 		return result, err
 	}
-	_ = send(&packets.C2SSwing{Hand: ns.VarInt(hand)})
 	return result, nil
 }
 
-// UseEntity sends the 26.2 entity interaction record, including the hit point
+// UseEntity sends the 26.3 entity interaction record, including the hit point
 // relative to the entity and actual secondary-action state. It is not an attack.
 func UseEntity(c *client.Client, entityID int32, hand int, send func(jp.Packet) error) error {
 	me, w, col, err := modules(c, hand, send)
@@ -160,7 +159,6 @@ func UseEntity(c *client.Client, entityID int32, hand int, send func(jp.Packet) 
 	if err := send(&packets.C2SInteract{EntityId: ns.VarInt(entityID), Hand: ns.VarInt(hand), Location: ns.LpVec3{X: hx - e.X, Y: hy - e.Y, Z: hz - e.Z}, UsingSecondaryAction: ns.Boolean(me.Sneaking())}); err != nil {
 		return err
 	}
-	_ = send(&packets.C2SSwing{Hand: ns.VarInt(hand)})
 	return nil
 }
 

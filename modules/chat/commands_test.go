@@ -15,6 +15,7 @@ import (
 	chatsign "github.com/go-mclib/client/chat"
 	"github.com/go-mclib/data/packet_ids"
 	"github.com/go-mclib/data/packets"
+	"github.com/go-mclib/data/registries"
 	jp "github.com/go-mclib/protocol/java_protocol"
 	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
 )
@@ -51,7 +52,7 @@ func TestCommandArgumentSpansAndRedirect(t *testing.T) {
 	}
 }
 func TestCommandTreeRawDecodingAndInvalidBounds(t *testing.T) {
-	// root -> msg -> <message>, with a protocol 776 restricted literal flag.
+	// root -> msg -> <message>, with a restricted literal flag.
 	b := ns.NewWriter()
 	b.WriteVarInt(3)
 	b.WriteByte(0)
@@ -77,6 +78,33 @@ func TestCommandTreeRawDecodingAndInvalidBounds(t *testing.T) {
 	for _, bad := range [][]byte{{0}, {1, 0, 1, 2, 0}, append(append([]byte{}, b.Bytes()...), 1), b.Bytes()[:len(b.Bytes())-1]} {
 		if _, err := parseCommandTree(bad); err == nil {
 			t.Fatalf("malformed graph accepted: %x", bad)
+		}
+	}
+}
+
+func TestCommandTreeAcceptsNewRegistryParsersWithoutLosingAlignment(t *testing.T) {
+	b := ns.NewWriter()
+	names := []string{"minecraft:context_float_provider", "minecraft:context_int_provider", "minecraft:slot_source", "minecraft:dialog", "minecraft:feature", "minecraft:swing_animation", "minecraft:uuid"}
+	b.WriteVarInt(ns.VarInt(1 + len(names)))
+	b.WriteByte(0)
+	b.WriteVarInt(ns.VarInt(len(names)))
+	for i := range names {
+		b.WriteVarInt(ns.VarInt(i + 1))
+	}
+	for _, name := range names {
+		b.WriteByte(2)
+		b.WriteVarInt(0)
+		b.WriteString(ns.String(name))
+		b.WriteVarInt(ns.VarInt(registries.CommandArgumentType.Get(name)))
+	}
+	b.WriteVarInt(0)
+	tree, err := parseCommandTree(b.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, name := range names {
+		if tree.nodes[i+1].name != name {
+			t.Fatalf("singleton parser consumed the following node: %+v", tree.nodes[i+1])
 		}
 	}
 }
@@ -313,7 +341,7 @@ func TestRejectedCommandsDoNotAdvanceSigningChain(t *testing.T) {
 	pending := make([]byte, 256)
 	pending[0] = 7
 	signer.AddPending(pending)
-	// Missing permission state and level 1 are not selector grants in 26.2.
+	// Missing permission state and level 1 are not selector grants.
 	if err := m.SendCommand("msg @a hello"); err == nil {
 		t.Fatal("selector allowed without permission state")
 	}

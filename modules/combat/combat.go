@@ -246,10 +246,8 @@ func (m *Module) performAttack(e *entities.Entity) error {
 		m.attacking = false
 		return err
 	}
-	// Cooldown starts when the attack is accepted by the outgoing transport,
-	// even if the subsequent cosmetic swing cannot be queued.
+	// Cooldown starts when the attack is accepted by the outgoing transport.
 	m.ticksSinceLastAttack = 0
-	_ = m.queue(&packets.C2SSwing{Hand: 0})
 
 	return nil
 }

@@ -66,6 +66,8 @@ func cloneEntity(e *Entity) *Entity {
 		return nil
 	}
 	result := *e
+	// Interpolation queues belong to the live tracker, not observation snapshots.
+	result.positionSteps = nil
 	result.Metadata = slices.Clone(e.Metadata)
 	for i := range result.Metadata {
 		result.Metadata[i].Data = slices.Clone(result.Metadata[i].Data)

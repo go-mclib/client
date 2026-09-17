@@ -61,8 +61,8 @@ func TestItemUseVanillaWireAndNoPrediction(t *testing.T) {
 	if wire[0].PacketID != packet_ids.C2SUseItemID || !bytes.Equal(wire[0].Data, []byte{1, 1, 0x42, 0xb4, 0, 0, 0xc1, 0xf0, 0, 0}) {
 		t.Fatalf("wrong hand/sequence/current-aim wire packet: %+v", wire[0])
 	}
-	if wire[1].PacketID != packet_ids.C2SPlayerActionID || !bytes.Equal(wire[1].Data, []byte{5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}) {
-		t.Fatalf("release did not use action5/origin/down/sequence0: %+v", wire[1])
+	if wire[1].PacketID != packet_ids.C2SPlayerActionID || !bytes.Equal(wire[1].Data, []byte{6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}) {
+		t.Fatalf("release did not use action6/origin/down/sequence0: %+v", wire[1])
 	}
 	if me.UsingItem() || inv.GetOffhand().Count != 1 {
 		t.Fatal("sending use fabricated authoritative item use or consumption")

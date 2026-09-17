@@ -12,7 +12,7 @@ import (
 	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
 )
 
-// BeginItemUse submits one vanilla 26.2 use-item request with the current aim.
+// BeginItemUse submits one vanilla 26.3 use-item request with the current aim.
 // It neither repeats right clicks nor predicts use, consumption or ammunition.
 // hand is 0 (selected main hand) or 1 (offhand). send must be captured from the
 // caller's session and preserve ordering with ReleaseItemUse. The returned
@@ -41,7 +41,7 @@ func BeginItemUse(c *client.Client, hand int, send func(jp.Packet) error) (Submi
 	return result, send(&packets.C2SUseItem{Hand: ns.VarInt(hand), Sequence: ns.VarInt(result.Sequence), Yaw: ns.Float32(yaw), Pitch: ns.Float32(pitch)})
 }
 
-// ReleaseItemUse submits vanilla RELEASE_USE_ITEM: action 5, BlockPos.ZERO,
+// ReleaseItemUse submits vanilla RELEASE_USE_ITEM, BlockPos.ZERO,
 // Direction.DOWN, sequence 0. Release has no hand or new prediction sequence.
 // Use a captured, surviving session transport, not an already cancelled action
 // context. No current-client lookup is made: cleanup must not target a reconnect.
@@ -49,5 +49,5 @@ func ReleaseItemUse(send func(jp.Packet) error) error {
 	if send == nil {
 		return fmt.Errorf("captured session transport is required")
 	}
-	return send(&packets.C2SPlayerAction{Status: 5, Location: ns.Position{}, Face: 0, Sequence: 0})
+	return send(&packets.C2SPlayerAction{Status: packets.PlayerActionReleaseUseItem, Location: ns.Position{}, Face: 0, Sequence: 0})
 }
