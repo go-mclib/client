@@ -300,10 +300,27 @@ func (m *Module) handleEntityMotion(pkt *jp.WirePacket) {
 	}
 
 	m.mu.Lock()
-	m.velX = d.Velocity.X
-	m.velY = d.Velocity.Y
-	m.velZ = d.Velocity.Z
+	m.setVelocity(d.Velocity.X, d.Velocity.Y, d.Velocity.Z)
 	m.mu.Unlock()
+}
+
+// setVelocity applies server-authored velocity. Like Entity.setDeltaMovement it
+// drops non-finite vectors; beyond vanilla it caps the length, because LpVec3
+// carries up to 1.7e10 blocks/tick (knockback 255 + attack_knockback) and one
+// collision query would then scan that whole distance while holding the packet lock.
+func (m *Module) setVelocity(x, y, z float64) {
+	if !finite(x) || !finite(y) || !finite(z) {
+		return
+	}
+	if length := math.Hypot(math.Hypot(x, y), z); length > maxServerVelocity {
+		scale := maxServerVelocity / length
+		x, y, z = x*scale, y*scale, z*scale
+	}
+	m.velX, m.velY, m.velZ = x, y, z
+}
+
+func finite(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0)
 }
 
 func (m *Module) handleTeleport(d *packets.S2CPlayerPosition, oldYaw, oldPitch float32) {
@@ -314,28 +331,30 @@ func (m *Module) handleTeleport(d *packets.S2CPlayerPosition, oldYaw, oldPitch f
 		m.mu.Unlock()
 		return
 	}
+	vx, vy, vz := m.velX, m.velY, m.velZ
 	if flags&0x100 != 0 {
 		yaw, pitch := m.self.Rotation()
 		sinPitch, cosPitch := sinCos(float64(float32(float64(oldPitch-pitch) * (math.Pi / 180))))
-		m.velY, m.velZ = m.velY*cosPitch+m.velZ*sinPitch, m.velZ*cosPitch-m.velY*sinPitch
+		vy, vz = vy*cosPitch+vz*sinPitch, vz*cosPitch-vy*sinPitch
 		sinYaw, cosYaw := sinCos(float64(float32(float64(oldYaw-yaw) * (math.Pi / 180))))
-		m.velX, m.velZ = m.velX*cosYaw+m.velZ*sinYaw, m.velZ*cosYaw-m.velX*sinYaw
+		vx, vz = vx*cosYaw+vz*sinYaw, vz*cosYaw-vx*sinYaw
 	}
 	if flags&0x20 != 0 {
-		m.velX += float64(d.VelocityX)
+		vx += float64(d.VelocityX)
 	} else {
-		m.velX = float64(d.VelocityX)
+		vx = float64(d.VelocityX)
 	}
 	if flags&0x40 != 0 {
-		m.velY += float64(d.VelocityY)
+		vy += float64(d.VelocityY)
 	} else {
-		m.velY = float64(d.VelocityY)
+		vy = float64(d.VelocityY)
 	}
 	if flags&0x80 != 0 {
-		m.velZ += float64(d.VelocityZ)
+		vz += float64(d.VelocityZ)
 	} else {
-		m.velZ = float64(d.VelocityZ)
+		vz = float64(d.VelocityZ)
 	}
+	m.setVelocity(vx, vy, vz)
 	m.mu.Unlock()
 }
 

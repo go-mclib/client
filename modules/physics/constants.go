@@ -58,6 +58,9 @@ const (
 	slowFallingGravity   = 0.01
 	levitationPerLevel   = 0.05
 	levitationLerpFactor = 0.2
+
+	// not vanilla: cap on server-authored velocity length in blocks/tick (see setVelocity)
+	maxServerVelocity = 64.0
 )
 
 // cached effect protocol IDs from the mob_effect registry
