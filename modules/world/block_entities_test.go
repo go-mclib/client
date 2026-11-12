@@ -1,7 +1,6 @@
 package world
 
 import (
-	"context"
 	"testing"
 
 	"github.com/go-mclib/client"
@@ -9,8 +8,8 @@ import (
 	"github.com/go-mclib/data/packets"
 	"github.com/go-mclib/data/registries"
 	"github.com/go-mclib/nbt"
-	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	jp "github.com/go-mclib/protocol/javaproto"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 func TestBlockEntityInvalidationOnBlockPackets(t *testing.T) {
@@ -38,7 +37,7 @@ func TestBlockEntityInvalidationOnBlockPackets(t *testing.T) {
 						m.handleSectionBlocksUpdate(wire)
 					}
 				} else {
-					wire, err = jp.ToWire(&packets.S2CBlockUpdate{Location: ns.Position{X: -8, Y: 70, Z: -9}, BlockId: ns.VarInt(state)})
+					wire, err = jp.ToWire(&packets.S2CBlockUpdate{Location: ns.Position{X: -8, Y: 70, Z: -9}, BlockID: ns.VarInt(state)})
 					if err == nil {
 						m.handleBlockUpdate(wire)
 					}
@@ -73,7 +72,7 @@ func TestBlockEntityInvalidationOnBlockPackets(t *testing.T) {
 
 func TestTransientBlockIsVisualOnly(t *testing.T) {
 	c := client.New("unused", "test", false)
-	c.SetState(jp.StatePlay)
+	client.NewSimulator(c).SetState(jp.StatePlay)
 	m := New()
 	c.Register(m)
 	column := discoveryColumn(m, 0, 0)
@@ -125,13 +124,13 @@ func TestChunkReplacementClearsOnlyItsBlockEntities(t *testing.T) {
 
 func TestSingleUpdateDoesNotInventLoadedSection(t *testing.T) {
 	m := New()
-	m.chunks[ChunkKey(0, 0)] = chunks.NewColumn(0, 0)
-	wire, err := jp.ToWire(&packets.S2CBlockUpdate{Location: ns.Position{X: 8, Y: 70, Z: 8}, BlockId: 1})
+	m.chunks[chunkKey(0, 0)] = chunks.NewColumn(0, 0)
+	wire, err := jp.ToWire(&packets.S2CBlockUpdate{Location: ns.Position{X: 8, Y: 70, Z: 8}, BlockID: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	m.handleBlockUpdate(wire)
-	result, err := m.FindBlocks(context.Background(), BlockQuery{X: 8.5, Y: 70.5, Z: 8.5, Radius: 2, Names: []string{"air"}, Limit: 50})
+	result, err := m.FindBlocks(t.Context(), BlockQuery{X: 8.5, Y: 70.5, Z: 8.5, Radius: 2, Names: []string{"air"}, Limit: 50})
 	if err != nil || result.Complete || len(result.Blocks) != 0 {
 		t.Fatalf("single update invented air: %+v, %v", result, err)
 	}
@@ -157,18 +156,47 @@ func TestSignPacketMixedComponentListsAcrossChunkBoundary(t *testing.T) {
 		}}},
 	}
 	wire, err := jp.ToWire(&packets.S2CBlockEntityData{
-		Location: ns.Position{X: -1, Y: 70, Z: 8}, Type: ns.VarInt(registries.BlockEntityType.Get("minecraft:sign")), NbtData: data,
+		Location: ns.Position{X: -1, Y: 70, Z: 8}, Type: ns.VarInt(registries.BlockEntityType.Get("minecraft:sign")), NBTData: data,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	m.handleBlockEntityData(wire)
-	result, err := m.FindBlocks(context.Background(), BlockQuery{X: .5, Y: 70.5, Z: 8.5, Radius: 2, Label: "iron ingots!", Limit: 5})
+	result, err := m.FindBlocks(t.Context(), BlockQuery{X: .5, Y: 70.5, Z: 8.5, Radius: 2, Label: "iron ingots!", Limit: 5})
 	if err != nil || !result.Complete || len(result.Blocks) != 1 {
 		t.Fatalf("mixed component packet = %+v, %v", result, err)
 	}
 	label := result.Blocks[0].Labels[0]
 	if label.X != -1 || label.Front[1] != "second line" || label.Back[0] != "back" {
 		t.Fatalf("decoded attached label = %+v", label)
+	}
+}
+
+func TestChunkBlockEntitiesReturnsTrackedEntitiesAsClones(t *testing.T) {
+	m := New()
+	m.blockEntities[[3]int{-1, 70, -16}] = &BlockEntityData{Type: 7, Data: nbt.Compound{"Text": nbt.String("late sign")}}
+	m.blockEntities[[3]int{-16, 64, -1}] = &BlockEntityData{Type: 2, Data: nbt.Compound{"Items": nbt.List{ElementType: nbt.TagCompound}}}
+	m.blockEntities[[3]int{0, 64, -1}] = &BlockEntityData{Type: 3, Data: nbt.Compound{}}   // chunk (0, -1)
+	m.blockEntities[[3]int{-1, 64, -17}] = &BlockEntityData{Type: 3, Data: nbt.Compound{}} // chunk (-1, -2)
+
+	got := m.ChunkBlockEntities(-1, -1)
+	want := []ns.BlockEntity{
+		{PackedXZ: 0x0f, Y: 64, Type: 2},
+		{PackedXZ: 0xf0, Y: 70, Type: 7},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("ChunkBlockEntities = %+v, want %d entries", got, len(want))
+	}
+	for i := range want {
+		if got[i].PackedXZ != want[i].PackedXZ || got[i].Y != want[i].Y || got[i].Type != want[i].Type {
+			t.Fatalf("entry %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	got[1].Data.(nbt.Compound)["Text"] = nbt.String("mutated")
+	if text := m.blockEntities[[3]int{-1, 70, -16}].Data["Text"]; text != nbt.String("late sign") {
+		t.Fatalf("snapshot aliases live NBT: %v", text)
+	}
+	if got := m.ChunkBlockEntities(5, 5); len(got) != 0 {
+		t.Fatalf("empty chunk = %+v", got)
 	}
 }

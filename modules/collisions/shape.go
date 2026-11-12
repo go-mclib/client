@@ -3,9 +3,7 @@ package collisions
 import (
 	"math"
 
-	"github.com/go-mclib/data/block_shapes"
 	"github.com/go-mclib/data/blocks"
-	"github.com/go-mclib/data/hitboxes"
 )
 
 // A voxel shape keeps its original grid, not just its merged AABBs. Internal
@@ -13,7 +11,7 @@ import (
 // The parts/grid slices reference immutable generated data; collection allocates
 // only the collider list, never a world-coordinate copy of each block's boxes.
 type voxelShape struct {
-	parts                        []hitboxes.AABB
+	parts                        []blocks.AABB
 	coords                       [3][]float64
 	x, y, z                      float64
 	offsetBase, offsetX, offsetZ float64
@@ -66,14 +64,7 @@ func (s voxelShape) clip(box AABB, axis int, distance float64) float64 {
 	}
 	coords := s.coords[axis]
 	if len(coords) == 0 {
-		switch axis {
-		case 0:
-			return box.clipXCollide(s.box, distance)
-		case 1:
-			return box.clipYCollide(s.box, distance)
-		default:
-			return box.clipZCollide(s.box, distance)
-		}
+		return box.clipCollide(s.box, axis, distance)
 	}
 	minA, maxA := bounds(box, axis)
 	minB, maxB := bounds(box, (axis+1)%3)
@@ -100,11 +91,11 @@ func (s voxelShape) clip(box AABB, axis int, distance float64) float64 {
 			}
 			if distance > 0 {
 				if gap := plane - maxA; gap >= -Epsilon {
-					return math.Min(distance, gap)
+					return min(distance, gap)
 				}
 			} else {
 				if gap := plane - minA; gap <= Epsilon {
-					return math.Max(distance, gap)
+					return max(distance, gap)
 				}
 			}
 			return distance
@@ -113,20 +104,20 @@ func (s voxelShape) clip(box AABB, axis int, distance float64) float64 {
 	return distance
 }
 
-func (m *Module) collisionVoxel(state int32, x, y, z int, bottom float64) (voxelShape, bool) {
-	parts := m.collisionShape(state, y, bottom)
+func collisionVoxel(ctx playerContext, state int32, x, y, z int, bottom float64) (voxelShape, bool) {
+	parts := ctx.collisionShape(state, y, bottom)
 	if len(parts) == 0 {
 		return voxelShape{}, false
 	}
 	shape := voxelShape{parts: parts, x: float64(x), y: float64(y), z: float64(z)}
 	_, scaffold := scaffoldingBottom[state]
 	if state == powderSnowState || scaffold && len(parts) == 1 {
-		return voxelShape{box: localBox(parts[0]).Move(float64(x), float64(y), float64(z))}, true
+		return voxelShape{box: AABB(parts[0]).Move(float64(x), float64(y), float64(z))}, true
 	}
 	for axis := range 3 {
-		shape.coords[axis] = block_shapes.CollisionCoordinates(state, axis)
+		shape.coords[axis] = blocks.CollisionCoordinates(state, axis)
 	}
-	if block_shapes.HasLargeCollisionShape(state) {
+	if blocks.HasLargeCollisionShape(state) {
 		if limit, offset := positionalCollisionBlocks[blocks.StateBlockID(state)]; offset {
 			shape.offsetBase = limit // undo the dump's offset at BlockPos.ZERO
 			shape.offsetX, shape.offsetZ = blockPositionOffset(x, z, limit)
@@ -136,9 +127,9 @@ func (m *Module) collisionVoxel(state int32, x, y, z int, bottom float64) (voxel
 }
 
 var positionalCollisionBlocks = map[int32]float64{
-	blocks.BlockID("minecraft:bamboo"):            0.25,
-	blocks.BlockID("minecraft:pointed_dripstone"): 0.125,
-	blocks.BlockID("minecraft:sulfur_spike"):      0.125,
+	blocks.ID("minecraft:bamboo"):            0.25,
+	blocks.ID("minecraft:pointed_dripstone"): 0.125,
+	blocks.ID("minecraft:sulfur_spike"):      0.125,
 }
 
 func blockPositionOffset(x, z int, limit float64) (float64, float64) {
@@ -148,7 +139,7 @@ func blockPositionOffset(x, z int, limit float64) (float64, float64) {
 	seed >>= 16
 	offset := func(bits int64) float64 {
 		fraction := float32(bits&15) / float32(15)
-		return math.Max(-limit, math.Min(limit, (float64(fraction)-0.5)*0.5))
+		return max(-limit, min(limit, (float64(fraction)-0.5)*0.5))
 	}
 	return offset(seed), offset(seed >> 8)
 }

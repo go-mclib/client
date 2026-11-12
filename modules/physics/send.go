@@ -3,7 +3,7 @@ package physics
 import (
 	"github.com/go-mclib/client/modules/self"
 	"github.com/go-mclib/data/packets"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 // sendTickPackets sends input, position and tick-end packets at the end of a tick.
@@ -64,8 +64,8 @@ func (m *Module) sendPosition(s *self.Module) {
 			actionID = 1 // start sprinting
 		}
 		m.sendPacket(&packets.C2SPlayerCommand{
-			EntityId: ns.VarInt(s.EntityID()),
-			ActionId: actionID,
+			EntityID: ns.VarInt(s.EntityID()),
+			ActionID: actionID,
 		})
 	}
 

@@ -1,11 +1,15 @@
-package helpers
+// Package botcli bootstraps command-line bots: standard flags, a client with
+// the default modules, and an optional interactive terminal UI.
+package botcli
 
 import (
 	"context"
 	"flag"
+	"log"
 	"os"
 
 	"github.com/go-mclib/client"
+	"github.com/go-mclib/client/internal/tui"
 	"github.com/go-mclib/client/modules/chat"
 	"github.com/go-mclib/client/modules/collisions"
 	"github.com/go-mclib/client/modules/physics"
@@ -41,18 +45,16 @@ func RegisterFlags(f *Flags) {
 	flag.IntVar(&f.MaxReconnectAttempts, "reconnects", 5, "max reconnect attempts (-1 = infinite, 0 = none)")
 }
 
-// NewClient creates a client from parsed flags with default modules (protocol, self, world, chat).
+// NewClient creates a client from parsed flags with the default modules:
+// protocol, self, world, chat, playerlist, registry, collisions and physics.
 func NewClient(f Flags) *client.Client {
-	clientID := os.Getenv("AZURE_CLIENT_ID")
 	c := client.New(f.Address, f.Username, f.Online)
 	c.Verbose = f.Verbose
-	c.ClientID = clientID
-	c.Interactive = f.Interactive
+	c.ClientID = os.Getenv("AZURE_CLIENT_ID")
 	c.MaxReconnectAttempts = f.MaxReconnectAttempts
+	c.TreatTransferAsDisconnect = f.TreatTransferAsDisconnect
 
-	proto := protocol.New()
-	proto.TreatTransferAsDisconnect = f.TreatTransferAsDisconnect
-	c.Register(proto)
+	c.Register(protocol.New())
 	c.Register(self.New())
 	c.Register(world.New())
 	c.Register(chat.New())
@@ -64,9 +66,50 @@ func NewClient(f Flags) *client.Client {
 	return c
 }
 
-// Run connects and starts the client, logging errors.
-func Run(c *client.Client) {
-	if err := c.ConnectAndStart(context.Background()); err != nil {
+// Run connects and starts the client (interactively with -i), logging errors.
+func Run(c *client.Client, f Flags) {
+	var err error
+	if f.Interactive {
+		err = RunInteractive(context.Background(), c, 0)
+	} else {
+		err = c.ConnectAndStart(context.Background())
+	}
+	if err != nil {
 		c.Logger.Println(err)
+	}
+}
+
+// RunInteractive runs c like ConnectAndStart inside a terminal UI that shows
+// the log (keeping at most maxLogLines lines, 0 = all) and, once the client
+// reaches play, sends typed lines as chat messages or /commands. It replaces
+// c.Logger and returns when the UI exits or the client stops.
+func RunInteractive(ctx context.Context, c *client.Client, maxLogLines int) error {
+	program := tui.New(tui.Config{
+		Username:    c.Username,
+		Address:     c.Address,
+		MaxLogLines: maxLogLines,
+		SendChat:    c.SendChatMessage,
+		SendCommand: c.SendCommand,
+		Quit:        func() { _ = c.Disconnect(true) },
+	})
+	c.Logger = log.New(program.Writer(), "", log.LstdFlags)
+	c.OnPlay(program.EnableInput)
+
+	tuiDone := make(chan error, 1)
+	go func() { tuiDone <- program.Run() }()
+	clientDone := make(chan error, 1)
+	go func() { clientDone <- c.ConnectAndStart(ctx) }()
+
+	select {
+	case err := <-tuiDone:
+		_ = c.Disconnect(true)
+		if clientErr := <-clientDone; err == nil {
+			err = clientErr
+		}
+		return err
+	case err := <-clientDone:
+		program.Quit()
+		<-tuiDone
+		return err
 	}
 }

@@ -2,11 +2,11 @@ package self
 
 import (
 	"github.com/go-mclib/data/packets"
-	jp "github.com/go-mclib/protocol/java_protocol"
+	jp "github.com/go-mclib/protocol/javaproto"
 )
 
-// EffectInstance represents an active potion effect on the player.
-type EffectInstance struct {
+// effectInstance represents an active potion effect on the player.
+type effectInstance struct {
 	ID        int32 // protocol effect ID (registries.MobEffect)
 	Amplifier int32 // 0 = Level I, 1 = Level II, etc.
 	Duration  int32 // ticks remaining (-1 = infinite)
@@ -31,8 +31,9 @@ func (m *Module) EffectAmplifier(effectID int32) int32 {
 	return e.Amplifier
 }
 
-// TickEffects decrements durations and removes expired effects.
-// Matches vanilla MobEffectInstance.tickClient. Called once per tick by the physics module.
+// TickEffects decrements durations and removes expired effects, matching
+// vanilla MobEffectInstance.tickClient. The physics module drives it once per
+// client tick; do not call it otherwise, or effects expire faster than vanilla.
 func (m *Module) TickEffects() {
 	m.effectsMu.Lock()
 	defer m.effectsMu.Unlock()
@@ -49,22 +50,22 @@ func (m *Module) TickEffects() {
 
 func (m *Module) handleUpdateMobEffect(pkt *jp.WirePacket) {
 	var d packets.S2CUpdateMobEffect
-	if err := pkt.ReadInto(&d); err != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 
 	m.mu.RLock()
-	isUs := int32(d.EntityId) == m.entityID
+	isUs := int32(d.EntityID) == int32(m.login.EntityID)
 	m.mu.RUnlock()
 	if !isUs {
 		return
 	}
 
-	effectID := int32(d.EffectId)
+	effectID := int32(d.EffectID)
 	amp := int32(d.Amplifier)
 	dur := int32(d.Duration)
 	m.effectsMu.Lock()
-	m.activeEffects[effectID] = &EffectInstance{
+	m.activeEffects[effectID] = &effectInstance{
 		ID:        effectID,
 		Amplifier: amp,
 		Duration:  dur,
@@ -78,18 +79,18 @@ func (m *Module) handleUpdateMobEffect(pkt *jp.WirePacket) {
 
 func (m *Module) handleRemoveMobEffect(pkt *jp.WirePacket) {
 	var d packets.S2CRemoveMobEffect
-	if err := pkt.ReadInto(&d); err != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 
 	m.mu.RLock()
-	isUs := int32(d.EntityId) == m.entityID
+	isUs := int32(d.EntityID) == int32(m.login.EntityID)
 	m.mu.RUnlock()
 	if !isUs {
 		return
 	}
 
-	effectID := int32(d.EffectId)
+	effectID := int32(d.EffectID)
 	m.effectsMu.Lock()
 	delete(m.activeEffects, effectID)
 	m.effectsMu.Unlock()

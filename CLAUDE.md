@@ -4,11 +4,11 @@
 
 ## Layout
 
-- module root (`package client`) — the `Client` core: connection/reconnect loop, module system, auth bootstrap, swarm
-- `./modules` — pluggable client modules, one package each (protocol, self, world, physics, collisions, pathfinding, entities, inventory, chat, playerlist, registry, combat, command_block_core)
-- `./chat` — signed chat: message signing and last-seen tracking
-- `./helpers` — CLI flag wiring and default module registration for bots
-- `./tui` — terminal UI for interactive mode (chat & commands)
+- module root (`package client`) — the `Client` core: connection/reconnect loop, login/configuration handshake, connection-scoped `Session`s, module system, auth bootstrap, swarm, `Simulator` for tests
+- `./modules` — pluggable client modules, one package each (protocol, self, world, physics, collisions, pathfinding, entities, inventory, interaction, chat, playerlist, registry, combat, command_block_core, voicechat)
+- `./modules/chat/internal/signing` — signed chat: message signing and last-seen tracking
+- `./botcli` — CLI flag wiring, default module registration and the interactive TUI for bots
+- `./internal/tui` — terminal UI for interactive mode (chat & commands)
 - `./examples` — example bots and scripts
 - `./minecraft_source` — (optional) symlinked decompiled Minecraft source from `go-mclib/mcsrc`; our implementation should match official client logic
 

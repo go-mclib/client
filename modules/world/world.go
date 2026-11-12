@@ -6,11 +6,11 @@ import (
 	"github.com/go-mclib/client"
 	"github.com/go-mclib/client/modules/registry"
 	"github.com/go-mclib/data/chunks"
-	"github.com/go-mclib/data/packet_ids"
+	"github.com/go-mclib/data/packetids"
 	"github.com/go-mclib/data/packets"
 	"github.com/go-mclib/nbt"
-	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	jp "github.com/go-mclib/protocol/javaproto"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 const ModuleName = "world"
@@ -26,14 +26,11 @@ type Module struct {
 	registry *registry.Module // optional, supplies per-dimension world height
 
 	mu            sync.RWMutex
-	chunks        map[int64]*chunks.ChunkColumn
+	chunks        map[int64]*chunks.Column
 	blockEntities map[[3]int]*BlockEntityData // [x,y,z] -> data
 	centerChunkX  int32
 	centerChunkZ  int32
 	viewDistance  int32
-
-	// border state (from S2CInitializeBorder)
-	border *packets.S2CInitializeBorder
 
 	onChunkLoad         []func(x, z int32)
 	onChunkUnload       []func(x, z int32)
@@ -45,7 +42,7 @@ type Module struct {
 
 func New() *Module {
 	return &Module{
-		chunks:        make(map[int64]*chunks.ChunkColumn),
+		chunks:        make(map[int64]*chunks.Column),
 		blockEntities: make(map[[3]int]*BlockEntityData),
 		viewDistance:  10,
 	}
@@ -63,15 +60,10 @@ func (m *Module) Wire() error {
 	return nil
 }
 
-// dimensionBounds returns the current dimension's bottom Y and section count,
-// falling back to the vanilla overworld when no registry data is available.
+// dimensionBounds returns the current dimension's bottom Y and section count.
 func (m *Module) dimensionBounds() (minY, sectionCount int) {
-	if m.registry != nil {
-		if dt, ok := m.registry.CurrentDimensionType(); ok && dt.Height > 0 {
-			return int(dt.MinY), int(dt.Height) / 16
-		}
-	}
-	return chunks.MinY, chunks.SectionCount
+	minY, maxY := m.registry.CurrentBounds()
+	return minY, (maxY - minY) / 16
 }
 
 // ClearChunks removes all loaded chunks and block entities.
@@ -79,26 +71,14 @@ func (m *Module) dimensionBounds() (minY, sectionCount int) {
 func (m *Module) ClearChunks() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.chunks = make(map[int64]*chunks.ChunkColumn)
+	m.chunks = make(map[int64]*chunks.Column)
 	m.blockEntities = make(map[[3]int]*BlockEntityData)
 }
 
-func (m *Module) Reset() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.chunks = make(map[int64]*chunks.ChunkColumn)
-	m.blockEntities = make(map[[3]int]*BlockEntityData)
-	m.border = nil
-}
+func (m *Module) Reset() { m.ClearChunks() }
 
 // From retrieves the world module from a client.
-func From(c *client.Client) *Module {
-	mod := c.Module(ModuleName)
-	if mod == nil {
-		return nil
-	}
-	return mod.(*Module)
-}
+func From(c *client.Client) *Module { return client.ModuleAs[*Module](c, ModuleName) }
 
 func (m *Module) OnChunkLoad(cb func(x, z int32))   { m.onChunkLoad = append(m.onChunkLoad, cb) }
 func (m *Module) OnChunkUnload(cb func(x, z int32)) { m.onChunkUnload = append(m.onChunkUnload, cb) }
@@ -122,32 +102,30 @@ func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 		return
 	}
 	switch pkt.PacketID {
-	case packet_ids.S2CAddTransientBlockID:
+	case packetids.S2CAddTransientBlockID:
 		var d packets.S2CAddTransientBlock
-		if pkt.ReadInto(&d) == nil {
+		if m.client.Decode(pkt, &d) {
 			for _, cb := range m.onTransientBlock {
 				cb(d.Location.X, d.Location.Y, d.Location.Z, int32(d.BlockState))
 			}
 		}
-	case packet_ids.S2CLevelChunkWithLightID:
+	case packetids.S2CLevelChunkWithLightID:
 		m.handleChunkData(pkt)
-	case packet_ids.S2CForgetLevelChunkID:
+	case packetids.S2CForgetLevelChunkID:
 		m.handleUnloadChunk(pkt)
-	case packet_ids.S2CBlockUpdateID:
+	case packetids.S2CBlockUpdateID:
 		m.handleBlockUpdate(pkt)
-	case packet_ids.S2CSectionBlocksUpdateID:
+	case packetids.S2CSectionBlocksUpdateID:
 		m.handleSectionBlocksUpdate(pkt)
-	case packet_ids.S2CSetChunkCacheCenterID:
+	case packetids.S2CSetChunkCacheCenterID:
 		m.handleSetChunkCacheCenter(pkt)
-	case packet_ids.S2CSetChunkCacheRadiusID:
+	case packetids.S2CSetChunkCacheRadiusID:
 		m.handleSetChunkCacheRadius(pkt)
-	case packet_ids.S2CChunkBatchFinishedID:
+	case packetids.S2CChunkBatchFinishedID:
 		m.handleChunkBatchFinished()
-	case packet_ids.S2CBlockEntityDataID:
+	case packetids.S2CBlockEntityDataID:
 		m.handleBlockEntityData(pkt)
-	case packet_ids.S2CInitializeBorderID:
-		m.handleInitializeBorder(pkt)
-	case packet_ids.S2CBlockChangedAckID:
+	case packetids.S2CBlockChangedAckID:
 		// acknowledge block prediction — the server confirms our sequence.
 		// currently a no-op since we trust server state, but this prevents
 		// "unhandled packet" warnings in verbose mode.
@@ -162,14 +140,14 @@ func (m *Module) handleChunkData(pkt *jp.WirePacket) {
 	}
 
 	minY, sectionCount := m.dimensionBounds()
-	column, err := chunks.ParseChunkColumn(int32(d.ChunkX), int32(d.ChunkZ), minY, sectionCount, d.ChunkData, &d.LightData)
+	column, err := chunks.ParseColumn(int32(d.ChunkX), int32(d.ChunkZ), minY, sectionCount, d.ChunkData, &d.LightData)
 	if err != nil {
 		m.client.Logger.Printf("failed to parse chunk column at (%d, %d): %v", d.ChunkX, d.ChunkZ, err)
 		return
 	}
 
 	cx, cz := int32(d.ChunkX), int32(d.ChunkZ)
-	key := ChunkKey(cx, cz)
+	key := chunkKey(cx, cz)
 	m.mu.Lock()
 	m.clearChunkBlockEntitiesLocked(cx, cz)
 	m.chunks[key] = column
@@ -194,12 +172,12 @@ func (m *Module) handleChunkData(pkt *jp.WirePacket) {
 
 func (m *Module) handleUnloadChunk(pkt *jp.WirePacket) {
 	var d packets.S2CForgetLevelChunk
-	if err := pkt.ReadInto(&d); err != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 
 	cx, cz := int32(d.ChunkX), int32(d.ChunkZ)
-	key := ChunkKey(cx, cz)
+	key := chunkKey(cx, cz)
 	m.mu.Lock()
 	delete(m.chunks, key)
 	m.clearChunkBlockEntitiesLocked(cx, cz)
@@ -212,15 +190,15 @@ func (m *Module) handleUnloadChunk(pkt *jp.WirePacket) {
 
 func (m *Module) handleBlockEntityData(pkt *jp.WirePacket) {
 	var d packets.S2CBlockEntityData
-	if err := pkt.ReadInto(&d); err != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 
 	key := [3]int{d.Location.X, d.Location.Y, d.Location.Z}
 	m.mu.Lock()
-	if d.NbtData == nil {
+	if d.NBTData == nil {
 		delete(m.blockEntities, key)
-	} else if c, ok := d.NbtData.(nbt.Compound); ok {
+	} else if c, ok := d.NBTData.(nbt.Compound); ok {
 		m.blockEntities[key] = &BlockEntityData{
 			Type: int32(d.Type),
 			Data: c,
@@ -231,12 +209,12 @@ func (m *Module) handleBlockEntityData(pkt *jp.WirePacket) {
 
 func (m *Module) handleBlockUpdate(pkt *jp.WirePacket) {
 	var d packets.S2CBlockUpdate
-	if err := pkt.ReadInto(&d); err != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 
 	bx, by, bz := int(d.Location.X), int(d.Location.Y), int(d.Location.Z)
-	stateID := int32(d.BlockId)
+	stateID := int32(d.BlockID)
 
 	m.mu.Lock()
 	m.updateBlockLocked(bx, by, bz, stateID)
@@ -249,7 +227,7 @@ func (m *Module) handleBlockUpdate(pkt *jp.WirePacket) {
 
 func (m *Module) handleSectionBlocksUpdate(pkt *jp.WirePacket) {
 	var d packets.S2CSectionBlocksUpdate
-	if err := pkt.ReadInto(&d); err != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 
@@ -278,7 +256,7 @@ func (m *Module) handleSectionBlocksUpdate(pkt *jp.WirePacket) {
 
 func (m *Module) handleSetChunkCacheCenter(pkt *jp.WirePacket) {
 	var d packets.S2CSetChunkCacheCenter
-	if err := pkt.ReadInto(&d); err != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 	x, z := int32(d.ChunkX), int32(d.ChunkZ)
@@ -294,7 +272,7 @@ func (m *Module) handleSetChunkCacheCenter(pkt *jp.WirePacket) {
 
 func (m *Module) handleSetChunkCacheRadius(pkt *jp.WirePacket) {
 	var d packets.S2CSetChunkCacheRadius
-	if err := pkt.ReadInto(&d); err != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 	dist := int32(d.ViewDistance)
@@ -308,28 +286,23 @@ func (m *Module) handleSetChunkCacheRadius(pkt *jp.WirePacket) {
 }
 
 func (m *Module) handleChunkBatchFinished() {
-	m.client.SendPacket(&packets.C2SChunkBatchReceived{
+	if err := m.client.SendPacket(&packets.C2SChunkBatchReceived{
 		ChunksPerTick: ns.Float32(25.0),
-	})
-}
-
-func (m *Module) handleInitializeBorder(pkt *jp.WirePacket) {
-	var d packets.S2CInitializeBorder
-	if err := pkt.ReadInto(&d); err != nil {
-		return
+	}); err != nil {
+		m.client.Debugf("world: acknowledge chunk batch: %v", err)
 	}
-	m.mu.Lock()
-	m.border = &d
-	m.mu.Unlock()
 }
 
-// GetChunks returns a snapshot of all loaded chunk columns.
-func (m *Module) GetChunks() []*chunks.ChunkColumn {
+// GetChunks returns independent deep copies of all loaded chunk columns, taken
+// under one read lock so they form a coherent snapshot.
+func (m *Module) GetChunks() []*chunks.Column {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	result := make([]*chunks.ChunkColumn, 0, len(m.chunks))
+	result := make([]*chunks.Column, 0, len(m.chunks))
 	for _, col := range m.chunks {
-		result = append(result, col)
+		if copied := m.snapshotLocked(col); copied != nil {
+			result = append(result, copied)
+		}
 	}
 	return result
 }
@@ -341,16 +314,9 @@ func (m *Module) ChunkCacheCenter() (x, z int32) {
 	return m.centerChunkX, m.centerChunkZ
 }
 
-// GetViewDistance returns the server-sent view distance (chunk cache radius).
-func (m *Module) GetViewDistance() int32 {
+// ViewDistance returns the server-sent view distance (chunk cache radius).
+func (m *Module) ViewDistance() int32 {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.viewDistance
-}
-
-// Border returns the last received border initialization, or nil.
-func (m *Module) Border() *packets.S2CInitializeBorder {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.border
 }

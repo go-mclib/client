@@ -85,81 +85,65 @@ func (a AABB) Inflate(x, y, z float64) AABB {
 	}
 }
 
-// clipXCollide clips movement on the X axis against another AABB.
-// Matches VoxelShape.collideX: epsilon tolerance on perpendicular overlap and clip distance.
-func (a AABB) clipXCollide(other AABB, dx float64) float64 {
-	if math.Abs(dx) < Epsilon {
+// clipCollide clips movement d along axis (0 X, 1 Y, 2 Z) against another AABB.
+// Matches VoxelShape.collideX/Y/Z: epsilon tolerance on perpendicular overlap
+// (vanilla: entity bounds ± 1e-7) and on the clip distance.
+func (a AABB) clipCollide(other AABB, axis int, d float64) float64 {
+	if math.Abs(d) < Epsilon {
 		return 0
 	}
-	// perpendicular overlap with epsilon shrink (vanilla: entity bounds ± 1e-7)
-	if other.MaxY <= a.MinY+Epsilon || other.MinY > a.MaxY-Epsilon ||
-		other.MaxZ <= a.MinZ+Epsilon || other.MinZ > a.MaxZ-Epsilon {
-		return dx
+	for _, perpendicular := range [2]int{(axis + 1) % 3, (axis + 2) % 3} {
+		lo, hi := bounds(a, perpendicular)
+		otherLo, otherHi := bounds(other, perpendicular)
+		if otherHi <= lo+Epsilon || otherLo > hi-Epsilon {
+			return d
+		}
 	}
-	if dx > 0 {
-		d := other.MinX - a.MaxX
-		if other.MinX > a.MaxX-Epsilon && d >= -Epsilon && d < dx {
-			dx = d
+	lo, hi := bounds(a, axis)
+	otherLo, otherHi := bounds(other, axis)
+	if d > 0 {
+		if gap := otherLo - hi; otherLo > hi-Epsilon && gap >= -Epsilon && gap < d {
+			d = gap
 		}
 	} else {
-		d := other.MaxX - a.MinX
-		if other.MaxX <= a.MinX+Epsilon && d <= Epsilon && d > dx {
-			dx = d
+		if gap := otherHi - lo; otherHi <= lo+Epsilon && gap <= Epsilon && gap > d {
+			d = gap
 		}
 	}
-	return dx
+	return d
 }
 
-// clipYCollide clips movement on the Y axis against another AABB.
-func (a AABB) clipYCollide(other AABB, dy float64) float64 {
-	if math.Abs(dy) < Epsilon {
-		return 0
-	}
-	if other.MaxX <= a.MinX+Epsilon || other.MinX > a.MaxX-Epsilon ||
-		other.MaxZ <= a.MinZ+Epsilon || other.MinZ > a.MaxZ-Epsilon {
-		return dy
-	}
-	if dy > 0 {
-		d := other.MinY - a.MaxY
-		if other.MinY > a.MaxY-Epsilon && d >= -Epsilon && d < dy {
-			dy = d
+// RayIntersect performs a ray-AABB slab test from (ox, oy, oz) along (dx, dy, dz).
+// It returns the ray parameter t of the entry point when the hit lies within
+// [0, maxT]; with a unit direction t and maxT are distances.
+func (a AABB) RayIntersect(ox, oy, oz, dx, dy, dz, maxT float64) (float64, bool) {
+	tMin, tMax := 0.0, maxT
+	origin, direction := [3]float64{ox, oy, oz}, [3]float64{dx, dy, dz}
+	for axis := range 3 {
+		lo, hi := bounds(a, axis)
+		o, dir := origin[axis], direction[axis]
+		if math.Abs(dir) <= Epsilon {
+			if o < lo || o > hi {
+				return 0, false
+			}
+			continue
 		}
-	} else {
-		d := other.MaxY - a.MinY
-		if other.MaxY <= a.MinY+Epsilon && d <= Epsilon && d > dy {
-			dy = d
+		t1, t2 := (lo-o)/dir, (hi-o)/dir
+		if t1 > t2 {
+			t1, t2 = t2, t1
 		}
-	}
-	return dy
-}
-
-// clipZCollide clips movement on the Z axis against another AABB.
-func (a AABB) clipZCollide(other AABB, dz float64) float64 {
-	if math.Abs(dz) < Epsilon {
-		return 0
-	}
-	if other.MaxX <= a.MinX+Epsilon || other.MinX > a.MaxX-Epsilon ||
-		other.MaxY <= a.MinY+Epsilon || other.MinY > a.MaxY-Epsilon {
-		return dz
-	}
-	if dz > 0 {
-		d := other.MinZ - a.MaxZ
-		if other.MinZ > a.MaxZ-Epsilon && d >= -Epsilon && d < dz {
-			dz = d
-		}
-	} else {
-		d := other.MaxZ - a.MinZ
-		if other.MaxZ <= a.MinZ+Epsilon && d <= Epsilon && d > dz {
-			dz = d
+		tMin, tMax = max(tMin, t1), min(tMax, t2)
+		if tMin > tMax {
+			return 0, false
 		}
 	}
-	return dz
+	return tMin, true
 }
 
 // ClosestPoint returns the closest point on the AABB to the given point.
 func (a AABB) ClosestPoint(x, y, z float64) (cx, cy, cz float64) {
-	cx = math.Max(a.MinX, math.Min(x, a.MaxX))
-	cy = math.Max(a.MinY, math.Min(y, a.MaxY))
-	cz = math.Max(a.MinZ, math.Min(z, a.MaxZ))
+	cx = max(a.MinX, min(x, a.MaxX))
+	cy = max(a.MinY, min(y, a.MaxY))
+	cz = max(a.MinZ, min(z, a.MaxZ))
 	return
 }

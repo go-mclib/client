@@ -12,27 +12,38 @@ import (
 	"time"
 
 	"github.com/go-mclib/client"
-	chatsign "github.com/go-mclib/client/chat"
-	"github.com/go-mclib/data/packet_ids"
+	"github.com/go-mclib/client/modules/chat/internal/signing"
+	"github.com/go-mclib/data/packetids"
 	"github.com/go-mclib/data/packets"
 	"github.com/go-mclib/data/registries"
-	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	jp "github.com/go-mclib/protocol/javaproto"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 func testCommandGraph() *commandTree {
-	return &commandTree{root: 0, nodes: []commandNode{
-		{children: []int{1, 4, 5, 6, 8}, redirect: -1, parser: -1},
-		{flags: 1, name: "msg", children: []int{2}, redirect: -1, parser: -1},
-		{flags: 2, name: "targets", parser: 6, entityFlags: 2, children: []int{3}, redirect: -1},
-		{flags: 6, name: "message", parser: 20, redirect: -1},
-		{flags: 1 | 8, name: "tell", redirect: 1, parser: -1},
-		{flags: 5, name: "help", redirect: -1, parser: -1},
-		{flags: 1, name: "execute", children: []int{7}, redirect: -1, parser: -1},
-		{flags: 1 | 8, name: "run", redirect: 0, parser: -1},
-		{flags: 1, name: "say", children: []int{3}, redirect: -1, parser: -1},
+	const lit, arg, exec, redirect = packets.CommandNodeLiteral, packets.CommandNodeArgument, packets.CommandNodeExecutable, packets.CommandNodeRedirect
+	return &commandTree{root: 0, nodes: []packets.CommandNode{
+		{Children: []ns.VarInt{1, 4, 5, 6, 8}},
+		{Flags: lit, Name: "msg", Children: []ns.VarInt{2}},
+		{Flags: arg, Name: "targets", ParserID: 6, Properties: packets.CommandParserProperties{Flags: 2}, Children: []ns.VarInt{3}},
+		{Flags: arg | exec, Name: "message", ParserID: 20},
+		{Flags: lit | redirect, Name: "tell", Redirect: 1},
+		{Flags: lit | exec, Name: "help"},
+		{Flags: lit, Name: "execute", Children: []ns.VarInt{7}},
+		{Flags: lit | redirect, Name: "run", Redirect: 0},
+		{Flags: lit, Name: "say", Children: []ns.VarInt{3}},
 	}}
 }
+
+// decodeCommandTree decodes a crafted S2CCommands body the way HandlePacket does.
+func decodeCommandTree(raw []byte) (*commandTree, error) {
+	var d packets.S2CCommands
+	if err := d.Read(ns.NewReader(raw)); err != nil {
+		return nil, err
+	}
+	return &commandTree{nodes: d.Nodes, root: int(d.RootIndex)}, nil
+}
+
 func TestCommandArgumentSpansAndRedirect(t *testing.T) {
 	tree := testCommandGraph()
 	for _, command := range []string{`msg @a[name="two words"] hello  @p`, `tell @a[name="two words"] hello  @p`} {
@@ -67,7 +78,7 @@ func TestCommandTreeRawDecodingAndInvalidBounds(t *testing.T) {
 	b.WriteString("message")
 	b.WriteVarInt(20)
 	b.WriteVarInt(0)
-	tree, err := parseCommandTree(b.Bytes())
+	tree, err := decodeCommandTree(b.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +87,7 @@ func TestCommandTreeRawDecodingAndInvalidBounds(t *testing.T) {
 		t.Fatalf("decoded graph unusable: %+v %v", args, err)
 	}
 	for _, bad := range [][]byte{{0}, {1, 0, 1, 2, 0}, append(append([]byte{}, b.Bytes()...), 1), b.Bytes()[:len(b.Bytes())-1]} {
-		if _, err := parseCommandTree(bad); err == nil {
+		if _, err := decodeCommandTree(bad); err == nil {
 			t.Fatalf("malformed graph accepted: %x", bad)
 		}
 	}
@@ -98,12 +109,12 @@ func TestCommandTreeAcceptsNewRegistryParsersWithoutLosingAlignment(t *testing.T
 		b.WriteVarInt(ns.VarInt(registries.CommandArgumentType.Get(name)))
 	}
 	b.WriteVarInt(0)
-	tree, err := parseCommandTree(b.Bytes())
+	tree, err := decodeCommandTree(b.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i, name := range names {
-		if tree.nodes[i+1].name != name {
+		if string(tree.nodes[i+1].Name) != name {
 			t.Fatalf("singleton parser consumed the following node: %+v", tree.nodes[i+1])
 		}
 	}
@@ -116,15 +127,18 @@ func commandSocket(t *testing.T) (*Module, net.Conn) {
 	}
 	defer listener.Close()
 	c := client.New(listener.Addr().String(), "test", false)
-	if _, _, err := c.TCPClient.Connect(listener.Addr().String()); err != nil {
+	local, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
 		t.Fatal(err)
 	}
 	remote, err := listener.Accept()
 	if err != nil {
+		local.Close()
 		t.Fatal(err)
 	}
 	remote.SetDeadline(time.Now().Add(2 * time.Second))
-	t.Cleanup(func() { remote.Close(); c.TCPClient.Close() })
+	client.NewSimulator(c).Connect(local, jp.StatePlay)
+	t.Cleanup(func() { remote.Close(); local.Close() })
 	m := New()
 	m.Init(c)
 	m.commandTree = testCommandGraph()
@@ -136,11 +150,11 @@ func TestSignedCommandUsesNamedArgumentAndVerifiableSignature(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signer := chatsign.NewChatSigner()
+	signer := signing.NewSigner()
 	signer.SetPrivateKey(key)
 	signer.PlayerUUID[0] = 1
-	signer.SessionUUID[0] = 2
-	m.client.ChatSigner = signer
+	signer.StartSession(ns.UUID{2})
+	m.signer = signer
 	if err := m.SendCommand(`/tell "two words" exact  signed text`); err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +162,7 @@ func TestSignedCommandUsesNamedArgumentAndVerifiableSignature(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if wire.PacketID != ns.VarInt(packet_ids.C2SChatCommandSignedID) {
+	if wire.PacketID != ns.VarInt(packetids.C2SChatCommandSignedID) {
 		t.Fatalf("wrong command packet: %d", wire.PacketID)
 	}
 	// Decode independently of the packet codec: signatures are a named array,
@@ -166,7 +180,8 @@ func TestSignedCommandUsesNamedArgumentAndVerifiableSignature(t *testing.T) {
 	h := sha256.New()
 	binary.Write(h, binary.BigEndian, int32(1))
 	h.Write(signer.PlayerUUID[:])
-	h.Write(signer.SessionUUID[:])
+	sessionID := signer.SessionUUID()
+	h.Write(sessionID[:])
 	binary.Write(h, binary.BigEndian, int32(0))
 	binary.Write(h, binary.BigEndian, int64(salt))
 	binary.Write(h, binary.BigEndian, int64(stamp)/1000)
@@ -184,7 +199,7 @@ func TestSignedCommandUsesNamedArgumentAndVerifiableSignature(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if wire.PacketID != ns.VarInt(packet_ids.C2SChatCommandID) {
+	if wire.PacketID != ns.VarInt(packetids.C2SChatCommandID) {
 		t.Fatal("ordinary discovery no longer uses unsigned packet")
 	}
 }
@@ -204,7 +219,7 @@ func TestOfflineCommandEnvelopeAndSigningErrors(t *testing.T) {
 	if len(packet.ArgumentSignatures) != 0 {
 		t.Fatal("offline session fabricated a signature")
 	}
-	m.client.ChatSigner = chatsign.NewChatSigner()
+	m.signer = signing.NewSigner()
 	if err := m.SendCommand("msg alice hello"); err == nil || !strings.Contains(err.Error(), "private key") {
 		t.Fatalf("missing signing key error was suppressed: %v", err)
 	}
@@ -213,7 +228,7 @@ func TestOfflineCommandEnvelopeAndSigningErrors(t *testing.T) {
 			t.Fatalf("unsafe command accepted: %q", command)
 		}
 	}
-	m.client.FireTransfer()
+	client.NewSimulator(m.client).Transfer()
 	if _, err := m.Commands(); err == nil {
 		t.Fatal("transfer retained old server commands")
 	}
@@ -276,7 +291,7 @@ func TestEntityArgumentFlagsAndUUIDs(t *testing.T) {
 		{"1-1-1-1-1", 0, false},
 	} {
 		tree := testCommandGraph()
-		tree.nodes[2].entityFlags = tc.flags
+		tree.nodes[2].Properties.Flags = tc.flags
 		_, err := tree.arguments("msg "+tc.target+" hello", true)
 		if (err == nil) != tc.valid {
 			t.Errorf("target %q flags %d: %v", tc.target, tc.flags, err)
@@ -305,7 +320,7 @@ func TestCommandTreeRetainsEntityRestrictions(t *testing.T) {
 	b.WriteString("message")
 	b.WriteVarInt(20)
 	b.WriteVarInt(0)
-	tree, err := parseCommandTree(b.Bytes())
+	tree, err := decodeCommandTree(b.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,9 +350,9 @@ func TestRejectedCommandsDoNotAdvanceSigningChain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signer := chatsign.NewChatSigner()
+	signer := signing.NewSigner()
 	signer.SetPrivateKey(key)
-	m.client.ChatSigner = signer
+	m.signer = signer
 	pending := make([]byte, 256)
 	pending[0] = 7
 	signer.AddPending(pending)
@@ -351,21 +366,21 @@ func TestRejectedCommandsDoNotAdvanceSigningChain(t *testing.T) {
 		t.Fatal("level 1 incorrectly granted selector permission")
 	}
 	permissions.level = 2
-	m.commandTree.nodes[2].parser = 16
+	m.commandTree.nodes[2].ParserID = 16
 	if err := m.SendCommand("msg {} hello"); err == nil || !strings.Contains(err.Error(), "unsupported") {
 		t.Fatalf("unsupported predecessor guessed a successful parse: %v", err)
 	}
-	m.commandTree.nodes[2].parser = 6
-	m.commandTree.nodes[1].children = []int{2, 3}
+	m.commandTree.nodes[2].ParserID = 6
+	m.commandTree.nodes[1].Children = []ns.VarInt{2, 3}
 	if err := m.SendCommand("msg alice hello"); err == nil || !strings.Contains(err.Error(), "unsupported") {
 		t.Fatalf("competing argument parsers guessed a successful branch: %v", err)
 	}
-	m.commandTree.nodes[1].children = []int{2}
-	m.commandTree.nodes[2].entityFlags = 3
+	m.commandTree.nodes[1].Children = []ns.VarInt{2}
+	m.commandTree.nodes[2].Properties.Flags = 3
 	if err := m.SendCommand("msg @a hello"); err == nil {
 		t.Fatal("single-player parser accepted multiple targets")
 	}
-	m.commandTree.nodes[2].entityFlags = 2
+	m.commandTree.nodes[2].Properties.Flags = 2
 	for _, command := range []string{
 		"msg alice " + strings.Repeat("a", 257),
 		"msg alice " + strings.Repeat("\U0001f600", 129),
@@ -398,7 +413,7 @@ func TestRejectedCommandsDoNotAdvanceSigningChain(t *testing.T) {
 		t.Fatal(err)
 	}
 	wire, err := jp.ReadWirePacketFrom(remote, -1)
-	if err != nil || wire.PacketID != ns.VarInt(packet_ids.C2SChatCommandID) {
+	if err != nil || wire.PacketID != ns.VarInt(packetids.C2SChatCommandID) {
 		t.Fatalf("root redirect was not unsigned: %v %v", wire, err)
 	}
 	if err := m.SendCommand("tell @a[limit=1]  hello"); err != nil {
@@ -420,7 +435,8 @@ func TestRejectedCommandsDoNotAdvanceSigningChain(t *testing.T) {
 	h := sha256.New()
 	binary.Write(h, binary.BigEndian, int32(1))
 	h.Write(signer.PlayerUUID[:])
-	h.Write(signer.SessionUUID[:])
+	sessionID := signer.SessionUUID()
+	h.Write(sessionID[:])
 	binary.Write(h, binary.BigEndian, int32(0))
 	binary.Write(h, binary.BigEndian, int64(packet.Salt))
 	binary.Write(h, binary.BigEndian, int64(packet.Timestamp)/1000)

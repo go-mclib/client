@@ -16,22 +16,22 @@ import (
 
 func discoveryState(t *testing.T, name string, overrides map[string]string) int32 {
 	t.Helper()
-	id := blocks.BlockID("minecraft:" + name)
-	_, props := blocks.StateProperties(int(blocks.DefaultStateID(id)))
+	id := blocks.ID("minecraft:" + name)
+	_, props := blocks.StateProperties(blocks.DefaultStateID(id))
 	for key, value := range overrides {
 		props[key] = value
 	}
-	state := blocks.StateID(int(id), props)
+	state := blocks.StateID(id, props)
 	if state < 0 {
 		t.Fatalf("missing fixture state %s %v", name, props)
 	}
 	return state
 }
 
-func discoveryColumn(m *Module, cx, cz int32) *chunks.ChunkColumn {
+func discoveryColumn(m *Module, cx, cz int32) *chunks.Column {
 	column := chunks.NewColumn(cx, cz)
 	column.Sections[column.SectionIndex(64)] = chunks.NewEmptySection()
-	m.chunks[ChunkKey(cx, cz)] = column
+	m.chunks[chunkKey(cx, cz)] = column
 	return column
 }
 
@@ -53,7 +53,7 @@ func TestFindBlocksNearestSignedCoordinatesAndCoverage(t *testing.T) {
 		column.SetBlockState(p[0], p[1], p[2], stone)
 	}
 	q := BlockQuery{X: -8.5, Y: 70.5, Z: -8.5, Radius: 4, Names: []string{"stone"}, Limit: 3}
-	result, err := m.FindBlocks(context.Background(), q)
+	result, err := m.FindBlocks(t.Context(), q)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,14 +67,14 @@ func TestFindBlocksNearestSignedCoordinatesAndCoverage(t *testing.T) {
 		}
 	}
 	q.Limit = 50
-	all, err := m.FindBlocks(context.Background(), q)
+	all, err := m.FindBlocks(t.Context(), q)
 	if err != nil || all.Truncated || len(all.Blocks) != len(positions) {
 		t.Fatalf("full result = %+v, %v", all, err)
 	}
 
 	// The unknown half of the search must not turn into air matches.
 	q = BlockQuery{X: -.5, Y: 70.5, Z: -.5, Radius: 2, Names: []string{"minecraft:air"}, Limit: 50}
-	result, err = m.FindBlocks(context.Background(), q)
+	result, err = m.FindBlocks(t.Context(), q)
 	if err != nil || result.Complete || result.Truncated || result.LoadedChunks != 1 {
 		t.Fatalf("partial result = %+v, %v", result, err)
 	}
@@ -105,7 +105,7 @@ func TestFindBlocksCancellationAndInvalidQuery(t *testing.T) {
 	m := New()
 	discoveryColumn(m, 0, 0)
 	q := BlockQuery{X: 8.5, Y: 70.5, Z: 8.5, Radius: 4, Names: []string{"air"}, Limit: 5}
-	ctx := &cancelDuringSearch{Context: context.Background()}
+	ctx := &cancelDuringSearch{Context: t.Context()}
 	result, err := m.FindBlocks(ctx, q)
 	if !errors.Is(err, context.Canceled) || result.Complete {
 		t.Fatalf("cancelled search = %+v, %v", result, err)
@@ -120,7 +120,7 @@ func TestFindBlocksCancellationAndInvalidQuery(t *testing.T) {
 	} {
 		invalid := q
 		change(&invalid)
-		if _, err := m.FindBlocks(context.Background(), invalid); err == nil {
+		if _, err := m.FindBlocks(t.Context(), invalid); err == nil {
 			t.Fatalf("accepted invalid query %+v", invalid)
 		}
 	}
@@ -151,7 +151,7 @@ func TestContainerLabelsFacingTextAndSnapshots(t *testing.T) {
 				t.Fatalf("mutable labels leaked: %+v", again)
 			}
 			q := BlockQuery{X: -8.5, Y: 70.5, Z: -8.5, Radius: 3, Label: "back label", Limit: 5}
-			result, err := m.FindBlocks(context.Background(), q)
+			result, err := m.FindBlocks(t.Context(), q)
 			if err != nil || !result.Complete || len(result.Blocks) != 1 || result.Blocks[0].Name != "minecraft:"+container {
 				t.Fatalf("back match = %+v, %v", result, err)
 			}
@@ -160,12 +160,12 @@ func TestContainerLabelsFacingTextAndSnapshots(t *testing.T) {
 				t.Fatal("search snapshot aliases sign text")
 			}
 			q.Label = "do-not-match"
-			result, err = m.FindBlocks(context.Background(), q)
+			result, err = m.FindBlocks(t.Context(), q)
 			if err != nil || len(result.Blocks) != 0 {
 				t.Fatalf("click event matched: %+v, %v", result, err)
 			}
 			q.Label, q.Names = "iron", []string{"stone"}
-			result, err = m.FindBlocks(context.Background(), q)
+			result, err = m.FindBlocks(t.Context(), q)
 			if err != nil || len(result.Blocks) != 0 {
 				t.Fatalf("names/label conjunction ignored: %+v, %v", result, err)
 			}
@@ -189,7 +189,7 @@ func TestSignTextBoundsAndIncompleteSearch(t *testing.T) {
 	column.SetBlockState(8, 70, 7, discoveryState(t, "oak_wall_sign", map[string]string{"facing": "north"}))
 	m.blockEntities[[3]int{8, 70, 7}] = signFixture(nbt.String(strings.Repeat("界", 1000)), nbt.Compound{"translate": nbt.String("not-visible-literal")})
 	q := BlockQuery{X: 8.5, Y: 70.5, Z: 8.5, Radius: 2, Label: "界", Limit: 5}
-	result, err := m.FindBlocks(context.Background(), q)
+	result, err := m.FindBlocks(t.Context(), q)
 	if err != nil || result.Complete || len(result.Blocks) != 1 {
 		t.Fatalf("bounded text search = %+v, %v", result, err)
 	}
@@ -201,7 +201,7 @@ func TestSignTextBoundsAndIncompleteSearch(t *testing.T) {
 		t.Fatal("translation key treated as visible text")
 	}
 	q.Label = "not-visible-literal"
-	result, err = m.FindBlocks(context.Background(), q)
+	result, err = m.FindBlocks(t.Context(), q)
 	if err != nil || result.Complete || len(result.Blocks) != 0 {
 		t.Fatalf("unresolved translation matched: %+v, %v", result, err)
 	}

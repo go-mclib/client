@@ -1,11 +1,12 @@
 package command_block_core
 
 import (
-	"fmt"
+	"errors"
+	"slices"
 
 	"github.com/go-mclib/data/registries"
 	"github.com/go-mclib/nbt"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 // commandBlockItem builds a command_block item carrying a block_entity_data
@@ -17,15 +18,15 @@ import (
 func commandBlockItem(cmd string) (ns.Slot, error) {
 	itemID := registries.Item.Get("minecraft:command_block")
 	if itemID < 0 {
-		return ns.Slot{}, fmt.Errorf("unknown item minecraft:command_block")
+		return ns.Slot{}, errors.New("unknown item minecraft:command_block")
 	}
 	compID := registries.DataComponentType.Get("minecraft:block_entity_data")
 	if compID < 0 {
-		return ns.Slot{}, fmt.Errorf("unknown component minecraft:block_entity_data")
+		return ns.Slot{}, errors.New("unknown component minecraft:block_entity_data")
 	}
 	beType := registries.BlockEntityType.Get("minecraft:command_block")
 	if beType < 0 {
-		return ns.Slot{}, fmt.Errorf("unknown block entity minecraft:command_block")
+		return ns.Slot{}, errors.New("unknown block entity minecraft:command_block")
 	}
 
 	tag, err := nbt.EncodeNetwork(nbt.Compound{
@@ -39,8 +40,7 @@ func commandBlockItem(cmd string) (ns.Slot, error) {
 	if err := buf.WriteVarInt(ns.VarInt(beType)); err != nil {
 		return ns.Slot{}, err
 	}
-	payload := append([]byte{}, buf.Bytes()...)
-	payload = append(payload, tag...)
+	payload := slices.Concat(buf.Bytes(), tag)
 
 	return ns.Slot{
 		Count:  1,

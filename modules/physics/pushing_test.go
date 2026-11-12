@@ -8,8 +8,8 @@ import (
 	"github.com/go-mclib/client/modules/entities"
 	"github.com/go-mclib/client/modules/self"
 	"github.com/go-mclib/data/packets"
-	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	jp "github.com/go-mclib/protocol/javaproto"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 func TestEntityPushFloatBoundaryAndForce(t *testing.T) {
@@ -76,7 +76,7 @@ func TestAuthoritativeMotionReplacesPriorPush(t *testing.T) {
 	m.self = self.New()
 	pushX, pushZ := entityPushImpulse(0.25, 0)
 	m.velX, m.velZ = pushX, pushZ
-	wire, err := jp.ToWire(&packets.S2CSetEntityMotion{EntityId: ns.VarInt(m.self.EntityID()), Velocity: ns.LpVec3{X: 1, Y: 0, Z: 0}})
+	wire, err := jp.ToWire(&packets.S2CSetEntityMotion{EntityID: ns.VarInt(m.self.EntityID()), Velocity: ns.LpVec3{X: 1, Y: 0, Z: 0}})
 	if err != nil {
 		t.Fatal(err)
 	}

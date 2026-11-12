@@ -57,7 +57,7 @@ func ModifiedFriction(base, modifier float64) float64 {
 func GroundAcceleration(speed, blockFriction float64) float64 {
 	bf := float32(blockFriction)
 	if float64(bf) > 0.6 {
-		return float64(float32(speed) * (float32(FrictionSpeedFactor) / (bf * bf * bf)))
+		return float64(float32(speed) * (float32(frictionSpeedFactor) / (bf * bf * bf)))
 	}
 	return float64(float32(speed))
 }
@@ -77,26 +77,26 @@ func JumpImpulse(yaw, jumpPower float64, sprinting bool) (float64, float64, floa
 	}
 	if sprinting {
 		sinYaw, cosYaw := sinCosYaw(yaw)
-		return -sinYaw * SprintJumpBoost, jumpPower, cosYaw * SprintJumpBoost
+		return -sinYaw * sprintJumpBoost, jumpPower, cosYaw * sprintJumpBoost
 	}
 	return 0, jumpPower, 0
 }
 
-// GetBlockFrictionAt uses the collision support beneath the player's footprint,
+// BlockFrictionAt uses the collision support beneath the player's footprint,
 // including an overhanging fence or the edge of a block, not only the center cell.
-func GetBlockFrictionAt(w *world.Module, x, y, z, width float64) float64 {
+func BlockFrictionAt(w *world.Module, x, y, z, width float64) float64 {
 	pos := blockOnPos(w, x, y, z, width, float64(float32(0.500001)))
-	return GetBlockFriction(w.GetBlock(pos[0], pos[1], pos[2]))
+	return getBlockFriction(w.GetBlock(pos[0], pos[1], pos[2]))
 }
 
-// GetJumpPower returns current jump power from the tracked attribute.
-func (m *Module) GetJumpPower() float64 {
+// JumpPower returns current jump power from the tracked attribute.
+func (m *Module) JumpPower() float64 {
 	return m.getJumpPower(m.self)
 }
 
-// GetEffectiveSpeed returns current movement speed from the tracked attribute.
-func (m *Module) GetEffectiveSpeed() float64 {
-	return m.getEffectiveSpeed(m.self)
+// EffectiveSpeed returns current movement speed from the tracked attribute.
+func (m *Module) EffectiveSpeed() float64 {
+	return m.self.MovementSpeed(m.self.Sprinting())
 }
 
 // applyAirInputScaled adds movement input to velocity (pre-collision) with pre-scaled impulses.
@@ -110,15 +110,15 @@ func (m *Module) applyAirInputScaled(s *self.Module, x, y, z, yaw float64, w *wo
 	if s.Sprinting() {
 		speed = SprintFlyingSpeed
 	}
-	if s.AbilityFlags()&2 != 0 {
-		speed = float64(s.FlyingSpeed())
+	if s.IsFlying() {
+		speed = float64(s.Abilities().FlyingSpeed)
 		if s.Sprinting() {
-			speed = float64(s.FlyingSpeed() * 2)
+			speed = float64(s.Abilities().FlyingSpeed * 2)
 		}
 	}
 	if m.onGround {
-		blockFriction = ModifiedFriction(GetBlockFrictionAt(w, x, y, z, m.bodyWidth()), s.AttributeValue("minecraft:friction_modifier", 1))
-		speed = GroundAcceleration(m.getEffectiveSpeed(s), blockFriction)
+		blockFriction = ModifiedFriction(BlockFrictionAt(w, x, y, z, m.bodyWidth()), s.AttributeValue("minecraft:friction_modifier", 1))
+		speed = GroundAcceleration(s.MovementSpeed(s.Sprinting()), blockFriction)
 	}
 	dx, _, dz := MoveRelative(speed, forward, strafe, yaw)
 	m.velX += dx
@@ -193,11 +193,6 @@ func (m *Module) getEffectiveGravity(s *self.Module) float64 {
 	return g
 }
 
-// getEffectiveSpeed projects the current local sprint state onto server attributes.
-func (m *Module) getEffectiveSpeed(s *self.Module) float64 {
-	return s.MovementSpeed(s.Sprinting())
-}
-
 // moveTowardsClosestSpace nudges the player out of a block it is penetrating at
 // the given (x,z) body corner — a port of LocalPlayer.moveTowardsClosestSpace.
 // If the corner's block column is solid, it sets horizontal velocity 0.1 toward
@@ -254,7 +249,7 @@ func ProcessInput(forward, strafe, itemFactor, slowFactor float64) (float64, flo
 		inverse := float32(1) / length
 		f, s = f*inverse, s*inverse
 	}
-	f, s = f*float32(InputFriction), s*float32(InputFriction)
+	f, s = f*float32(inputFriction), s*float32(inputFriction)
 	f, s = f*float32(itemFactor), s*float32(itemFactor)
 	f, s = f*float32(slowFactor), s*float32(slowFactor)
 	length = float32(math.Sqrt(float64(f*f + s*s)))

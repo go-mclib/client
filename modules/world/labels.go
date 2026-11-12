@@ -34,7 +34,7 @@ func isContainer(name string) bool {
 }
 
 func (m *Module) loadedBlockLocked(x, y, z int) (int32, bool) {
-	column := m.chunks[ChunkKey(int32(x>>4), int32(z>>4))]
+	column := m.chunks[chunkKey(int32(x>>4), int32(z>>4))]
 	if column == nil {
 		return 0, false
 	}
@@ -50,7 +50,7 @@ func (m *Module) containerLabelsLocked(x, y, z int) ([]SignLabel, bool) {
 	if !known {
 		return nil, false
 	}
-	if !isContainer(blocks.BlockName(blocks.StateBlockID(state))) {
+	if !isContainer(blocks.Name(blocks.StateBlockID(state))) {
 		return nil, true
 	}
 	var labels []SignLabel
@@ -68,11 +68,11 @@ func (m *Module) containerLabelsLocked(x, y, z int) ([]SignLabel, bool) {
 			complete = false
 			continue
 		}
-		name := blocks.BlockName(blocks.StateBlockID(state))
+		name := blocks.Name(blocks.StateBlockID(state))
 		if !strings.HasSuffix(name, "_wall_sign") {
 			continue
 		}
-		_, props := blocks.StateProperties(int(state))
+		_, props := blocks.StateProperties(state)
 		// Vanilla WallSignBlock supports on facing.getOpposite().
 		if props["facing"] != direction.facing {
 			continue

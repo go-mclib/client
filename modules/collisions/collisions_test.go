@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/go-mclib/data/blocks"
-	"github.com/go-mclib/data/hitboxes"
 )
 
 type collisionWorld map[[3]int]int32
@@ -16,10 +15,10 @@ func (w collisionWorld) GetLoadedBlock(x, y, z int) (int32, bool) {
 
 func blockState(t *testing.T, name string, props map[string]string) int32 {
 	t.Helper()
-	id := blocks.BlockID("minecraft:" + name)
+	id := blocks.ID("minecraft:" + name)
 	state := blocks.DefaultStateID(id)
 	if props != nil {
-		state = blocks.StateID(int(id), props)
+		state = blocks.StateID(id, props)
 	}
 	if state < 0 {
 		t.Fatalf("invalid fixture state %s %v", name, props)
@@ -169,7 +168,7 @@ func TestFenceCollisionIsNotFullCube(t *testing.T) {
 
 func TestVoxelInternalPlanesClipInitialOverlap(t *testing.T) {
 	shape := voxelShape{
-		parts:  []hitboxes.AABB{{MinX: 0, MinY: 0, MinZ: 0, MaxX: 1, MaxY: 1, MaxZ: 1}},
+		parts:  []blocks.AABB{{MinX: 0, MinY: 0, MinZ: 0, MaxX: 1, MaxY: 1, MaxZ: 1}},
 		coords: [3][]float64{{0, 0.5, 1}, {0, 0.375, 1}, {0, 1}},
 	}
 	box := AABB{MinX: 0.1, MinY: 0.1, MinZ: 0.1, MaxX: 0.4, MaxY: 0.3, MaxZ: 0.4}
@@ -197,11 +196,11 @@ func TestAxisOrderAndPerpendicularEpsilon(t *testing.T) {
 		t.Fatalf("dominant X axis not resolved first: %v/%v", x, z)
 	}
 	thin := AABB{MinX: 1, MinY: box.MaxY - Epsilon, MinZ: 0, MaxX: 2, MaxY: 3, MaxZ: 1}
-	if got := box.clipXCollide(thin, 1); got != 1-box.MaxX {
+	if got := box.clipCollide(thin, 0, 1); got != 1-box.MaxX {
 		t.Fatalf("exact perpendicular voxel boundary=%v", got)
 	}
 	thin.MinY = math.Nextafter(thin.MinY, math.Inf(1))
-	if got := box.clipXCollide(thin, 1); got != 1 {
+	if got := box.clipCollide(thin, 0, 1); got != 1 {
 		t.Fatalf("below-epsilon overlap collides: %v", got)
 	}
 }

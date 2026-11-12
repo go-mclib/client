@@ -2,29 +2,35 @@ package combat
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sync"
+	"time"
 
 	"github.com/go-mclib/client"
-	"github.com/go-mclib/client/modules/collisions"
 	"github.com/go-mclib/client/modules/entities"
 	"github.com/go-mclib/client/modules/inventory"
 	"github.com/go-mclib/client/modules/physics"
 	"github.com/go-mclib/client/modules/self"
 	"github.com/go-mclib/data/packets"
-	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	jp "github.com/go-mclib/protocol/javaproto"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 const (
 	ModuleName = "combat"
 
-	EntityInteractionRange = 3.0
+	// default minecraft:entity_interaction_range attribute value
+	defaultEntityInteractionRange = 3.0
 
 	// base attack_speed attribute value (fist); held-item modifiers adjust it
 	baseAttackSpeed = 4.0
+
+	tickDuration = 50 * time.Millisecond
 )
+
+var errAttackCooldown = errors.New("attack on cooldown")
 
 type Module struct {
 	client  *client.Client
@@ -35,9 +41,12 @@ type Module struct {
 	entities  *entities.Module
 	inventory *inventory.Module // optional: held-item attack speed
 
-	targetID             int32
-	attacking            bool
+	targetID  int32
+	attacking bool
+	// ticksSinceLastAttack advances per physics tick. Without physics the
+	// cooldown is derived from the wall time since lastAttack instead.
 	ticksSinceLastAttack int
+	lastAttack           time.Time
 	attackContext        context.Context
 	cancel               context.CancelFunc
 
@@ -57,7 +66,7 @@ func (m *Module) Wire() error {
 	m.self = self.From(m.client)
 	m.entities = entities.From(m.client)
 	if m.self == nil || m.entities == nil {
-		return fmt.Errorf("requires self and entities modules")
+		return errors.New("requires self and entities modules")
 	}
 	m.inventory = inventory.From(m.client)
 	m.physics = physics.From(m.client)
@@ -90,15 +99,10 @@ func (m *Module) Reset() {
 	m.targetID = 0
 	m.attacking = false
 	m.ticksSinceLastAttack = 0
+	m.lastAttack = time.Time{}
 }
 
-func From(c *client.Client) *Module {
-	mod := c.Module(ModuleName)
-	if mod == nil {
-		return nil
-	}
-	return mod.(*Module)
-}
+func From(c *client.Client) *Module { return client.ModuleAs[*Module](c, ModuleName) }
 
 func (m *Module) OnAttack(cb func(entityID int32)) {
 	m.onAttack = append(m.onAttack, cb)
@@ -124,7 +128,7 @@ func (m *Module) Attack(entityID int32) error {
 	}
 
 	if m.attackCooldown() < 0.9 {
-		return fmt.Errorf("attack on cooldown")
+		return errAttackCooldown
 	}
 
 	err := m.performAttack(e)
@@ -182,9 +186,7 @@ func (m *Module) IsInCrosshair(entityID int32) bool {
 		return false
 	}
 
-	ox, oy, oz := m.self.Position()
-	oy += self.EyeHeight
-
+	ox, oy, oz := m.self.EyePosition()
 	yaw, pitch := m.self.Rotation()
 	yawRad := float64(yaw) * math.Pi / 180
 	pitchRad := float64(pitch) * math.Pi / 180
@@ -192,19 +194,31 @@ func (m *Module) IsInCrosshair(entityID int32) bool {
 	dy := -math.Sin(pitchRad)
 	dz := math.Cos(yawRad) * math.Cos(pitchRad)
 
-	box := collisions.EntityAABB(e.X, e.Y, e.Z, e.Width, e.Height)
-	return rayIntersectsAABB(ox, oy, oz, dx, dy, dz, box, EntityInteractionRange)
+	_, hit := e.BoundingBox().RayIntersect(ox, oy, oz, dx, dy, dz, m.reach())
+	return hit
 }
 
-// GetAttackCooldown returns the current attack cooldown progress (0.0 to 1.0).
-func (m *Module) GetAttackCooldown() float32 {
+// AttackCooldown returns the current attack cooldown progress (0.0 to 1.0).
+func (m *Module) AttackCooldown() float32 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.attackCooldown()
 }
 
 func (m *Module) attackCooldown() float32 {
-	return min(float32(m.ticksSinceLastAttack+1)/m.cooldownTicks(), 1.0)
+	return min(float32(m.ticksSince()+1)/m.cooldownTicks(), 1.0)
+}
+
+// ticksSince returns the client ticks since the last attack: the physics tick
+// count when physics drives the client, otherwise elapsed wall time.
+func (m *Module) ticksSince() int {
+	if m.physics != nil {
+		return m.ticksSinceLastAttack
+	}
+	if m.lastAttack.IsZero() {
+		return math.MaxInt32
+	}
+	return int(time.Since(m.lastAttack) / tickDuration)
 }
 
 func (m *Module) tryAttack() bool {
@@ -242,12 +256,13 @@ func (m *Module) performAttack(e *entities.Entity) error {
 	}
 
 	// send attack packet
-	if err := m.queue(&packets.C2SAttack{EntityId: ns.VarInt(e.ID)}); err != nil {
+	if err := m.queue(&packets.C2SAttack{EntityID: ns.VarInt(e.ID)}); err != nil {
 		m.attacking = false
 		return err
 	}
 	// Cooldown starts when the attack is accepted by the outgoing transport.
 	m.ticksSinceLastAttack = 0
+	m.lastAttack = time.Now()
 
 	return nil
 }
@@ -286,53 +301,16 @@ func (m *Module) cooldownTicks() float32 {
 	return 20.0 / speed
 }
 
-// isWithinReach checks distance from player eye position to the closest point on entity AABB.
+// isWithinReach checks the distance from the player's eyes to the closest
+// point of the entity's bounding box against entity_interaction_range.
 func (m *Module) isWithinReach(e *entities.Entity) bool {
-	sx, sy, sz := m.self.Position()
-	eyeX := sx
-	eyeY := sy + self.EyeHeight
-	eyeZ := sz
-
-	aabb := collisions.EntityAABB(e.X, e.Y, e.Z, e.Width, e.Height)
-	cx, cy, cz := aabb.ClosestPoint(eyeX, eyeY, eyeZ)
-
-	dx := eyeX - cx
-	dy := eyeY - cy
-	dz := eyeZ - cz
-	dist := math.Sqrt(dx*dx + dy*dy + dz*dz)
-
-	return dist <= EntityInteractionRange
+	eyeX, eyeY, eyeZ := m.self.EyePosition()
+	cx, cy, cz := e.BoundingBox().ClosestPoint(eyeX, eyeY, eyeZ)
+	dx, dy, dz := eyeX-cx, eyeY-cy, eyeZ-cz
+	reach := m.reach()
+	return dx*dx+dy*dy+dz*dz <= reach*reach
 }
 
-// rayIntersectsAABB tests a ray against an AABB within maxDist (slab method).
-func rayIntersectsAABB(ox, oy, oz, dx, dy, dz float64, box collisions.AABB, maxDist float64) bool {
-	tMin, tMax := 0.0, maxDist
-	for i, dv := range [3]float64{dx, dy, dz} {
-		var o, lo, hi float64
-		switch i {
-		case 0:
-			o, lo, hi = ox, box.MinX, box.MaxX
-		case 1:
-			o, lo, hi = oy, box.MinY, box.MaxY
-		case 2:
-			o, lo, hi = oz, box.MinZ, box.MaxZ
-		}
-		if math.Abs(dv) < 1e-9 {
-			if o < lo || o > hi {
-				return false
-			}
-			continue
-		}
-		t1 := (lo - o) / dv
-		t2 := (hi - o) / dv
-		if t1 > t2 {
-			t1, t2 = t2, t1
-		}
-		tMin = max(tMin, t1)
-		tMax = min(tMax, t2)
-		if tMin > tMax {
-			return false
-		}
-	}
-	return true
+func (m *Module) reach() float64 {
+	return m.self.AttributeValue("minecraft:entity_interaction_range", defaultEntityInteractionRange)
 }

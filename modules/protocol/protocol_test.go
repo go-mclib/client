@@ -6,14 +6,16 @@ import (
 
 	"github.com/go-mclib/client"
 	"github.com/go-mclib/data/packets"
-	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	jp "github.com/go-mclib/protocol/javaproto"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 func TestPostEffectsReplaceAcrossConfigurationAndPlay(t *testing.T) {
 	c := client.New("unused", "test", false)
 	m := New()
 	c.Register(m)
+	sim := client.NewSimulator(c)
+	sim.Connect(nil, jp.StateConfiguration)
 	var observed []ns.Identifier
 	m.OnPostEffects(func(effects []ns.Identifier) {
 		observed = slices.Clone(effects)
@@ -23,7 +25,7 @@ func TestPostEffectsReplaceAcrossConfigurationAndPlay(t *testing.T) {
 	})
 	deliver := func(state jp.State, packet jp.Packet) {
 		t.Helper()
-		c.SetState(state)
+		sim.SetState(state)
 		wire, err := jp.ToWire(packet)
 		if err != nil {
 			t.Fatal(err)

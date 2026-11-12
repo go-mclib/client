@@ -5,24 +5,30 @@ import (
 
 	"github.com/go-mclib/client/modules/collisions"
 	"github.com/go-mclib/client/modules/entities"
+	"github.com/go-mclib/client/modules/interaction"
 	"github.com/go-mclib/client/modules/world"
 	"github.com/go-mclib/data/blocks"
 )
 
-// PathNode represents a node in the A* search.
-type PathNode struct {
+// Waypoint is one step of a planned route: the block position the player's
+// feet occupy and how the step must be taken.
+type Waypoint struct {
 	X, Y, Z  int
-	G, H, F  float64
-	Sneaking bool    // player must crouch at this node
-	Jump     bool    // player must sprint-jump to reach this node
+	Sneaking bool    // player must crouch at this waypoint
+	Jump     bool    // player must sprint-jump to reach this waypoint
 	JumpYaw  float64 // yaw direction for the sprint-jump
 
 	// door interaction: if set, bot must open this door before passing
 	DoorX, DoorY, DoorZ int
 	InteractDoor        bool
+}
 
-	Parent *PathNode
-	index  int // for heap
+// node is a Waypoint plus its A* bookkeeping.
+type node struct {
+	Waypoint
+	g, h, f float64
+	parent  *node
+	index   int // position in nodeHeap
 }
 
 // standSurface returns the height at which the player's feet rest when standing
@@ -98,7 +104,7 @@ func terrainLoaded(w *world.Module, x, y, z, height float64, cfg simulationConfi
 					return false
 				}
 				// Their collision depends on descent/equipment, not just state.
-				switch blocks.BlockName(blocks.StateBlockID(state)) {
+				switch blocks.Name(blocks.StateBlockID(state)) {
 				case "minecraft:scaffolding", "minecraft:powder_snow":
 					return false
 				}
@@ -180,8 +186,8 @@ func moveCostInner(w *world.Module, ents *entities.Module, x, y, z int, sneaking
 	// adjacent lava
 	for _, offset := range [4][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
 		adjState := w.GetBlock(x+offset[0], y, z+offset[1])
-		adjBlockID, _ := blocks.StateProperties(int(adjState))
-		if blocks.BlockName(adjBlockID) == "minecraft:lava" {
+		adjBlockID, _ := blocks.StateProperties(adjState)
+		if blocks.Name(adjBlockID) == "minecraft:lava" {
 			cost += 50
 		}
 	}
@@ -201,7 +207,7 @@ func moveCostInner(w *world.Module, ents *entities.Module, x, y, z int, sneaking
 func canPassBetween(w *world.Module, col *collisions.Module, cx, cz, nx, nz int, srcFy, destFy, height float64, cfg simulationConfig) bool {
 	x, y, z := float64(cx)+0.5, srcFy, float64(cz)+0.5
 	dx, dz := float64(nx-cx), float64(nz-cz)
-	steps := int(math.Ceil(math.Max(math.Abs(dx), math.Abs(dz)) * 4))
+	steps := int(math.Ceil(max(math.Abs(dx), math.Abs(dz)) * 4))
 	if steps == 0 {
 		return math.Abs(destFy-srcFy) <= collisions.Epsilon
 	}
@@ -258,7 +264,8 @@ func canDiagonalTraverse(w *world.Module, col *collisions.Module, cx, cy, cz, ox
 }
 
 // FindReachablePosition finds the standable position closest to (fromX, fromY, fromZ)
-// that has line-of-sight to (bx, by, bz) within reach distance.
+// from which (bx, by, bz) passes the same reach test as interaction.UseBlock,
+// or ok=false when col is nil or not wired to a world.
 func FindReachablePosition(col *collisions.Module, fromX, fromY, fromZ float64, bx, by, bz int, reach float64) (int, int, int, bool) {
 	standX, standY, standZ, _, found := FindBestReachPosition(col, fromX, fromY, fromZ, [][3]int{{bx, by, bz}}, reach)
 	if !found {
@@ -268,16 +275,22 @@ func FindReachablePosition(col *collisions.Module, fromX, fromY, fromZ float64, 
 }
 
 // FindBestReachPosition finds the standable position from which the most targets
-// are reachable (within reach distance with line-of-sight). Among positions covering
+// are reachable (interaction.CanReachBlockFrom: a loaded, unobstructed face point
+// within reach). Among positions covering
 // the same number of targets, prefers the one closest to (fromX, fromY, fromZ).
-// Returns the stand position and the subset of targets reachable from it.
+// Returns the stand position and the subset of targets reachable from it, or
+// found=false when col is nil.
 func FindBestReachPosition(col *collisions.Module,
 	fromX, fromY, fromZ float64,
 	targets [][3]int,
 	reach float64,
 ) (standX, standY, standZ int, reachable [][3]int, found bool) {
 	cfg := defaultSimulationConfig()
-	if len(targets) == 0 {
+	if col == nil || len(targets) == 0 {
+		return 0, 0, 0, nil, false
+	}
+	w := col.World()
+	if w == nil {
 		return 0, 0, 0, nil, false
 	}
 
@@ -312,7 +325,7 @@ func FindBestReachPosition(col *collisions.Module,
 		// count reachable targets from this position
 		count := 0
 		for _, t := range targets {
-			if canReachBlock(col, eyeX, eyeY, eyeZ, t[0], t[1], t[2], reach) {
+			if interaction.CanReachBlockFrom(w, col, eyeX, eyeY, eyeZ, t[0], t[1], t[2], reach) {
 				count++
 			}
 		}
@@ -340,42 +353,20 @@ func FindBestReachPosition(col *collisions.Module,
 	eyeY := nodeSurfaceY(col, standX, standY, standZ, cfg) + eyeHeight
 	eyeZ := float64(standZ) + 0.5
 	for _, t := range targets {
-		if canReachBlock(col, eyeX, eyeY, eyeZ, t[0], t[1], t[2], reach) {
+		if interaction.CanReachBlockFrom(w, col, eyeX, eyeY, eyeZ, t[0], t[1], t[2], reach) {
 			reachable = append(reachable, t)
 		}
 	}
 	return standX, standY, standZ, reachable, true
 }
 
-// canReachBlock checks if a position (eye coords) can interact with a block
-// at (bx,by,bz) — within reach distance and with clear line of sight.
-func canReachBlock(col *collisions.Module, eyeX, eyeY, eyeZ float64, bx, by, bz int, reach float64) bool {
-	tx := float64(bx) + 0.5
-	ty := float64(by) + 0.5
-	tz := float64(bz) + 0.5
-	dx, dy, dz := eyeX-tx, eyeY-ty, eyeZ-tz
-	if dx*dx+dy*dy+dz*dz > reach*reach {
-		return false
-	}
-	if col != nil {
-		hit, _, _, _ := col.RaycastBlocks(eyeX, eyeY, eyeZ, tx, ty, tz)
-		if hit {
-			return false
-		}
-	}
-	return true
-}
-
 func blockDangerCost(stateID int32) float64 {
 	if stateID == 0 {
 		return 0
 	}
-	blockID, _ := blocks.StateProperties(int(stateID))
-	name := blocks.BlockName(blockID)
-	if c, ok := dangerCosts[name]; ok {
-		return c
-	}
-	return 0
+	blockID, _ := blocks.StateProperties(stateID)
+	name := blocks.Name(blockID)
+	return dangerCosts[name]
 }
 
 func sign(x int) int {

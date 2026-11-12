@@ -1,41 +1,37 @@
 package self
 
 import (
+	"github.com/go-mclib/data/packets"
 	"github.com/go-mclib/data/registries"
-	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	jp "github.com/go-mclib/protocol/javaproto"
 )
 
-// AttributeModifier represents a modifier applied to a base attribute.
-type AttributeModifier struct {
-	ID        string // resource identifier (e.g., "minecraft:effect.speed")
-	Amount    float64
-	Operation int32 // 0=add_value, 1=add_multiplied_base, 2=add_multiplied_total
-}
+// Attribute is a synchronized entity attribute: base value plus modifiers.
+// Convert a decoded packets.AttributeSnapshot with Attribute(snapshot).
+type Attribute packets.AttributeSnapshot
 
-// Attribute represents a tracked entity attribute.
-type Attribute struct {
-	Base      float64
-	Modifiers []AttributeModifier
-}
+// Value returns the effective value following vanilla
+// AttributeInstance.calculateValue: add_value, then add_multiplied_base, then
+// add_multiplied_total.
+func (a Attribute) Value() float64 { return a.valueWithout("") }
 
-// computeValue calculates the effective value following vanilla AttributeInstance.calculateValue.
-func (a *Attribute) computeValue(skipModifier string) float64 {
-	value := a.Base
+// valueWithout calculates the value while ignoring the modifier with the given ID.
+func (a Attribute) valueWithout(skipModifier string) float64 {
+	value := float64(a.Base)
 	for _, mod := range a.Modifiers {
-		if mod.ID != skipModifier && mod.Operation == 0 {
-			value += mod.Amount
+		if string(mod.ID) != skipModifier && mod.Operation == 0 {
+			value += float64(mod.Amount)
 		}
 	}
 	saved := value
 	for _, mod := range a.Modifiers {
-		if mod.ID != skipModifier && mod.Operation == 1 {
-			value += saved * mod.Amount
+		if string(mod.ID) != skipModifier && mod.Operation == 1 {
+			value += saved * float64(mod.Amount)
 		}
 	}
 	for _, mod := range a.Modifiers {
-		if mod.ID != skipModifier && mod.Operation == 2 {
-			value *= 1.0 + mod.Amount
+		if string(mod.ID) != skipModifier && mod.Operation == 2 {
+			value *= 1.0 + float64(mod.Amount)
 		}
 	}
 	return value
@@ -45,14 +41,12 @@ func (a *Attribute) computeValue(skipModifier string) float64 {
 // applying all modifiers in vanilla order. Returns the fallback if not tracked.
 func (m *Module) AttributeValue(name string, fallback float64) float64 {
 	m.mu.RLock()
+	defer m.mu.RUnlock()
 	attr, ok := m.attributes[name]
 	if !ok {
-		m.mu.RUnlock()
 		return fallback
 	}
-	val := attr.computeValue("")
-	m.mu.RUnlock()
-	return val
+	return attr.Value()
 }
 
 // MovementSpeed predicts a local sprint toggle without double-applying a
@@ -60,8 +54,8 @@ func (m *Module) AttributeValue(name string, fallback float64) float64 {
 func (m *Module) MovementSpeed(sprinting bool) float64 {
 	m.mu.RLock()
 	value := float64(float32(0.1))
-	if attr := m.attributes["minecraft:movement_speed"]; attr != nil {
-		value = attr.computeValue("minecraft:sprinting")
+	if attr, ok := m.attributes["minecraft:movement_speed"]; ok {
+		value = attr.valueWithout("minecraft:sprinting")
 	}
 	m.mu.RUnlock()
 	if sprinting {
@@ -70,21 +64,22 @@ func (m *Module) MovementSpeed(sprinting bool) float64 {
 	return float64(float32(max(0, min(1024, value))))
 }
 
+// scaleLocked returns the minecraft:scale attribute clamped like
+// LivingEntity.getScale. Requires mu.
+func (m *Module) scaleLocked() float32 {
+	value := 1.0
+	if attr, ok := m.attributes["minecraft:scale"]; ok {
+		value = attr.Value()
+	}
+	return float32(max(0.0625, min(16, value)))
+}
+
 func (m *Module) handleUpdateAttributes(pkt *jp.WirePacket) {
-	// parse raw data: the S2CUpdateAttributes binding stores remaining data
-	// as ByteArray which doesn't match the wire format, so we parse manually
-	buf := ns.NewReader(pkt.Data)
-
-	entityID, err := buf.ReadVarInt()
-	if err != nil {
+	if id, ok := peekEntityID(pkt); !ok || id != m.EntityID() {
 		return
 	}
-	if int32(entityID) != m.entityID {
-		return
-	}
-
-	count, err := buf.ReadVarInt()
-	if err != nil {
+	var d packets.S2CUpdateAttributes
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 
@@ -92,56 +87,17 @@ func (m *Module) handleUpdateAttributes(pkt *jp.WirePacket) {
 		name  string
 		value float64
 	}
-	var updates []attrUpdate
+	updates := make([]attrUpdate, 0, len(d.Attributes))
 
 	m.mu.Lock()
-	for range int(count) {
-		attrID, err := buf.ReadVarInt()
-		if err != nil {
-			break
-		}
-		name := registries.Attribute.ByID(int32(attrID))
+	for _, snapshot := range d.Attributes {
+		name := registries.Attribute.ByID(int32(snapshot.Type))
 		if name == "" {
-			break
+			continue
 		}
-
-		base, err := buf.ReadFloat64()
-		if err != nil {
-			break
-		}
-
-		modCount, err := buf.ReadVarInt()
-		if err != nil {
-			break
-		}
-
-		mods := make([]AttributeModifier, 0, int(modCount))
-		for range int(modCount) {
-			modID, err := buf.ReadIdentifier()
-			if err != nil {
-				break
-			}
-			amount, err := buf.ReadFloat64()
-			if err != nil {
-				break
-			}
-			op, err := buf.ReadVarInt()
-			if err != nil {
-				break
-			}
-			mods = append(mods, AttributeModifier{
-				ID:        string(modID),
-				Amount:    float64(amount),
-				Operation: int32(op),
-			})
-		}
-
-		attr := &Attribute{
-			Base:      float64(base),
-			Modifiers: mods,
-		}
+		attr := Attribute(snapshot)
 		m.attributes[name] = attr
-		updates = append(updates, attrUpdate{name, attr.computeValue("")})
+		updates = append(updates, attrUpdate{name, attr.Value()})
 	}
 	m.mu.Unlock()
 

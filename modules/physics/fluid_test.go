@@ -15,10 +15,10 @@ func (w fluidTestWorld) GetBlock(x, y, z int) int32 { return w[[3]int{x, y, z}] 
 
 func fluidTestState(t *testing.T, name string, props map[string]string) int32 {
 	t.Helper()
-	id := blocks.BlockID("minecraft:" + name)
+	id := blocks.ID("minecraft:" + name)
 	state := blocks.DefaultStateID(id)
 	if props != nil {
-		state = blocks.StateID(int(id), props)
+		state = blocks.StateID(id, props)
 	}
 	if state < 0 {
 		t.Fatalf("missing block state %s %v", name, props)

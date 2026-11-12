@@ -1,4 +1,4 @@
-package chat_test
+package signing_test
 
 import (
 	"bytes"
@@ -10,7 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-mclib/client/chat"
+	"github.com/go-mclib/client/modules/chat/internal/signing"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 func sig(fill byte) []byte {
@@ -22,7 +23,7 @@ func sig(fill byte) []byte {
 }
 
 func TestEmptyUpdate(t *testing.T) {
-	cs := chat.NewChatSigner()
+	cs := signing.NewSigner()
 	update := cs.GenerateAndApplyUpdate()
 
 	if update.Offset != 0 || len(update.LastSeen) != 0 {
@@ -35,7 +36,7 @@ func TestEmptyUpdate(t *testing.T) {
 }
 
 func TestAddPendingDedupe(t *testing.T) {
-	cs := chat.NewChatSigner()
+	cs := signing.NewSigner()
 	if !cs.AddPending(sig(1)) {
 		t.Fatal("first signature should be tracked")
 	}
@@ -51,7 +52,7 @@ func TestAddPendingDedupe(t *testing.T) {
 }
 
 func TestGenerateAndApplyUpdate(t *testing.T) {
-	cs := chat.NewChatSigner()
+	cs := signing.NewSigner()
 	cs.AddPending(sig(1))
 	cs.AddPending(sig(2))
 
@@ -80,7 +81,7 @@ func TestGenerateAndApplyUpdate(t *testing.T) {
 }
 
 func TestWindowCapsAtTwenty(t *testing.T) {
-	cs := chat.NewChatSigner()
+	cs := signing.NewSigner()
 	for i := range 25 {
 		cs.AddPending(sig(byte(i + 1)))
 	}
@@ -97,7 +98,7 @@ func TestWindowCapsAtTwenty(t *testing.T) {
 }
 
 func TestGetAndClearOffset(t *testing.T) {
-	cs := chat.NewChatSigner()
+	cs := signing.NewSigner()
 	cs.AddPending(sig(1))
 	cs.AddPending(sig(2))
 	if got := cs.GetAndClearOffset(); got != 2 {
@@ -113,10 +114,12 @@ func TestSignMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cs := chat.NewChatSigner()
+	cs := signing.NewSigner()
 	cs.SetPrivateKey(key)
 	cs.PlayerUUID[0] = 0xAA
-	cs.SessionUUID[0] = 0xBB
+	var session ns.UUID
+	session[0] = 0xBB
+	cs.StartSession(session)
 
 	timestamp := time.Unix(1700000000, 0)
 	lastSeen := [][]byte{sig(1), sig(2)}
@@ -129,7 +132,7 @@ func TestSignMessage(t *testing.T) {
 	h := sha256.New()
 	binary.Write(h, binary.BigEndian, int32(1))
 	h.Write(cs.PlayerUUID[:])
-	h.Write(cs.SessionUUID[:])
+	h.Write(session[:])
 	binary.Write(h, binary.BigEndian, int32(0)) // first message index
 	binary.Write(h, binary.BigEndian, int64(42))
 	binary.Write(h, binary.BigEndian, timestamp.Unix())
@@ -154,8 +157,56 @@ func TestSignMessage(t *testing.T) {
 }
 
 func TestSignMessageWithoutKey(t *testing.T) {
-	cs := chat.NewChatSigner()
+	cs := signing.NewSigner()
 	if _, err := cs.SignMessage("hello", time.Now(), 0, nil); err == nil {
 		t.Fatal("expected error without private key")
+	}
+}
+
+func TestStartSessionResetsChainAndLastSeen(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := signing.NewSigner()
+	cs.SetPrivateKey(key)
+	cs.StartSession(ns.UUID{1})
+	cs.AddPending(sig(1))
+	cs.AddPending(sig(2))
+	if _, err := cs.SignMessage("first", time.Now(), 0, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	session := ns.UUID{2}
+	cs.StartSession(session)
+	if cs.SessionUUID() != session {
+		t.Fatal("session UUID not replaced")
+	}
+	update := cs.GenerateAndApplyUpdate()
+	if update.Offset != 0 || len(update.LastSeen) != 0 || update.Checksum != 1 {
+		t.Fatalf("last-seen state survived new session: %+v", update)
+	}
+	if cs.AddPending(sig(2)) != true {
+		t.Fatal("dedupe state survived new session")
+	}
+
+	// a fresh session starts the message chain at index 0
+	timestamp := time.Unix(1700000000, 0)
+	signature, err := cs.SignMessage("hello", timestamp, 7, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := sha256.New()
+	binary.Write(h, binary.BigEndian, int32(1))
+	h.Write(cs.PlayerUUID[:])
+	h.Write(session[:])
+	binary.Write(h, binary.BigEndian, int32(0))
+	binary.Write(h, binary.BigEndian, int64(7))
+	binary.Write(h, binary.BigEndian, timestamp.Unix())
+	binary.Write(h, binary.BigEndian, int32(len("hello")))
+	h.Write([]byte("hello"))
+	binary.Write(h, binary.BigEndian, int32(0))
+	if err := rsa.VerifyPKCS1v15(&key.PublicKey, crypto.SHA256, h.Sum(nil), signature); err != nil {
+		t.Fatalf("message index not reset: %v", err)
 	}
 }

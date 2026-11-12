@@ -1,13 +1,13 @@
 package collisions
 
 import (
-	"fmt"
+	"errors"
 	"math"
 	"slices"
+	"sync"
 
 	"github.com/go-mclib/client"
 	"github.com/go-mclib/client/modules/world"
-	"github.com/go-mclib/data/block_shapes"
 	"github.com/go-mclib/data/blocks"
 )
 
@@ -25,35 +25,59 @@ type Module struct {
 	client   *client.Client
 	world    blockGetter
 	entities entityCollisions
-	context  playerContext
-	border   borderState
+
+	// mu guards context and border: the physics tick and packet loop write
+	// them while planners query from other goroutines. Queries copy both once.
+	mu      sync.RWMutex
+	context playerContext
+	border  borderState
 }
 
-func New() *Module                      { return &Module{border: defaultBorder()} }
-func (m *Module) Name() string          { return ModuleName }
-func (m *Module) Init(c *client.Client) { m.client = c }
+func New() *Module             { return &Module{border: defaultBorder()} }
+func (m *Module) Name() string { return ModuleName }
+func (m *Module) Init(c *client.Client) {
+	m.client = c
+	c.OnTransfer(m.Reset)
+}
+
+// World returns the world module collisions reads terrain from, or nil before
+// Wire.
+func (m *Module) World() *world.Module {
+	w, _ := m.world.(*world.Module)
+	return w
+}
+
 func (m *Module) Reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.context = playerContext{}
 	m.border = defaultBorder()
+}
+
+// snapshot copies the player context and border for one query.
+func (m *Module) snapshot() (playerContext, borderState) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.context, m.border
+}
+
+func (m *Module) playerContext() playerContext {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.context
 }
 
 func (m *Module) Wire() error {
 	w := world.From(m.client)
 	if w == nil {
-		return fmt.Errorf("requires world module")
+		return errors.New("requires world module")
 	}
 	m.world = w
 	m.entities, _ = m.client.Module("entities").(entityCollisions)
 	return nil
 }
 
-func From(c *client.Client) *Module {
-	mod := c.Module(ModuleName)
-	if mod == nil {
-		return nil
-	}
-	return mod.(*Module)
-}
+func From(c *client.Client) *Module { return client.ModuleAs[*Module](c, ModuleName) }
 
 // CollideMovement resolves Entity.collide movement. onGround is the previous
 // movement's ground state, not a proximity probe; maxStep is the step attribute.
@@ -66,9 +90,10 @@ func (m *Module) CollideMovement(x, y, z, width, height, dx, dy, dz float64, onG
 		query := region.Inflate(Epsilon, Epsilon, Epsilon)
 		entities = m.entities.CollisionBoxes(query.MinX, query.MinY, query.MinZ, query.MaxX, query.MaxY, query.MaxZ)
 	}
+	ctx, border := m.snapshot()
 	adjX, adjY, adjZ = dx, dy, dz
 	if dx*dx+dy*dy+dz*dz != 0 {
-		shapes := m.collectColliders(region, x, y, z, entities)
+		shapes := m.collectColliders(region, x, y, z, entities, ctx, &border)
 		adjX, adjY, adjZ = collideWithShapes(box, shapes, dx, dy, dz)
 	}
 	landed := dy != adjY && dy < 0
@@ -82,7 +107,7 @@ func (m *Module) CollideMovement(x, y, z, width, height, dx, dy, dz float64, onG
 		if !landed {
 			stepRegion = stepRegion.ExpandTowards(0, -float64(float32(1.0e-5)), 0)
 		}
-		shapes := m.collectColliders(stepRegion, x, y, z, entities)
+		shapes := m.collectColliders(stepRegion, x, y, z, entities, ctx, &border)
 		for _, candidate := range collectCandidateStepUpHeights(grounded, shapes, float32(maxStep), float32(adjY)) {
 			sx, sy, sz := collideWithShapes(grounded, shapes, dx, float64(candidate), dz)
 			if sx*sx+sz*sz > adjX*adjX+adjZ*adjZ {
@@ -155,19 +180,19 @@ func collideWithShapes(box AABB, shapes []voxelShape, dx, dy, dz float64) (float
 	return dx, dy, dz
 }
 
-func (m *Module) collectColliders(region AABB, x, bottom, z float64, entities []AABB) []voxelShape {
+func (m *Module) collectColliders(region AABB, x, bottom, z float64, entities []AABB, ctx playerContext, border *borderState) []voxelShape {
 	shapes := make([]voxelShape, 0, len(entities)+1)
 	for _, box := range entities {
 		shapes = append(shapes, voxelShape{box: box})
 	}
-	shapes = m.appendBorder(shapes, region, x, z)
-	return m.blockCollisions(region, bottom, false, shapes)
+	shapes = appendBorder(border, shapes, region, x, z)
+	return m.blockCollisions(region, bottom, false, ctx, shapes)
 }
 
 // blockCollisions follows BlockCollisions/Cursor3D: X fastest, then Y, then Z.
 // The one-cell halo includes tall fences/walls/gates below the entity's feet.
 // Face cells require large shapes, edge cells moving pistons, corners are skipped.
-func (m *Module) blockCollisions(region AABB, bottom float64, suffocatingOnly bool, result []voxelShape) []voxelShape {
+func (m *Module) blockCollisions(region AABB, bottom float64, suffocatingOnly bool, ctx playerContext, result []voxelShape) []voxelShape {
 	if m.world == nil {
 		return result
 	}
@@ -191,13 +216,13 @@ func (m *Module) blockCollisions(region AABB, bottom float64, suffocatingOnly bo
 					continue
 				}
 				state, known := m.world.GetLoadedBlock(x, y, z)
-				if !known || state == 0 || suffocatingOnly && !block_shapes.IsSuffocating(state) {
+				if !known || state == 0 || suffocatingOnly && !blocks.IsSuffocating(state) {
 					continue
 				}
-				if boundary == 1 && !block_shapes.HasLargeCollisionShape(state) || boundary == 2 && blocks.BlockName(blocks.StateBlockID(state)) != "minecraft:moving_piston" {
+				if boundary == 1 && !blocks.HasLargeCollisionShape(state) || boundary == 2 && blocks.Name(blocks.StateBlockID(state)) != "minecraft:moving_piston" {
 					continue
 				}
-				shape, collidable := m.collisionVoxel(state, x, y, z, bottom)
+				shape, collidable := collisionVoxel(ctx, state, x, y, z, bottom)
 				if !collidable {
 					continue
 				}
@@ -206,7 +231,7 @@ func (m *Module) blockCollisions(region AABB, bottom float64, suffocatingOnly bo
 				for i := range shape.size() {
 					part := shape.part(i)
 					intersects := region.Intersects(part)
-					if !block_shapes.IsFullBlock(state) {
+					if !blocks.IsFullBlock(state) {
 						intersects = region.intersectsVoxel(part)
 					}
 					if intersects {
@@ -228,7 +253,7 @@ func (m *Module) SupportSurfaceY(bx, by, bz int, width float64) (surfaceY float6
 		return 0, false
 	}
 	best := math.Inf(-1)
-	for _, collider := range m.blockCollisions(footprint.Inflate(0, 1.0e-6, 0), footprint.MinY, false, nil) {
+	for _, collider := range m.blockCollisions(footprint.Inflate(0, 1.0e-6, 0), footprint.MinY, false, m.playerContext(), nil) {
 		for i := range collider.size() {
 			shape := collider.part(i)
 			if shape.MaxY < float64(by)-Epsilon || shape.MaxY >= float64(by)+1 {
@@ -237,7 +262,7 @@ func (m *Module) SupportSurfaceY(bx, by, bz int, width float64) (surfaceY float6
 			if shape.MaxX <= footprint.MinX+Epsilon || shape.MinX > footprint.MaxX-Epsilon || shape.MaxZ <= footprint.MinZ+Epsilon || shape.MinZ > footprint.MaxZ-Epsilon {
 				continue
 			}
-			best = math.Max(best, shape.MaxY)
+			best = max(best, shape.MaxY)
 		}
 	}
 	if math.IsInf(best, -1) {
@@ -250,7 +275,7 @@ func (m *Module) SupportSurfaceY(bx, by, bz int, width float64) (surfaceY float6
 // for the previous tick's onGround flag when deciding whether stepping is allowed.
 func (m *Module) IsOnGround(x, y, z, width float64) bool {
 	feet := EntityAABB(x, y-1.0e-6, z, width, 1.0e-6)
-	return len(m.blockCollisions(feet, y, false, nil)) != 0
+	return len(m.blockCollisions(feet, y, false, m.playerContext(), nil)) != 0
 }
 
 func (m *Module) loaded(box AABB) bool {
@@ -278,7 +303,8 @@ func (m *Module) CanFitAt(x, y, z, width, height float64) bool {
 // NoCollision checks block, rigid-entity and world-border overlap without
 // changing the supplied AABB. Callers are responsible for loaded terrain.
 func (m *Module) NoCollision(box AABB) bool {
-	if m.CollidesWith(box) {
+	ctx, border := m.snapshot()
+	if len(m.blockCollisions(box, box.MinY, false, ctx, nil)) != 0 {
 		return false
 	}
 	if m.entities != nil {
@@ -288,9 +314,9 @@ func (m *Module) NoCollision(box AABB) bool {
 		}
 	}
 	var borderStorage [1]voxelShape
-	for _, border := range m.appendBorder(borderStorage[:0], box, (box.MinX+box.MaxX)/2, (box.MinZ+box.MaxZ)/2) {
-		for i := range border.size() {
-			if box.intersectsVoxel(border.part(i)) {
+	for _, shape := range appendBorder(&border, borderStorage[:0], box, (box.MinX+box.MaxX)/2, (box.MinZ+box.MaxZ)/2) {
+		for i := range shape.size() {
+			if box.intersectsVoxel(shape.part(i)) {
 				return false
 			}
 		}
@@ -300,11 +326,11 @@ func (m *Module) NoCollision(box AABB) bool {
 
 // CollidesWith reports block collision overlap, without pose-fit deflation.
 func (m *Module) CollidesWith(box AABB) bool {
-	return len(m.blockCollisions(box, box.MinY, false, nil)) != 0
+	return len(m.blockCollisions(box, box.MinY, false, m.playerContext(), nil)) != 0
 }
 
 // CollidesWithSuffocatingBlock is the collision query used by corner escape.
 // Fences, stairs and other merely-collidable blocks are not suffocating blocks.
 func (m *Module) CollidesWithSuffocatingBlock(box AABB) bool {
-	return len(m.blockCollisions(box, box.MinY, true, nil)) != 0
+	return len(m.blockCollisions(box, box.MinY, true, m.playerContext(), nil)) != 0
 }

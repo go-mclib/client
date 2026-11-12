@@ -2,6 +2,7 @@ package inventory
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -10,8 +11,9 @@ import (
 
 	"github.com/go-mclib/data/items"
 	"github.com/go-mclib/data/packets"
-	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	"github.com/go-mclib/data/slots"
+	jp "github.com/go-mclib/protocol/javaproto"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 // Snapshot is an independent copy of the active authoritative menu. WindowID 0
@@ -21,6 +23,9 @@ import (
 // Ready is false before complete content arrives or after an unconfirmed click.
 // Revision increases on accepted server updates and local view/selection changes;
 // it never resets across sessions. StateID is the server's menu synchronization ID.
+// Known reports, per player protocol slot (0..45, independent of the open
+// menu), whether the server sent the slot's contents since the last reset or
+// respawn; unknown slots read as empty.
 type Snapshot struct {
 	WindowID       int32
 	StateID        int32
@@ -32,6 +37,7 @@ type Snapshot struct {
 	Slots          []ns.Slot
 	Cursor         ns.Slot
 	HeldSlot       int
+	Known          [slots.PlayerInvSize]bool
 }
 
 // Operation describes move, swap, split, drop, select_hotbar, close, or sort.
@@ -46,7 +52,7 @@ type Snapshot struct {
 // matching stacks and orders storage by item ID/component bytes; it never sorts
 // crafting, equipment, input, or output slots. Other fields are unused by each kind.
 type Operation struct {
-	Kind                    string
+	Kind                    OperationKind
 	WindowID                int32
 	Revision                uint64
 	From, To, Count, Hotbar int
@@ -60,10 +66,33 @@ type Operation struct {
 // work, or failed before any click. Errors never imply rollback. Do not retry a
 // drop blindly: an unacknowledged packet may already have executed on the server.
 type OperationResult struct {
-	Status   string
+	Status   OperationStatus
 	Clicks   int
 	Snapshot Snapshot
 }
+
+// OperationKind selects what Execute does; see Operation for per-kind fields.
+type OperationKind string
+
+const (
+	OpMove         OperationKind = "move"
+	OpSplit        OperationKind = "split"
+	OpSwap         OperationKind = "swap"
+	OpDrop         OperationKind = "drop"
+	OpSelectHotbar OperationKind = "select_hotbar"
+	OpClose        OperationKind = "close"
+	OpSort         OperationKind = "sort"
+)
+
+// OperationStatus reports how far an operation got; see OperationResult.
+type OperationStatus string
+
+const (
+	StatusConfirmed OperationStatus = "confirmed"
+	StatusSent      OperationStatus = "sent"
+	StatusPartial   OperationStatus = "partial"
+	StatusFailed    OperationStatus = "failed"
+)
 
 const (
 	inventoryOperationTimeout = 2 * time.Minute
@@ -86,49 +115,32 @@ func (m *Module) startSession() {
 		m.session.cancel()
 	}
 	m.epoch++
-	transport := m.client.TCPClient
-	if transport == nil || transport.Conn() == nil {
+	session := m.client.Session()
+	if session == nil || session.Conn() == nil {
 		m.session = nil
 		return
 	}
-	conn := transport.Conn()
-	ctx, cancel := context.WithCancel(context.Background())
+	// The inventory session also ends on module reset, before the client
+	// session does.
+	ctx, cancel := context.WithCancel(session.Context())
 	s := &inventorySession{ctx: ctx, cancel: cancel}
 	s.send = func(ctx context.Context, packet jp.Packet) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
 		if err := s.ctx.Err(); err != nil {
 			return err
 		}
-		if transport.Conn() != conn {
-			return errors.New("inventory connection replaced")
-		}
-		// A blocked write may only close the captured connection, never a new one.
-		stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
-		err := transport.WritePacket(inventoryPacket{Packet: packet, ctx: ctx, session: s.ctx})
-		stop()
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if s.ctx.Err() != nil {
-			return s.ctx.Err()
-		}
-		return err
+		return session.Write(ctx, inventoryPacket{Packet: packet, session: s.ctx})
 	}
 	m.session = s
 	m.notifyLocked()
 }
 
+// inventoryPacket is not serialized once its inventory session ended.
 type inventoryPacket struct {
 	jp.Packet
-	ctx, session context.Context
+	session context.Context
 }
 
 func (p inventoryPacket) Write(buf *ns.PacketBuffer) error {
-	if err := p.ctx.Err(); err != nil {
-		return err
-	}
 	if err := p.session.Err(); err != nil {
 		return err
 	}
@@ -144,7 +156,7 @@ func (m *Module) Snapshot() Snapshot {
 
 func (m *Module) snapshotLocked() Snapshot {
 	s := Snapshot{StateID: m.stateID, Revision: m.revision, Ready: m.ready,
-		MenuType: MenuPlayer, Cursor: cloneRawSlot(m.cursor.raw), HeldSlot: m.heldSlot}
+		MenuType: MenuPlayer, Cursor: cloneRawSlot(m.cursor.raw), HeldSlot: m.heldSlot, Known: m.known}
 	if c := m.container; c != nil {
 		s.WindowID, s.StateID, s.MenuType, s.Title = c.windowID, c.stateID, c.menuType, c.title
 		s.ContainerSlots, s.Ready = len(c.slots), c.ready
@@ -153,7 +165,7 @@ func (m *Module) snapshotLocked() Snapshot {
 			s.Slots[i] = cloneRawSlot(c.view[i].raw)
 		}
 	} else {
-		s.Slots = make([]ns.Slot, TotalSlots)
+		s.Slots = make([]ns.Slot, slots.PlayerInvSize)
 		for i := range m.slots {
 			s.Slots[i] = cloneRawSlot(m.slots[i].raw)
 		}
@@ -218,65 +230,49 @@ func (m *Module) beginTransaction(ctx context.Context, op Operation) (*inventory
 func (m *Module) Execute(ctx context.Context, op Operation) (result OperationResult, err error) {
 	tx, done, err := m.beginTransaction(ctx, op)
 	if err != nil {
-		return OperationResult{Status: "failed", Snapshot: m.Snapshot()}, err
+		return OperationResult{Status: StatusFailed, Snapshot: m.Snapshot()}, err
 	}
 	defer done()
 	defer func() {
 		result.Clicks, result.Snapshot = tx.clicks, m.Snapshot()
 		if err != nil {
-			result.Status = "failed"
+			result.Status = StatusFailed
 			if tx.clicks > 0 {
-				result.Status = "partial"
+				result.Status = StatusPartial
 			}
 		}
 	}()
-	if !tx.current.Ready {
-		if err = tx.click(-1, 0, 0, nil); err != nil {
-			return result, err
-		}
-		if !tx.current.Ready {
-			return result, errors.New("unsupported or incomplete menu layout")
-		}
+	if err = tx.ensureReady(); err != nil {
+		return result, err
 	}
-	result.Status = "confirmed"
+	result.Status = StatusConfirmed
 	switch op.Kind {
-	case "select_hotbar":
+	case OpSelectHotbar:
 		if op.Hotbar < 0 || op.Hotbar > 8 {
 			return result, errors.New("hotbar must be 0..8")
 		}
-		if err = tx.send(&packets.C2SSetCarriedItem{Slot: ns.Int16(op.Hotbar)}); err != nil {
+		if err = tx.selectHotbar(op.Hotbar, tx.send); err != nil {
 			return result, err
 		}
-		m.mu.Lock()
-		if err = tx.checkLocked(); err != nil {
-			m.mu.Unlock()
-			return result, err
-		}
-		m.heldSlot = op.Hotbar
-		m.notifyLocked()
-		m.mu.Unlock()
-		for _, cb := range m.onHeldSlotChange {
-			cb(op.Hotbar)
-		}
-		result.Status = "sent"
-	case "close":
+		result.Status = StatusSent
+	case OpClose:
 		err = tx.close()
-	case "move", "split", "swap", "drop", "sort":
-		cursorOperation := op.From == -1 && (op.Kind == "move" || op.Kind == "split" || op.Kind == "drop")
+	case OpMove, OpSplit, OpSwap, OpDrop, OpSort:
+		cursorOperation := op.From == -1 && (op.Kind == OpMove || op.Kind == OpSplit || op.Kind == OpDrop)
 		if !tx.current.Cursor.IsEmpty() && !cursorOperation {
 			return result, errors.New("cursor is not empty; place it with move From=-1 before starting an operation")
 		}
 		switch op.Kind {
-		case "move", "split":
-			if op.Kind == "split" && op.Count <= 0 {
+		case OpMove, OpSplit:
+			if op.Kind == OpSplit && op.Count <= 0 {
 				return result, errors.New("split count must be positive")
 			}
 			err = tx.move(op.From, op.To, op.Count)
-		case "swap":
+		case OpSwap:
 			err = tx.swap(op.From, op.To)
-		case "drop":
+		case OpDrop:
 			err = tx.drop(op.From, op.Count)
-		case "sort":
+		case OpSort:
 			err = tx.sort()
 		}
 	default:
@@ -285,12 +281,63 @@ func (m *Module) Execute(ctx context.Context, op Operation) (result OperationRes
 	if err == nil {
 		m.mu.RLock()
 		err = tx.checkLocked()
-		if err == nil && result.Status == "confirmed" && !m.matchesLocked(tx.current) {
+		if err == nil && result.Status == StatusConfirmed && !m.matchesLocked(tx.current) {
 			err = errInventoryChanged
 		}
 		m.mu.RUnlock()
 	}
 	return result, err
+}
+
+// beginCurrent starts a transaction on the current window and revision and
+// resynchronizes an unready view first.
+func (m *Module) beginCurrent(ctx context.Context) (*inventoryTransaction, func(), error) {
+	snapshot := m.Snapshot()
+	tx, done, err := m.beginTransaction(ctx, Operation{WindowID: snapshot.WindowID, Revision: snapshot.Revision})
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := tx.ensureReady(); err != nil {
+		done()
+		return nil, nil, err
+	}
+	return tx, done, nil
+}
+
+// ensureReady requests a full resync when the view is not ready and fails
+// when the menu layout is still unsupported afterwards.
+func (tx *inventoryTransaction) ensureReady() error {
+	if tx.current.Ready {
+		return nil
+	}
+	if err := tx.click(-1, 0, 0, nil); err != nil {
+		return err
+	}
+	if !tx.current.Ready {
+		return errors.New("unsupported or incomplete menu layout")
+	}
+	return nil
+}
+
+// selectHotbar sends a held-slot change through send and, if the transaction
+// is still current, records it and notifies observers.
+func (tx *inventoryTransaction) selectHotbar(slot int, send func(jp.Packet) error) error {
+	if err := send(&packets.C2SSetCarriedItem{Slot: ns.Int16(slot)}); err != nil {
+		return err
+	}
+	m := tx.m
+	m.mu.Lock()
+	if err := tx.checkLocked(); err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	m.heldSlot = slot
+	m.notifyLocked()
+	m.mu.Unlock()
+	for _, cb := range m.onHeldSlotChange {
+		cb(slot)
+	}
+	return nil
 }
 
 func (tx *inventoryTransaction) checkLocked() error {
@@ -365,7 +412,7 @@ func (tx *inventoryTransaction) click(slot, button, mode int, expected *Snapshot
 	defer cancel()
 	tx.clicks++
 	err = tx.transmit(ctx, &packets.C2SContainerClick{
-		WindowId: ns.VarInt(tx.window), StateId: -1, Slot: ns.Int16(slot),
+		WindowID: ns.VarInt(tx.window), StateID: -1, Slot: ns.Int16(slot),
 		Button: ns.Int8(button), Mode: ns.VarInt(mode), CarriedItem: ns.EmptyHashedSlot(),
 	}, expected != nil)
 	if err != nil {
@@ -427,7 +474,7 @@ func (m *Module) matchesLocked(s Snapshot) bool {
 		}
 		return true
 	}
-	if s.WindowID != 0 || len(s.Slots) != TotalSlots {
+	if s.WindowID != 0 || len(s.Slots) != slots.PlayerInvSize {
 		return false
 	}
 	for i := range m.slots {
@@ -464,14 +511,9 @@ func sameIdentity(a, b ns.Slot) bool {
 		return false
 	}
 	for _, x := range a.Components.Add {
-		found := false
-		for _, y := range b.Components.Add {
-			if x.ID == y.ID && bytes.Equal(x.Data, y.Data) {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !slices.ContainsFunc(b.Components.Add, func(y ns.RawSlotComponent) bool {
+			return x.ID == y.ID && bytes.Equal(x.Data, y.Data)
+		}) {
 			return false
 		}
 	}
@@ -528,7 +570,7 @@ func (tx *inventoryTransaction) writable(index int) error {
 
 func (tx *inventoryTransaction) slotLimit(index int, stack ns.Slot) int {
 	limit := min(99, int(items.SlotMaxStackSize(stack)))
-	if tx.window == 0 && index >= SlotArmorHead && index <= SlotArmorFeet {
+	if tx.window == 0 && index >= slots.PlayerArmorHead && index <= slots.PlayerArmorFeet {
 		return 1
 	}
 	if tx.window != 0 && index < tx.current.ContainerSlots {
@@ -544,7 +586,7 @@ func (tx *inventoryTransaction) slotLimit(index int, stack ns.Slot) int {
 				return 1
 			}
 		case MenuFurnace, MenuBlastFurnace, MenuSmoker:
-			if index == 1 && stack.ItemID == ns.VarInt(items.ItemID("minecraft:bucket")) {
+			if index == 1 && stack.ItemID == ns.VarInt(items.ID("minecraft:bucket")) {
 				return 1
 			}
 		}
@@ -701,7 +743,7 @@ func (tx *inventoryTransaction) hotbarSwap(from, hotbar int) error {
 	if hotbar < 0 || hotbar > 8 {
 		return errors.New("hotbar must be 0..8")
 	}
-	to := SlotHotbarStart + hotbar
+	to := slots.PlayerHotbarStart + hotbar
 	if tx.window != 0 {
 		to = tx.current.ContainerSlots + 27 + hotbar
 	}
@@ -801,7 +843,7 @@ func (tx *inventoryTransaction) close() error {
 	if tx.window == 0 {
 		return nil
 	}
-	if err := tx.send(&packets.C2SContainerClose{WindowId: ns.VarInt(tx.window)}); err != nil {
+	if err := tx.send(&packets.C2SContainerClose{WindowID: ns.VarInt(tx.window)}); err != nil {
 		return err
 	}
 	m := tx.m
@@ -827,7 +869,7 @@ func (tx *inventoryTransaction) close() error {
 
 func storageRange(s Snapshot) (int, int, error) {
 	if s.WindowID == 0 {
-		return SlotMainStart, SlotHotbarEnd, nil
+		return slots.PlayerMainStart, slots.PlayerHotbarEnd, nil
 	}
 	if s.MenuType >= MenuGeneric9x1 && s.MenuType <= MenuGeneric3x3 || s.MenuType == MenuHopper || s.MenuType == MenuShulkerBox {
 		return 0, s.ContainerSlots, nil
@@ -889,16 +931,11 @@ func compareSlots(a, b ns.Slot, aKey, bKey []byte) int {
 	if b.IsEmpty() {
 		return -1
 	}
-	if a.ItemID != b.ItemID {
-		if a.ItemID < b.ItemID {
-			return -1
-		}
-		return 1
-	}
-	if c := bytes.Compare(aKey, bKey); c != 0 {
-		return c
-	}
-	return int(b.Count) - int(a.Count)
+	return cmp.Or(
+		cmp.Compare(a.ItemID, b.ItemID),
+		bytes.Compare(aKey, bKey),
+		cmp.Compare(b.Count, a.Count),
+	)
 }
 
 func componentKey(s ns.Slot) []byte {
@@ -907,7 +944,7 @@ func componentKey(s ns.Slot) []byte {
 	}
 	add := slices.Clone(s.Components.Add)
 	remove := slices.Clone(s.Components.Remove)
-	slices.SortFunc(add, func(a, b ns.RawSlotComponent) int { return int(a.ID) - int(b.ID) })
+	slices.SortFunc(add, func(a, b ns.RawSlotComponent) int { return cmp.Compare(a.ID, b.ID) })
 	slices.Sort(remove)
 	buf := ns.NewWriter()
 	buf.WriteVarInt(ns.VarInt(len(add)))

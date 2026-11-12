@@ -13,8 +13,8 @@ func isWoodenDoor(stateID int32) bool {
 	if stateID == 0 {
 		return false
 	}
-	blockID, _ := blocks.StateProperties(int(stateID))
-	name := blocks.BlockName(blockID)
+	blockID, _ := blocks.StateProperties(stateID)
+	name := blocks.Name(blockID)
 	if !strings.HasSuffix(name, "_door") {
 		return false
 	}
@@ -23,13 +23,13 @@ func isWoodenDoor(stateID int32) bool {
 
 // isDoorOpen checks if a door block state has open=true.
 func isDoorOpen(stateID int32) bool {
-	_, props := blocks.StateProperties(int(stateID))
+	_, props := blocks.StateProperties(stateID)
 	return props["open"] == "true"
 }
 
 // isDoorLowerHalf returns true if this is the lower half of a door.
 func isDoorLowerHalf(stateID int32) bool {
-	_, props := blocks.StateProperties(int(stateID))
+	_, props := blocks.StateProperties(stateID)
 	return props["half"] == "lower"
 }
 

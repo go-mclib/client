@@ -1,14 +1,17 @@
 package world
 
 import (
+	"cmp"
 	"container/heap"
 	"context"
+	"errors"
 	"fmt"
 	"math"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/go-mclib/data/blocks"
+	"github.com/go-mclib/data/chunks"
 )
 
 // BlockQuery searches block centers within Radius of (X,Y,Z). Names are exact
@@ -53,6 +56,12 @@ type BlockSearchResult struct {
 	Complete     bool         `json:"complete"`
 }
 
+var (
+	errBlockQueryBounds = errors.New("radius must be 1..128 and limit must be 1..50")
+	errBlockQueryCenter = errors.New("query center must be finite and inside protocol position bounds")
+	errBlockQueryEmpty  = errors.New("names or label is required")
+)
+
 // FindBlocks scans only loaded sections. Work is bounded by Radius, storage by
 // Limit plus distinct observed states. A single read lock provides a coherent
 // snapshot without per-block lock traffic; cancellation is checked each row.
@@ -62,66 +71,35 @@ func (m *Module) FindBlocks(ctx context.Context, q BlockQuery) (BlockSearchResul
 		result.Complete = false
 		return result, err
 	}
-	if math.IsNaN(q.Radius) || q.Radius < 1 || q.Radius > 128 || q.Limit < 1 || q.Limit > 50 {
-		return BlockSearchResult{}, fmt.Errorf("radius must be 1..128 and limit must be 1..50")
+	if err := validateBlockQuery(q); err != nil {
+		return BlockSearchResult{}, err
 	}
-	// Positions on the wire use signed 26-bit X/Z and 12-bit Y. Keep float-to-int
-	// conversion and chunk arithmetic safe, including queries outside build height.
-	if !queryCoordinate(q.X, 33554432) || !queryCoordinate(q.Z, 33554432) || !queryCoordinate(q.Y, 2048) {
-		return BlockSearchResult{}, fmt.Errorf("query center must be finite and inside protocol position bounds")
-	}
-	label := strings.ToLower(q.Label)
-	if len(q.Names) == 0 && label == "" {
-		return BlockSearchResult{}, fmt.Errorf("names or label is required")
-	}
-	names := make(map[int32]bool, len(q.Names))
-	for _, name := range q.Names {
-		if !strings.Contains(name, ":") {
-			name = "minecraft:" + name
-		}
-		id := blocks.BlockID(name)
-		if id < 0 {
-			return BlockSearchResult{}, fmt.Errorf("unknown block %q", name)
-		}
-		names[id] = true
-	}
-	type stateFilter struct {
-		name    string
-		matches bool
-	}
-	states := make(map[int32]stateFilter)
-	filter := func(state int32) stateFilter {
-		if f, ok := states[state]; ok {
-			return f
-		}
-		id := blocks.StateBlockID(state)
-		if id < 0 {
-			result.Complete = false
-			return stateFilter{}
-		}
-		name := blocks.BlockName(id)
-		f := stateFilter{name, id >= 0 && (len(names) == 0 || names[id]) && (label == "" || isContainer(name))}
-		states[state] = f
-		return f
+	filter, err := compileBlockFilter(q)
+	if err != nil {
+		return BlockSearchResult{}, err
 	}
 	low := [3]int{int(math.Ceil(q.X - q.Radius - .5)), int(math.Ceil(q.Y - q.Radius - .5)), int(math.Ceil(q.Z - q.Radius - .5))}
 	high := [3]int{int(math.Floor(q.X + q.Radius - .5)), int(math.Floor(q.Y + q.Radius - .5)), int(math.Floor(q.Z + q.Radius - .5))}
-	radius2 := q.Radius * q.Radius
+	scan := blockScan{
+		q: q, filter: filter, result: &result,
+		radius2: q.Radius * q.Radius,
+		nearest: make(blockMatchHeap, 0, q.Limit),
+	}
 	minDY := centerRangeDistance(q.Y, low[1], high[1])
-	nearest := make(blockMatchHeap, 0, q.Limit)
-	matches := 0
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for cx := low[0] >> 4; cx <= high[0]>>4; cx++ {
 		for cz := low[2] >> 4; cz <= high[2]>>4; cz++ {
-			minX, maxX := max(low[0], cx*16), min(high[0], cx*16+15)
-			minZ, maxZ := max(low[2], cz*16), min(high[2], cz*16+15)
-			dx := centerRangeDistance(q.X, minX, maxX)
-			dz := centerRangeDistance(q.Z, minZ, maxZ)
-			if dx*dx+minDY*minDY+dz*dz > radius2 {
+			box := blockBox{
+				minX: max(low[0], cx*16), maxX: min(high[0], cx*16+15),
+				minZ: max(low[2], cz*16), maxZ: min(high[2], cz*16+15),
+			}
+			dx := centerRangeDistance(q.X, box.minX, box.maxX)
+			dz := centerRangeDistance(q.Z, box.minZ, box.maxZ)
+			if dx*dx+minDY*minDY+dz*dz > scan.radius2 {
 				continue
 			}
-			column := m.chunks[ChunkKey(int32(cx), int32(cz))]
+			column := m.chunks[chunkKey(int32(cx), int32(cz))]
 			if column != nil {
 				result.LoadedChunks++
 			}
@@ -130,79 +108,179 @@ func (m *Module) FindBlocks(ctx context.Context, q BlockQuery) (BlockSearchResul
 					result.Complete = false
 					return result, err
 				}
-				minY, maxY := max(low[1], sy*16), min(high[1], sy*16+15)
-				dy := centerRangeDistance(q.Y, minY, maxY)
-				if dx*dx+dy*dy+dz*dz > radius2 {
+				box.minY, box.maxY = max(low[1], sy*16), min(high[1], sy*16+15)
+				dy := centerRangeDistance(q.Y, box.minY, box.maxY)
+				if dx*dx+dy*dy+dz*dz > scan.radius2 {
 					continue
 				}
 				if column == nil {
 					result.Complete = false
 					continue
 				}
-				index := column.SectionIndex(minY)
+				index := column.SectionIndex(box.minY)
 				if index < 0 || column.Sections[index] == nil || column.Sections[index].BlockStates == nil {
 					result.Complete = false
 					continue
 				}
-				section := column.Sections[index]
-				// Empty and other uniform palettes need only one state lookup.
-				if section.BlockStates.BitsPerEntry() == 0 && !filter(section.BlockStates.Get(0)).matches {
-					continue
-				}
-				for y := minY; y <= maxY; y++ {
-					for z := minZ; z <= maxZ; z++ {
-						if err := ctx.Err(); err != nil {
-							result.Complete = false
-							return result, err
-						}
-						for x := minX; x <= maxX; x++ {
-							dx, dy, dz := float64(x)+.5-q.X, float64(y)+.5-q.Y, float64(z)+.5-q.Z
-							distance2 := dx*dx + dy*dy + dz*dz
-							if distance2 > radius2 {
-								continue
-							}
-							state := section.GetBlockState(x&15, y&15, z&15)
-							f := filter(state)
-							if !f.matches {
-								continue
-							}
-							candidate := BlockMatch{X: x, Y: y, Z: z, StateID: state, Name: f.name, Distance: distance2}
-							if label != "" {
-								labels, complete := m.containerLabelsLocked(x, y, z)
-								result.Complete = result.Complete && complete
-								if !labelsContain(labels, label) {
-									continue
-								}
-								candidate.Labels = labels
-							}
-							matches++
-							if len(nearest) == q.Limit && !blockMatchLess(candidate, nearest[0]) {
-								continue
-							}
-							if len(nearest) == q.Limit {
-								nearest[0] = candidate
-								heap.Fix(&nearest, 0)
-							} else {
-								heap.Push(&nearest, candidate)
-							}
-						}
-					}
+				if err := m.scanSectionLocked(ctx, &scan, column.Sections[index], box); err != nil {
+					result.Complete = false
+					return result, err
 				}
 			}
 		}
 	}
-	sort.Slice(nearest, func(i, j int) bool { return blockMatchLess(nearest[i], nearest[j]) })
+	nearest := scan.nearest
+	slices.SortFunc(nearest, compareBlockMatch)
 	for i := range nearest {
 		nearest[i].Distance = math.Sqrt(nearest[i].Distance)
-		if label == "" {
+		if filter.label == "" {
 			labels, complete := m.containerLabelsLocked(nearest[i].X, nearest[i].Y, nearest[i].Z)
 			nearest[i].Labels = labels
 			result.Complete = result.Complete && complete
 		}
 	}
 	result.Blocks = []BlockMatch(nearest)
-	result.Truncated = matches > q.Limit
+	result.Truncated = scan.matches > q.Limit
 	return result, nil
+}
+
+func validateBlockQuery(q BlockQuery) error {
+	if math.IsNaN(q.Radius) || q.Radius < 1 || q.Radius > 128 || q.Limit < 1 || q.Limit > 50 {
+		return errBlockQueryBounds
+	}
+	// Positions on the wire use signed 26-bit X/Z and 12-bit Y. Keep float-to-int
+	// conversion and chunk arithmetic safe, including queries outside build height.
+	if !queryCoordinate(q.X, 33554432) || !queryCoordinate(q.Z, 33554432) || !queryCoordinate(q.Y, 2048) {
+		return errBlockQueryCenter
+	}
+	if len(q.Names) == 0 && q.Label == "" {
+		return errBlockQueryEmpty
+	}
+	return nil
+}
+
+// blockFilter decides per block state whether it is a candidate, caching the
+// decision for every distinct state observed.
+type blockFilter struct {
+	names  map[int32]bool // empty: any block
+	label  string         // lower-cased; non-empty restricts to containers
+	states map[int32]stateFilter
+}
+
+type stateFilter struct {
+	name    string
+	matches bool
+}
+
+func compileBlockFilter(q BlockQuery) (*blockFilter, error) {
+	f := &blockFilter{
+		names:  make(map[int32]bool, len(q.Names)),
+		label:  strings.ToLower(q.Label),
+		states: make(map[int32]stateFilter),
+	}
+	for _, name := range q.Names {
+		if !strings.Contains(name, ":") {
+			name = "minecraft:" + name
+		}
+		id := blocks.ID(name)
+		if id < 0 {
+			return nil, fmt.Errorf("unknown block %q", name)
+		}
+		f.names[id] = true
+	}
+	return f, nil
+}
+
+// state returns the cached decision for state; known is false for a state ID
+// outside the block registry, which is never cached or matched.
+func (f *blockFilter) state(state int32) (filter stateFilter, known bool) {
+	if cached, ok := f.states[state]; ok {
+		return cached, true
+	}
+	id := blocks.StateBlockID(state)
+	if id < 0 {
+		return stateFilter{}, false
+	}
+	name := blocks.Name(id)
+	filter = stateFilter{name, (len(f.names) == 0 || f.names[id]) && (f.label == "" || isContainer(name))}
+	f.states[state] = filter
+	return filter, true
+}
+
+// blockBox is an inclusive block range inside one chunk section.
+type blockBox struct{ minX, maxX, minY, maxY, minZ, maxZ int }
+
+// blockScan accumulates the Limit nearest matches of one FindBlocks query.
+type blockScan struct {
+	q       BlockQuery
+	filter  *blockFilter
+	result  *BlockSearchResult
+	radius2 float64
+	nearest blockMatchHeap // max-heap on distance: nearest[0] is the worst kept
+	matches int
+}
+
+// offer counts a match and keeps it if it is among the Limit nearest.
+func (s *blockScan) offer(candidate BlockMatch) {
+	s.matches++
+	if len(s.nearest) < s.q.Limit {
+		heap.Push(&s.nearest, candidate)
+		return
+	}
+	if compareBlockMatch(candidate, s.nearest[0]) < 0 {
+		s.nearest[0] = candidate
+		heap.Fix(&s.nearest, 0)
+	}
+}
+
+func (s *blockScan) match(state int32) (stateFilter, bool) {
+	f, known := s.filter.state(state)
+	if !known {
+		s.result.Complete = false
+	}
+	return f, f.matches
+}
+
+// scanSectionLocked offers every matching block of section inside box and the
+// query sphere. Caller holds m.mu.
+func (m *Module) scanSectionLocked(ctx context.Context, s *blockScan, section *chunks.Section, box blockBox) error {
+	// Empty and other uniform palettes need only one state lookup.
+	if section.BlockStates.BitsPerEntry() == 0 {
+		if _, ok := s.match(section.BlockStates.Get(0)); !ok {
+			return nil
+		}
+	}
+	q := s.q
+	for y := box.minY; y <= box.maxY; y++ {
+		for z := box.minZ; z <= box.maxZ; z++ {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			for x := box.minX; x <= box.maxX; x++ {
+				dx, dy, dz := float64(x)+.5-q.X, float64(y)+.5-q.Y, float64(z)+.5-q.Z
+				distance2 := dx*dx + dy*dy + dz*dz
+				if distance2 > s.radius2 {
+					continue
+				}
+				state := section.GetBlockState(x&15, y&15, z&15)
+				f, ok := s.match(state)
+				if !ok {
+					continue
+				}
+				candidate := BlockMatch{X: x, Y: y, Z: z, StateID: state, Name: f.name, Distance: distance2}
+				if s.filter.label != "" {
+					labels, complete := m.containerLabelsLocked(x, y, z)
+					s.result.Complete = s.result.Complete && complete
+					if !labelsContain(labels, s.filter.label) {
+						continue
+					}
+					candidate.Labels = labels
+				}
+				s.offer(candidate)
+			}
+		}
+	}
+	return nil
 }
 
 func queryCoordinate(value, bound float64) bool {
@@ -229,23 +307,14 @@ func labelsContain(labels []SignLabel, query string) bool {
 	return false
 }
 
-func blockMatchLess(a, b BlockMatch) bool {
-	if a.Distance != b.Distance {
-		return a.Distance < b.Distance
-	}
-	if a.X != b.X {
-		return a.X < b.X
-	}
-	if a.Y != b.Y {
-		return a.Y < b.Y
-	}
-	return a.Z < b.Z
+func compareBlockMatch(a, b BlockMatch) int {
+	return cmp.Or(cmp.Compare(a.Distance, b.Distance), cmp.Compare(a.X, b.X), cmp.Compare(a.Y, b.Y), cmp.Compare(a.Z, b.Z))
 }
 
 type blockMatchHeap []BlockMatch
 
 func (h blockMatchHeap) Len() int           { return len(h) }
-func (h blockMatchHeap) Less(i, j int) bool { return blockMatchLess(h[j], h[i]) }
+func (h blockMatchHeap) Less(i, j int) bool { return compareBlockMatch(h[j], h[i]) < 0 }
 func (h blockMatchHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
 func (h *blockMatchHeap) Push(v any)        { *h = append(*h, v.(BlockMatch)) }
 func (h *blockMatchHeap) Pop() any          { old := *h; v := old[len(old)-1]; *h = old[:len(old)-1]; return v }

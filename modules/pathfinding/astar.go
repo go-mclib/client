@@ -3,8 +3,9 @@ package pathfinding
 import (
 	"container/heap"
 	"context"
-	"fmt"
+	"errors"
 	"math"
+	"slices"
 	"time"
 
 	"github.com/go-mclib/client/modules/collisions"
@@ -24,76 +25,100 @@ var diagonalOffsets = [4][2]int{
 	{1, 1}, {1, -1}, {-1, 1}, {-1, -1},
 }
 
-func findPath(ctx context.Context, w *world.Module, col *collisions.Module, ents *entities.Module,
-	startX, startY, startZ, goalX, goalY, goalZ, maxNodes int,
-	cfg simulationConfig,
-) ([]PathNode, error) {
-	return searchPath(ctx, w, col, ents, startX, startY, startZ, goalX, goalY, goalZ, maxNodes, cfg, false)
+// search holds one A* run: the terrain sources, the goal, the open set and the
+// best known cost to each position. The try* generators push neighbours via
+// relax.
+type search struct {
+	ctx                 context.Context
+	world               *world.Module
+	col                 *collisions.Module
+	ents                *entities.Module // optional entity-avoidance costs
+	goalX, goalY, goalZ int
+	cfg                 simulationConfig
+	gScore              map[[3]int]float64
+	open                nodeHeap
 }
 
-// searchPath returns either the goal or a safe bounded segment. A segment's
-// endpoint is not a navigation success; the controller retains the ultimate goal.
-func searchPath(ctx context.Context, w *world.Module, col *collisions.Module, ents *entities.Module,
-	startX, startY, startZ, goalX, goalY, goalZ, maxNodes int,
-	cfg simulationConfig, partial bool,
-) ([]PathNode, error) {
-	if err := ctx.Err(); err != nil {
+var (
+	errStartUnloaded = errors.New("pathfinding: start terrain is unloaded")
+	errGoalUnloaded  = errors.New("pathfinding: goal terrain is unloaded")
+	errStartBlocked  = errors.New("pathfinding: start has no support or headroom")
+	errGoalBlocked   = errors.New("pathfinding: goal has no support or headroom")
+	errNoPath        = errors.New("pathfinding: no path found")
+	errInvalidGoal   = errors.New("pathfinding: invalid goal")
+	errRouteUnloaded = errors.New("pathfinding: route terrain unloaded")
+)
+
+func newSearch(ctx context.Context, w *world.Module, col *collisions.Module, ents *entities.Module,
+	goalX, goalY, goalZ int, cfg simulationConfig,
+) *search {
+	return &search{
+		ctx: ctx, world: w, col: col, ents: ents,
+		goalX: goalX, goalY: goalY, goalZ: goalZ,
+		cfg:    cfg,
+		gScore: make(map[[3]int]float64),
+	}
+}
+
+// run returns either the goal or, when partial, a safe bounded segment. A
+// segment's endpoint is not a navigation success; the controller retains the
+// ultimate goal.
+func (s *search) run(startX, startY, startZ, maxNodes int, partial bool) ([]Waypoint, error) {
+	if err := s.ctx.Err(); err != nil {
 		return nil, err
 	}
+	w, col, cfg := s.world, s.col, s.cfg
 	if !nodeLoaded(w, startX, startY, startZ, cfg) {
-		return nil, fmt.Errorf("pathfinding: start terrain is unloaded")
+		return nil, errStartUnloaded
 	}
 	if !partial {
-		if !nodeLoaded(w, goalX, goalY, goalZ, cfg) {
-			return nil, fmt.Errorf("pathfinding: goal terrain is unloaded")
+		if !nodeLoaded(w, s.goalX, s.goalY, s.goalZ, cfg) {
+			return nil, errGoalUnloaded
 		}
-		if _, ok := standSurface(col, goalX, goalY, goalZ, cfg.sneakingHeight, cfg); !ok {
-			return nil, fmt.Errorf("pathfinding: goal has no support or headroom")
+		if _, ok := standSurface(col, s.goalX, s.goalY, s.goalZ, cfg.sneakingHeight, cfg); !ok {
+			return nil, errGoalBlocked
 		}
 	}
 	if _, ok := standSurface(col, startX, startY, startZ, cfg.sneakingHeight, cfg); !ok {
-		return nil, fmt.Errorf("pathfinding: start has no support or headroom")
+		return nil, errStartBlocked
 	}
-	start := &PathNode{X: startX, Y: startY, Z: startZ}
-	start.H = heuristic(startX, startY, startZ, goalX, goalY, goalZ)
-	start.F = start.H
+	start := &node{Waypoint: Waypoint{X: startX, Y: startY, Z: startZ}}
+	start.h = s.heuristic(startX, startY, startZ)
+	start.f = start.h
 
-	openSet := &nodeHeap{start}
-	heap.Init(openSet)
-
+	s.open = nodeHeap{start}
+	heap.Init(&s.open)
 	// track best known g-cost to each position for proper A* deduplication
-	gScore := map[[3]int]float64{
-		{startX, startY, startZ}: 0,
-	}
+	s.gScore[[3]int{startX, startY, startZ}] = 0
 
 	explored := 0
-	var best, frontier *PathNode
+	var best, frontier *node
 	bestScore, frontierScore := math.Inf(1), math.Inf(1)
 	deadline := time.Now().Add(200 * time.Millisecond)
 
-	for openSet.Len() > 0 {
-		if err := ctx.Err(); err != nil {
+	for s.open.Len() > 0 {
+		if err := s.ctx.Err(); err != nil {
 			return nil, err
 		}
-		current := heap.Pop(openSet).(*PathNode)
+		current := heap.Pop(&s.open).(*node)
 		cx, cy, cz := current.X, current.Y, current.Z
 		if partial && !navigationLoaded(w, float64(cx)+0.5, nodeSurfaceY(col, cx, cy, cz, cfg), float64(cz)+0.5, cfg) {
 			continue
 		}
 
-		if cx == goalX && cy == goalY && cz == goalZ {
+		if cx == s.goalX && cy == s.goalY && cz == s.goalZ {
 			return reconstructPath(current), nil
 		}
 
 		// skip if this node has been superseded by a cheaper path
 		key := [3]int{cx, cy, cz}
-		if best, ok := gScore[key]; ok && current.G > best {
+		if g, ok := s.gScore[key]; ok && current.g > g {
 			continue
 		}
 		explored++
-		if partial && current.Parent != nil {
-			score := current.H + current.G*0.1 + float64(cfg.frontiers[key])*32
-			if current.H < start.H-0.5 && score < bestScore {
+		if partial && current.parent != nil {
+			score := current.h + current.g*0.1 + float64(cfg.frontiers[key])*32
+			if current.h < start.h-0.5 && score < bestScore {
 				best, bestScore = current, score
 			}
 			boundary := iabs(cx-startX) >= 24 || iabs(cz-startZ) >= 24
@@ -114,9 +139,9 @@ func searchPath(ctx context.Context, w *world.Module, col *collisions.Module, en
 		}
 
 		// generate all movement types
-		tryCardinalMoves(w, col, ents, current, goalX, goalY, goalZ, gScore, openSet, cfg)
-		tryDiagonalMoves(w, col, ents, current, goalX, goalY, goalZ, gScore, openSet, cfg)
-		tryParkourMoves(ctx, w, col, current, goalX, goalY, goalZ, gScore, openSet, cfg)
+		s.tryCardinalMoves(current)
+		s.tryDiagonalMoves(current)
+		s.tryParkourMoves(current)
 	}
 	if partial {
 		// A cheap boundary behind us must not outrank closer supported progress
@@ -130,15 +155,30 @@ func searchPath(ctx context.Context, w *world.Module, col *collisions.Module, en
 		}
 	}
 
-	return nil, fmt.Errorf("pathfinding: no path found")
+	return nil, errNoPath
+}
+
+// relax records the edge from -> wp when it improves the best known cost to
+// wp, pushing a new open node. It reports whether the edge was accepted.
+func (s *search) relax(from *node, wp Waypoint, cost float64) bool {
+	g := from.g + cost
+	key := [3]int{wp.X, wp.Y, wp.Z}
+	if best, ok := s.gScore[key]; ok && g >= best {
+		return false
+	}
+	s.gScore[key] = g
+	h := s.heuristic(wp.X, wp.Y, wp.Z)
+	heap.Push(&s.open, &node{Waypoint: wp, g: g, h: h, f: g + h, parent: from})
+	return true
+}
+
+func (s *search) heuristic(x, y, z int) float64 {
+	return heuristic(x, y, z, s.goalX, s.goalY, s.goalZ)
 }
 
 // tryCardinalMoves generates walk, step-up, descend, fall, and door moves in 4 cardinal directions.
-func tryCardinalMoves(w *world.Module, col *collisions.Module, ents *entities.Module,
-	current *PathNode, goalX, goalY, goalZ int,
-	gScore map[[3]int]float64, openSet *nodeHeap,
-	cfg simulationConfig,
-) {
+func (s *search) tryCardinalMoves(current *node) {
+	w, col, cfg := s.world, s.col, s.cfg
 	cx, cy, cz := current.X, current.Y, current.Z
 	srcFy := nodeSurfaceY(col, cx, cy, cz, cfg)
 
@@ -146,11 +186,11 @@ func tryCardinalMoves(w *world.Module, col *collisions.Module, ents *entities.Mo
 		nx, nz := cx+off[0], cz+off[1]
 
 		// 1. walk (dy=0)
-		tryMove(w, col, ents, current, srcFy, nx, cy, nz, goalX, goalY, goalZ, gScore, openSet, cfg)
+		s.tryMove(current, srcFy, nx, cy, nz)
 
 		// 2. rise into the next node band, only if the collision sweep can step it
 		for rise := 1; rise <= max(1, int(math.Ceil(cfg.maxStep))); rise++ {
-			tryMove(w, col, ents, current, srcFy, nx, cy+rise, nz, goalX, goalY, goalZ, gScore, openSet, cfg)
+			s.tryMove(current, srcFy, nx, cy+rise, nz)
 		}
 
 		// 3. descend/fall (dy=-1 to -safeFall)
@@ -165,7 +205,7 @@ func tryCardinalMoves(w *world.Module, col *collisions.Module, ents *entities.Mo
 			if edgeBlocked(cfg, current, nx, ny, nz) {
 				continue
 			}
-			cost, sneaking, _ := moveCost(w, col, ents, nx, ny, nz, cfg)
+			cost, sneaking, _ := moveCost(w, col, s.ents, nx, ny, nz, cfg)
 			if cost < 0 {
 				continue
 			}
@@ -179,65 +219,44 @@ func tryCardinalMoves(w *world.Module, col *collisions.Module, ents *entities.Mo
 			if !canPassBetween(w, col, cx, cz, nx, nz, srcFy, srcFy, height, cfg) {
 				break
 			}
-			clear := true
+			columnClear := true
 			for checkY := cy - 1; checkY > ny; checkY-- {
 				if !nodeLoaded(w, nx, checkY, nz, cfg) || !col.CanFitAt(float64(nx)+0.5, float64(checkY), float64(nz)+0.5, cfg.width, height) {
-					clear = false
+					columnClear = false
 					break
 				}
 			}
-			if !clear {
+			if !columnClear {
 				break
 			}
 
-			// calculate edge cost
 			var edgeCost float64
-			switch {
-			case dy == -1:
+			if dy == -1 {
 				edgeCost = cost + descendCost()
-			default: // dy <= -2
+			} else {
 				edgeCost = cost + walkOffBlockCost + fallCost(-dy)
 			}
-
-			tentativeG := current.G + edgeCost
-			nKey := [3]int{nx, ny, nz}
-			if best, ok := gScore[nKey]; ok && tentativeG >= best {
-				continue
+			if s.relax(current, Waypoint{X: nx, Y: ny, Z: nz, Sneaking: sneaking}, edgeCost) {
+				foundLanding = true
 			}
-			gScore[nKey] = tentativeG
-
-			h := heuristic(nx, ny, nz, goalX, goalY, goalZ)
-			node := &PathNode{
-				X: nx, Y: ny, Z: nz,
-				G: tentativeG, H: h, F: tentativeG + h,
-				Sneaking: sneaking,
-				Parent:   current,
-			}
-			heap.Push(openSet, node)
-
-			foundLanding = true
 		}
 
 		// 4. door traversal: check if a closed wooden door blocks walk at (nx, cy, nz)
 		if _, _, _, hasDoor := findClosedWoodenDoor(w, nx, cy, nz); hasDoor {
-			tryDoorMove(w, col, ents, current, nx, cy, nz, goalX, goalY, goalZ, gScore, openSet, cfg)
+			s.tryDoorMove(current, nx, cy, nz)
 		}
 	}
 }
 
 // tryMove attempts to add a walk or step-up node.
-func tryMove(w *world.Module, col *collisions.Module, ents *entities.Module,
-	current *PathNode, srcFy float64, nx, ny, nz int,
-	goalX, goalY, goalZ int,
-	gScore map[[3]int]float64, openSet *nodeHeap,
-	cfg simulationConfig,
-) {
+func (s *search) tryMove(current *node, srcFy float64, nx, ny, nz int) {
+	w, col, cfg := s.world, s.col, s.cfg
 	if edgeBlocked(cfg, current, nx, ny, nz) {
 		return
 	}
 	cx, cz := current.X, current.Z
 
-	cost, sneaking, destFy := moveCost(w, col, ents, nx, ny, nz, cfg)
+	cost, sneaking, destFy := moveCost(w, col, s.ents, nx, ny, nz, cfg)
 	if cost < 0 {
 		return
 	}
@@ -257,32 +276,12 @@ func tryMove(w *world.Module, col *collisions.Module, ents *entities.Module,
 		return
 	}
 
-	edgeCost := cost
-
-	tentativeG := current.G + edgeCost
-	nKey := [3]int{nx, ny, nz}
-	if best, ok := gScore[nKey]; ok && tentativeG >= best {
-		return
-	}
-	gScore[nKey] = tentativeG
-
-	h := heuristic(nx, ny, nz, goalX, goalY, goalZ)
-	node := &PathNode{
-		X: nx, Y: ny, Z: nz,
-		G: tentativeG, H: h, F: tentativeG + h,
-		Sneaking: sneaking,
-		Parent:   current,
-	}
-	heap.Push(openSet, node)
+	s.relax(current, Waypoint{X: nx, Y: ny, Z: nz, Sneaking: sneaking}, cost)
 }
 
 // tryDoorMove adds a node that goes through a closed wooden door.
-func tryDoorMove(w *world.Module, col *collisions.Module, _ *entities.Module,
-	current *PathNode, nx, ny, nz int,
-	goalX, goalY, goalZ int,
-	gScore map[[3]int]float64, openSet *nodeHeap,
-	cfg simulationConfig,
-) {
+func (s *search) tryDoorMove(current *node, nx, ny, nz int) {
+	w, col, cfg := s.world, s.col, s.cfg
 	if edgeBlocked(cfg, current, nx, ny, nz) {
 		return
 	}
@@ -299,34 +298,18 @@ func tryDoorMove(w *world.Module, col *collisions.Module, _ *entities.Module,
 
 	// the door blocks passage, but we can open it
 	// cost = base walk + door interaction penalty
-	cost := sprintOneBlockCost + doorInteractCost
-
-	tentativeG := current.G + cost
-	nKey := [3]int{nx, ny, nz}
-	if best, ok := gScore[nKey]; ok && tentativeG >= best {
-		return
-	}
-	gScore[nKey] = tentativeG
-
-	h := heuristic(nx, ny, nz, goalX, goalY, goalZ)
-	node := &PathNode{
+	s.relax(current, Waypoint{
 		X: nx, Y: ny, Z: nz,
-		G: tentativeG, H: h, F: tentativeG + h,
 		InteractDoor: true,
 		DoorX:        doorX,
 		DoorY:        doorY,
 		DoorZ:        doorZ,
-		Parent:       current,
-	}
-	heap.Push(openSet, node)
+	}, sprintOneBlockCost+doorInteractCost)
 }
 
 // tryDiagonalMoves generates diagonal movement neighbors.
-func tryDiagonalMoves(w *world.Module, col *collisions.Module, ents *entities.Module,
-	current *PathNode, goalX, goalY, goalZ int,
-	gScore map[[3]int]float64, openSet *nodeHeap,
-	cfg simulationConfig,
-) {
+func (s *search) tryDiagonalMoves(current *node) {
+	w, col, cfg := s.world, s.col, s.cfg
 	cx, cy, cz := current.X, current.Y, current.Z
 	srcFy := nodeSurfaceY(col, cx, cy, cz, cfg)
 
@@ -344,7 +327,7 @@ func tryDiagonalMoves(w *world.Module, col *collisions.Module, ents *entities.Mo
 				continue
 			}
 
-			cost, sneaking, destFy := moveCost(w, col, ents, nx, ny, nz, cfg)
+			cost, sneaking, destFy := moveCost(w, col, s.ents, nx, ny, nz, cfg)
 			if cost < 0 {
 				continue
 			}
@@ -370,36 +353,17 @@ func tryDiagonalMoves(w *world.Module, col *collisions.Module, ents *entities.Mo
 			if dy == -1 {
 				edgeCost += descendCost()
 			}
-
-			tentativeG := current.G + edgeCost
-			nKey := [3]int{nx, ny, nz}
-			if best, ok := gScore[nKey]; ok && tentativeG >= best {
-				continue
-			}
-			gScore[nKey] = tentativeG
-
-			h := heuristic(nx, ny, nz, goalX, goalY, goalZ)
-			node := &PathNode{
-				X: nx, Y: ny, Z: nz,
-				G: tentativeG, H: h, F: tentativeG + h,
-				Sneaking: sneaking,
-				Parent:   current,
-			}
-			heap.Push(openSet, node)
+			s.relax(current, Waypoint{X: nx, Y: ny, Z: nz, Sneaking: sneaking}, edgeCost)
 		}
 	}
 }
 
 // tryParkourMoves generates sprint-jump moves using physics simulation.
-func tryParkourMoves(ctx context.Context, w *world.Module, col *collisions.Module,
-	current *PathNode, goalX, goalY, goalZ int,
-	gScore map[[3]int]float64, openSet *nodeHeap,
-	cfg simulationConfig,
-) {
+func (s *search) tryParkourMoves(current *node) {
+	w, col, cfg := s.world, s.col, s.cfg
 	cx, cy, cz := current.X, current.Y, current.Z
 
-	landings := simulateJumps(ctx, col, w, cx, cy, cz, cfg)
-	for _, landing := range landings {
+	for _, landing := range simulateJumps(s.ctx, col, w, cx, cy, cz, cfg) {
 		nx, ny, nz := landing.X, landing.Y, landing.Z
 		if edgeBlocked(cfg, current, nx, ny, nz) {
 			continue
@@ -412,36 +376,22 @@ func tryParkourMoves(ctx context.Context, w *world.Module, col *collisions.Modul
 		// Parkour solves discontinuities, not ordinary ground travel. A jump
 		// omits surface/crouch/descent costs and otherwise becomes a spurious
 		// shortcut on ice or down a perfectly walkable slope.
-		if ordinaryJumpCorridor(ctx, w, col, current, landing, cfg) {
+		if s.ordinaryJumpCorridor(current, landing) {
 			continue
 		}
 
-		// cost based on simulation ticks
-		edgeCost := float64(landing.Ticks) + 1.0 // +1 for the jump action penalty
-
-		tentativeG := current.G + edgeCost
-		nKey := [3]int{nx, ny, nz}
-		if best, ok := gScore[nKey]; ok && tentativeG >= best {
-			continue
-		}
-		gScore[nKey] = tentativeG
-
-		h := heuristic(nx, ny, nz, goalX, goalY, goalZ)
-		yaw := yawBetween(cx, cz, nx, nz)
-		node := &PathNode{
+		// cost based on simulation ticks, +1 for the jump action penalty
+		s.relax(current, Waypoint{
 			X: nx, Y: ny, Z: nz,
-			G: tentativeG, H: h, F: tentativeG + h,
 			Jump:    true,
-			JumpYaw: yaw,
-			Parent:  current,
-		}
-		heap.Push(openSet, node)
+			JumpYaw: yawBetween(cx, cz, nx, nz),
+		}, float64(landing.Ticks)+1.0)
 	}
 }
 
 // ordinaryJumpCorridor reuses the same cardinal edge generator as A*, including
 // its support, step-height, descent-column, sneak and failed-edge checks.
-func ordinaryJumpCorridor(ctx context.Context, w *world.Module, col *collisions.Module, from *PathNode, landing jumpLanding, cfg simulationConfig) bool {
+func (s *search) ordinaryJumpCorridor(from *node, landing jumpLanding) bool {
 	dx, dz := landing.X-from.X, landing.Z-from.Z
 	if dx != 0 && dz != 0 {
 		return false
@@ -452,19 +402,19 @@ func ordinaryJumpCorridor(ctx context.Context, w *world.Module, col *collisions.
 	}
 	ox, oz := sign(dx), sign(dz)
 	current := from
-	open := make(nodeHeap, 0, 24)
-	scores := make(map[[3]int]float64, 24)
+	walk := newSearch(s.ctx, s.world, s.col, nil, landing.X, landing.Y, landing.Z, s.cfg)
+	walk.open = make(nodeHeap, 0, 24)
 	for range count {
-		if ctx.Err() != nil {
+		if s.ctx.Err() != nil {
 			return false
 		}
-		clear(scores)
-		open = open[:0]
-		tryCardinalMoves(w, col, nil, current, landing.X, landing.Y, landing.Z, scores, &open, cfg)
-		var next *PathNode
-		for _, candidate := range open {
+		clear(walk.gScore)
+		walk.open = walk.open[:0]
+		walk.tryCardinalMoves(current)
+		var next *node
+		for _, candidate := range walk.open {
 			if candidate.X == current.X+ox && candidate.Z == current.Z+oz && !candidate.InteractDoor &&
-				(next == nil || candidate.G < next.G) {
+				(next == nil || candidate.g < next.g) {
 				next = candidate
 			}
 		}
@@ -484,32 +434,29 @@ func heuristic(x1, y1, z1, x2, y2, z2 int) float64 {
 	return math.Sqrt(dx*dx+dy*dy+dz*dz) * sprintOneBlockCost
 }
 
-func reconstructPath(node *PathNode) []PathNode {
-	var path []PathNode
-	for n := node; n != nil; n = n.Parent {
-		path = append(path, *n)
+func reconstructPath(end *node) []Waypoint {
+	var path []Waypoint
+	for n := end; n != nil; n = n.parent {
+		path = append(path, n.Waypoint)
 	}
-	// reverse
-	for i, j := 0, len(path)-1; i < j; i, j = i+1, j-1 {
-		path[i], path[j] = path[j], path[i]
-	}
+	slices.Reverse(path)
 	return path
 }
 
-func edgeBlocked(cfg simulationConfig, from *PathNode, x, y, z int) bool {
+func edgeBlocked(cfg simulationConfig, from *node, x, y, z int) bool {
 	_, blocked := cfg.blockedEdges[[6]int{from.X, from.Y, from.Z, x, y, z}]
 	return blocked
 }
 
-// nodeHeap implements heap.Interface for PathNode priority queue.
-type nodeHeap []*PathNode
+// nodeHeap implements heap.Interface for the A* open set.
+type nodeHeap []*node
 
 func (h nodeHeap) Len() int           { return len(h) }
-func (h nodeHeap) Less(i, j int) bool { return h[i].F < h[j].F }
+func (h nodeHeap) Less(i, j int) bool { return h[i].f < h[j].f }
 func (h nodeHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i]; h[i].index = i; h[j].index = j }
 
 func (h *nodeHeap) Push(x any) {
-	n := x.(*PathNode)
+	n := x.(*node)
 	n.index = len(*h)
 	*h = append(*h, n)
 }
@@ -517,9 +464,9 @@ func (h *nodeHeap) Push(x any) {
 func (h *nodeHeap) Pop() any {
 	old := *h
 	n := len(old)
-	node := old[n-1]
+	last := old[n-1]
 	old[n-1] = nil
-	node.index = -1
+	last.index = -1
 	*h = old[:n-1]
-	return node
+	return last
 }

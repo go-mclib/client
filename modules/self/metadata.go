@@ -3,12 +3,23 @@ package self
 import (
 	"github.com/go-mclib/data/entities"
 	"github.com/go-mclib/data/packets"
-	jp "github.com/go-mclib/protocol/java_protocol"
+	jp "github.com/go-mclib/protocol/javaproto"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
+// peekEntityID reads the leading VarInt entity ID of an entity packet, so
+// handlers can skip foreign entities without decoding the whole payload.
+func peekEntityID(pkt *jp.WirePacket) (int32, bool) {
+	id, err := ns.NewReader(pkt.Data).ReadVarInt()
+	return int32(id), err == nil
+}
+
 func (m *Module) handleOwnMetadata(pkt *jp.WirePacket) {
+	if id, ok := peekEntityID(pkt); !ok || id != m.EntityID() {
+		return
+	}
 	var d packets.S2CSetEntityData
-	if pkt.ReadInto(&d) != nil || int32(d.EntityId) != m.EntityID() {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 	m.mu.Lock()
@@ -32,23 +43,43 @@ func (m *Module) handleOwnMetadata(pkt *jp.WirePacket) {
 
 func (m *Module) handlePassengers(pkt *jp.WirePacket) {
 	var d packets.S2CSetPassengers
-	if pkt.ReadInto(&d) != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if int32(d.EntityId) == m.entityID {
+	if int32(d.EntityID) == int32(m.login.EntityID) {
 		m.isVehicle = len(d.Passengers) != 0
 	}
-	if m.vehicleID == int32(d.EntityId) {
+	previous := m.vehicleID
+	if m.vehicleID == int32(d.EntityID) {
 		m.vehicleID = 0
 	}
 	for _, id := range d.Passengers {
-		if int32(id) == m.entityID {
-			m.vehicleID = int32(d.EntityId)
+		if int32(id) == int32(m.login.EntityID) {
+			m.vehicleID = int32(d.EntityID)
 			break
 		}
 	}
+	current := m.vehicleID
+	m.mu.Unlock()
+	m.notifyVehicleChange(previous, current)
+}
+
+func (m *Module) notifyVehicleChange(previous, current int32) {
+	if previous == current {
+		return
+	}
+	for _, cb := range m.onVehicleChange {
+		cb(previous, current)
+	}
+}
+
+// VehicleID returns the entity ID of the vehicle the player rides, or 0.
+// self is the single owner of this state; physics reads it from here.
+func (m *Module) VehicleID() int32 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.vehicleID
 }
 
 // NoGravity reports the server-synchronized entity gravity flag.

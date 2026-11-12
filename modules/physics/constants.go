@@ -19,7 +19,7 @@ import (
 const (
 	// attribute-based (double in vanilla — float64 is correct)
 	Gravity         = 0.08
-	SprintJumpBoost = 0.2 // double literal in jumpFromGround
+	sprintJumpBoost = 0.2 // double literal in jumpFromGround
 	SprintModifier  = float64(float32(0.3))
 
 	// float in vanilla (getJumpPower returns float, JUMP_STRENGTH attribute is 0.42F)
@@ -39,10 +39,10 @@ const (
 	VerticalAirFriction = float64(float32(0.98))
 
 	// float: xxa *= 0.98F in LivingEntity.applyInput
-	InputFriction = float64(float32(0.98))
+	inputFriction = float64(float32(0.98))
 
 	// float: 0.21600002F literal in getFrictionInfluencedSpeed
-	FrictionSpeedFactor = float64(float32(0.21600002))
+	frictionSpeedFactor = float64(float32(0.21600002))
 
 	// float: Block.getFriction() returns float, default 0.6F
 	defaultBlockFriction = float64(float32(0.6))

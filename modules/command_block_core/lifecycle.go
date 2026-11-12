@@ -2,12 +2,16 @@ package command_block_core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"time"
 
+	"github.com/go-mclib/client/modules/interaction"
 	"github.com/go-mclib/data/packets"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	"github.com/go-mclib/data/slots"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 // Build checks permissions, places the cube (via local auto:1b command blocks —
@@ -24,7 +28,7 @@ func (m *Module) Build(ctx context.Context) error {
 
 	if !m.self.CanUseGameMasterBlocks() {
 		m.setState(StateError)
-		return fmt.Errorf("need creative mode and op level >= 2 to program command blocks")
+		return errors.New("need creative mode and op level >= 2 to program command blocks")
 	}
 	if m.cfg.PearlY == 0 {
 		m.cfg.PearlY = m.resolvePearlY()
@@ -32,7 +36,7 @@ func (m *Module) Build(ctx context.Context) error {
 	// the cube grows away from the nearer world boundary; reject a range that
 	// still doesn't fit (e.g. a world shorter than Size) — /fill silently
 	// refuses out-of-range blocks, leaving the core mysteriously absent.
-	minY, maxY := m.dimensionBounds()
+	minY, maxY := m.registry.CurrentBounds()
 	bottom, top := m.cubeBounds()
 	if bottom < minY || top >= maxY {
 		m.setState(StateError)
@@ -52,6 +56,7 @@ func (m *Module) Build(ctx context.Context) error {
 	// pearl holds the chunk now — drop the temporary forceload.
 	if m.cfg.Forceload == ForceloadPearl {
 		if err := sleepCtx(ctx, 500*time.Millisecond); err != nil {
+			m.setState(StateError)
 			return err
 		}
 		if err := m.runTemp(ctx, m.forceloadCmd("remove")); err != nil {
@@ -113,24 +118,26 @@ func (m *Module) bootstrap(ctx context.Context) error {
 func (m *Module) runTemp(ctx context.Context, cmd string) error {
 	place, clicked, face, ok := m.placementTarget()
 	if !ok {
-		return fmt.Errorf("no solid block near the bot to place a bootstrap command block")
+		return errors.New("no solid block near the bot to place a bootstrap command block")
 	}
 	item, err := commandBlockItem(cmd)
 	if err != nil {
 		return err
 	}
-	_ = m.client.SetHeldSlot(0)
-	if err := m.client.SetCreativeSlot(bootstrapSlot, item); err != nil {
+	if err := m.inventory.SetHeldSlot(bootstrapSlot - slots.PlayerHotbarStart); err != nil {
+		return err
+	}
+	if err := m.inventory.SetCreativeSlot(bootstrapSlot, item); err != nil {
 		return err
 	}
 	// place on the clicked block's top face -> command block lands at `place`
-	if err := m.client.PlaceBlock(clicked.X, clicked.Y, clicked.Z, face, 0, 0.5, 1.0, 0.5); err != nil {
+	if err := interaction.UseItemOn(m.client, clicked.X, clicked.Y, clicked.Z, face, 0, 0.5, 1.0, 0.5, m.client.WritePacket); err != nil {
 		return err
 	}
 	if err := sleepCtx(ctx, 150*time.Millisecond); err != nil { // let auto:1b fire
 		return err
 	}
-	_ = m.client.BreakBlock(place.X, place.Y, place.Z, face, true)
+	_ = interaction.StartDestroyBlock(m.client, place.X, place.Y, place.Z, face, m.client.WritePacket)
 	return sleepCtx(ctx, 80*time.Millisecond)
 }
 
@@ -154,7 +161,7 @@ func (m *Module) placementTarget() (place, clicked Pos, face int8, ok bool) {
 // keep-alive, prepended automatically). Reprograms live if ready.
 func (m *Module) SetReserved(cmds []string) error {
 	m.mu.Lock()
-	m.reservedCmds = append([]string(nil), cmds...)
+	m.reservedCmds = slices.Clone(cmds)
 	ready := m.state == StateReady
 	m.mu.Unlock()
 	if ready {

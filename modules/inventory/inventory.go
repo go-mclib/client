@@ -5,22 +5,24 @@ import (
 
 	"github.com/go-mclib/client"
 	"github.com/go-mclib/data/items"
-	"github.com/go-mclib/data/packet_ids"
+	"github.com/go-mclib/data/packetids"
 	"github.com/go-mclib/data/packets"
-	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	"github.com/go-mclib/data/slots"
+	jp "github.com/go-mclib/protocol/javaproto"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 type slotEntry struct {
 	raw  ns.Slot
-	item *items.ItemStack
+	item *items.Stack
 }
 
 type Module struct {
 	client *client.Client
 	mu     sync.RWMutex
 
-	slots    [TotalSlots]slotEntry
+	slots    [slots.PlayerInvSize]slotEntry
+	known    [slots.PlayerInvSize]bool // slot contents received since reset/respawn
 	heldSlot int
 	stateID  int32
 	cursor   slotEntry
@@ -35,10 +37,11 @@ type Module struct {
 	session         *inventorySession
 	pendingRequest  *pendingInventoryRequest
 
-	onSlotUpdate     []func(index int, item *items.ItemStack)
+	onSlotUpdate     []func(index int, item *items.Stack)
 	onHeldSlotChange []func(slot int)
 	onContainerOpen  []func(windowID int32, menuType MenuType, title string)
 	onContainerClose []func()
+	onContentReplace []func(windowID int32)
 }
 
 func New() *Module { return &Module{} }
@@ -60,7 +63,8 @@ func (m *Module) Reset() {
 	}
 	m.epoch++
 	m.ready = false
-	m.slots = [TotalSlots]slotEntry{}
+	m.slots = [slots.PlayerInvSize]slotEntry{}
+	m.known = [slots.PlayerInvSize]bool{}
 	m.heldSlot = 0
 	m.stateID = 0
 	m.cursor = slotEntry{}
@@ -69,15 +73,9 @@ func (m *Module) Reset() {
 	m.mu.Unlock()
 }
 
-func From(c *client.Client) *Module {
-	mod := c.Module(ModuleName)
-	if mod == nil {
-		return nil
-	}
-	return mod.(*Module)
-}
+func From(c *client.Client) *Module { return client.ModuleAs[*Module](c, ModuleName) }
 
-func (m *Module) OnSlotUpdate(cb func(index int, item *items.ItemStack)) {
+func (m *Module) OnSlotUpdate(cb func(index int, item *items.Stack)) {
 	m.onSlotUpdate = append(m.onSlotUpdate, cb)
 }
 
@@ -93,25 +91,37 @@ func (m *Module) OnContainerClose(cb func()) {
 	m.onContainerClose = append(m.onContainerClose, cb)
 }
 
+// OnContentReplaced observes complete content (S2CContainerSetContent) of
+// window 0 or the open container, after it was applied.
+func (m *Module) OnContentReplaced(cb func(windowID int32)) {
+	m.onContentReplace = append(m.onContentReplace, cb)
+}
+
 func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 	if m.client.State() != jp.StatePlay {
 		return
 	}
 	switch pkt.PacketID {
-	case packet_ids.S2COpenScreenID:
+	case packetids.S2COpenScreenID:
 		m.handleOpenScreen(pkt)
-	case packet_ids.S2CContainerSetContentID:
+	case packetids.S2CContainerSetContentID:
 		m.handleContainerSetContent(pkt)
-	case packet_ids.S2CContainerSetSlotID:
+	case packetids.S2CContainerSetSlotID:
 		m.handleContainerSetSlot(pkt)
-	case packet_ids.S2CContainerCloseID:
+	case packetids.S2CContainerCloseID:
 		m.handleContainerClose(pkt)
-	case packet_ids.S2CSetHeldSlotID:
+	case packetids.S2CSetHeldSlotID:
 		m.handleSetHeldSlot(pkt)
-	case packet_ids.S2CSetPlayerInventoryID:
+	case packetids.S2CSetPlayerInventoryID:
 		m.handleSetPlayerInventory(pkt)
-	case packet_ids.S2CSetCursorItemID:
+	case packetids.S2CSetCursorItemID:
 		m.handleSetCursorItem(pkt)
+	case packetids.S2CRespawnID:
+		// the server resends the new player's inventory
+		m.mu.Lock()
+		m.known = [slots.PlayerInvSize]bool{}
+		m.notifyLocked()
+		m.mu.Unlock()
 	}
 }
 
@@ -122,7 +132,7 @@ func (m *Module) handleOpenScreen(pkt *jp.WirePacket) {
 		return
 	}
 
-	if d.WindowId <= 0 {
+	if d.WindowID <= 0 {
 		return
 	}
 	title := d.WindowTitle.String()
@@ -130,7 +140,7 @@ func (m *Module) handleOpenScreen(pkt *jp.WirePacket) {
 	m.mu.Lock()
 	m.epoch++
 	m.container = &containerState{
-		windowID: int32(d.WindowId),
+		windowID: int32(d.WindowID),
 		menuType: MenuType(d.WindowType),
 		title:    title,
 	}
@@ -138,7 +148,7 @@ func (m *Module) handleOpenScreen(pkt *jp.WirePacket) {
 	m.mu.Unlock()
 
 	for _, cb := range m.onContainerOpen {
-		cb(int32(d.WindowId), MenuType(d.WindowType), title)
+		cb(int32(d.WindowID), MenuType(d.WindowType), title)
 	}
 }
 
@@ -149,13 +159,15 @@ func (m *Module) handleContainerSetContent(pkt *jp.WirePacket) {
 		return
 	}
 
-	if d.WindowId == 0 {
-		m.handlePlayerInvSetContent(d)
+	if d.WindowID == 0 {
+		if m.handlePlayerInvSetContent(d) {
+			m.fireContentReplaced(0)
+		}
 		return
 	}
 
 	m.mu.Lock()
-	if m.container == nil || m.container.windowID != int32(d.WindowId) {
+	if m.container == nil || m.container.windowID != int32(d.WindowID) {
 		m.mu.Unlock()
 		return
 	}
@@ -167,17 +179,26 @@ func (m *Module) handleContainerSetContent(pkt *jp.WirePacket) {
 	m.contentRevision++
 	m.notifyLocked()
 	m.mu.Unlock()
+	m.fireContentReplaced(int32(d.WindowID))
 }
 
-func (m *Module) handlePlayerInvSetContent(d packets.S2CContainerSetContent) {
-	m.mu.Lock()
-	if len(d.Slots) != TotalSlots {
-		m.mu.Unlock()
-		return
+func (m *Module) fireContentReplaced(windowID int32) {
+	for _, cb := range m.onContentReplace {
+		cb(windowID)
 	}
-	m.stateID = int32(d.StateId)
+}
+
+// handlePlayerInvSetContent applies window 0 content and reports whether it
+// was complete.
+func (m *Module) handlePlayerInvSetContent(d packets.S2CContainerSetContent) bool {
+	m.mu.Lock()
+	if len(d.Slots) != slots.PlayerInvSize {
+		m.mu.Unlock()
+		return false
+	}
+	m.stateID = int32(d.StateID)
 	count := len(d.Slots)
-	updated := make([]*items.ItemStack, count)
+	updated := make([]*items.Stack, count)
 	for i := range count {
 		entry := decodeSlotEntry(d.Slots[i])
 		m.setPlayerSlotLocked(i, entry)
@@ -196,6 +217,7 @@ func (m *Module) handlePlayerInvSetContent(d packets.S2CContainerSetContent) {
 			cb(i, updated[i])
 		}
 	}
+	return true
 }
 
 func (m *Module) handleContainerSetSlot(pkt *jp.WirePacket) {
@@ -208,14 +230,14 @@ func (m *Module) handleContainerSetSlot(pkt *jp.WirePacket) {
 	// Cursor updates have their own packet in 26.2, not window -1.
 
 	// player inventory
-	if d.WindowId == 0 {
+	if d.WindowID == 0 {
 		idx := int(d.Slot)
-		if idx < 0 || idx >= TotalSlots {
+		if idx < 0 || idx >= slots.PlayerInvSize {
 			return
 		}
 		entry := decodeSlotEntry(d.SlotData)
 		m.mu.Lock()
-		m.stateID = int32(d.StateId)
+		m.stateID = int32(d.StateID)
 		m.setPlayerSlotLocked(idx, entry)
 		m.notifyLocked()
 		m.mu.Unlock()
@@ -227,10 +249,10 @@ func (m *Module) handleContainerSetSlot(pkt *jp.WirePacket) {
 
 	// container window
 	m.mu.Lock()
-	if m.container != nil && m.container.ready && m.container.windowID == int32(d.WindowId) {
+	if m.container != nil && m.container.ready && m.container.windowID == int32(d.WindowID) {
 		idx := int(d.Slot)
 		if idx >= 0 && idx < len(m.container.view) {
-			m.container.stateID = int32(d.StateId)
+			m.container.stateID = int32(d.StateID)
 			m.setContainerViewSlot(idx, decodeSlotEntry(d.SlotData))
 			m.notifyLocked()
 		}
@@ -240,12 +262,12 @@ func (m *Module) handleContainerSetSlot(pkt *jp.WirePacket) {
 
 func (m *Module) handleContainerClose(pkt *jp.WirePacket) {
 	var d packets.S2CContainerClose
-	if err := pkt.ReadInto(&d); err != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 
 	m.mu.Lock()
-	if m.container == nil || m.container.windowID != int32(d.WindowId) {
+	if m.container == nil || m.container.windowID != int32(d.WindowID) {
 		m.mu.Unlock()
 		return
 	}
@@ -262,7 +284,7 @@ func (m *Module) handleContainerClose(pkt *jp.WirePacket) {
 
 func (m *Module) handleSetHeldSlot(pkt *jp.WirePacket) {
 	var d packets.S2CSetHeldSlot
-	if err := pkt.ReadInto(&d); err != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 
@@ -289,7 +311,7 @@ func (m *Module) handleSetPlayerInventory(pkt *jp.WirePacket) {
 	}
 
 	containerIdx := playerInvToContainer(int(d.Slot))
-	if containerIdx < 0 || containerIdx >= TotalSlots {
+	if containerIdx < 0 || containerIdx >= slots.PlayerInvSize {
 		return
 	}
 
@@ -307,7 +329,7 @@ func (m *Module) handleSetPlayerInventory(pkt *jp.WirePacket) {
 
 func (m *Module) handleSetCursorItem(pkt *jp.WirePacket) {
 	var d packets.S2CSetCursorItem
-	if err := pkt.ReadInto(&d); err != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 	m.mu.Lock()

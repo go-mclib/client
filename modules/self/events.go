@@ -45,3 +45,9 @@ func (m *Module) OnExperienceChange(cb func(bar float32, level, total int32)) {
 func (m *Module) OnAttributeUpdate(cb func(name string, value float64)) {
 	m.onAttributeUpdate = append(m.onAttributeUpdate, cb)
 }
+
+// OnVehicleChange observes the local player mounting (previous 0), dismounting
+// (current 0) or switching vehicles, after VehicleID is updated.
+func (m *Module) OnVehicleChange(cb func(previous, current int32)) {
+	m.onVehicleChange = append(m.onVehicleChange, cb)
+}

@@ -1,4 +1,4 @@
-package chat
+package signing
 
 import "bytes"
 
@@ -13,15 +13,10 @@ const (
 // lastSeenTracker mirrors vanilla's LastSeenMessagesTracker: a ring of the
 // last 20 received signatures plus a count of messages not yet acknowledged.
 type lastSeenTracker struct {
-	tracked     [lastSeenCapacity]*trackedMessage
+	tracked     [lastSeenCapacity][]byte
 	tail        int
 	offset      int
 	lastTracked []byte
-}
-
-type trackedMessage struct {
-	signature []byte
-	pending   bool
 }
 
 // Update carries the last-seen state attached to one outbound signed message.
@@ -34,7 +29,7 @@ type Update struct {
 
 // AddPending records a received message signature and reports whether it was
 // newly tracked (a repeat of the previous signature is ignored).
-func (cs *ChatSigner) AddPending(signature []byte) bool {
+func (cs *Signer) AddPending(signature []byte) bool {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
@@ -43,21 +38,21 @@ func (cs *ChatSigner) AddPending(signature []byte) bool {
 		return false
 	}
 	t.lastTracked = signature
-	t.tracked[t.tail] = &trackedMessage{signature: signature, pending: true}
+	t.tracked[t.tail] = signature
 	t.tail = (t.tail + 1) % lastSeenCapacity
 	t.offset++
 	return true
 }
 
 // Offset returns the number of received messages not yet acknowledged.
-func (cs *ChatSigner) Offset() int {
+func (cs *Signer) Offset() int {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 	return cs.tracker.offset
 }
 
 // GetAndClearOffset returns and resets the pending count, for C2SChatAck.
-func (cs *ChatSigner) GetAndClearOffset() int {
+func (cs *Signer) GetAndClearOffset() int {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 	return cs.tracker.getAndClearOffset()
@@ -65,7 +60,7 @@ func (cs *ChatSigner) GetAndClearOffset() int {
 
 // GenerateAndApplyUpdate snapshots the last-seen window for an outbound
 // message, marking every tracked entry as acknowledged.
-func (cs *ChatSigner) GenerateAndApplyUpdate() Update {
+func (cs *Signer) GenerateAndApplyUpdate() Update {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
@@ -73,13 +68,12 @@ func (cs *ChatSigner) GenerateAndApplyUpdate() Update {
 	update := Update{Offset: t.getAndClearOffset()}
 	for i := range lastSeenCapacity {
 		idx := (t.tail + i) % lastSeenCapacity
-		msg := t.tracked[idx]
-		if msg == nil {
+		signature := t.tracked[idx]
+		if signature == nil {
 			continue
 		}
 		update.Acknowledged[i] = true
-		update.LastSeen = append(update.LastSeen, msg.signature)
-		msg.pending = false
+		update.LastSeen = append(update.LastSeen, signature)
 	}
 	update.Checksum = lastSeenChecksum(update.LastSeen)
 	return update

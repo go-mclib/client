@@ -2,15 +2,12 @@ package client
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"time"
 
-	"github.com/go-mclib/client/chat"
 	auth "github.com/go-mclib/protocol/auth"
-	mc_crypto "github.com/go-mclib/protocol/crypto"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
-	session_server "github.com/go-mclib/protocol/java_protocol/session_server"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
+	"github.com/go-mclib/protocol/sessionserver"
 )
 
 func (c *Client) initializeAuth(ctx context.Context) error {
@@ -19,12 +16,14 @@ func (c *Client) initializeAuth(ctx context.Context) error {
 			c.Username = "GoMclibPlayer"
 			c.Logger.Println("Warning: no username provided for offline mode, defaulting to 'GoMclibPlayer'")
 		}
-		uuid := mc_crypto.OfflinePlayerUUID(c.Username)
-		c.LoginData = auth.LoginData{Username: c.Username, UUID: uuid.String()}
+		c.sessionMu.Lock()
+		c.loginData = auth.LoginData{Username: c.Username, UUID: ns.OfflinePlayerUUID(c.Username)}
+		c.authClient, c.sessionClient = nil, nil
+		c.sessionMu.Unlock()
 		return nil
 	}
 
-	authClient := auth.NewClient(auth.AuthClientConfig{
+	authClient := auth.NewClient(auth.Config{
 		ClientID: c.ClientID,
 		Username: c.Username,
 	})
@@ -34,37 +33,16 @@ func (c *Client) initializeAuth(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("authentication failed: %w", err)
 	}
-	c.LoginData = ld
 
 	if c.Username != "" && c.Username != ld.Username {
 		c.Logger.Printf("Warning: authenticated as '%s' but requested username was '%s' (credentials may have changed)", ld.Username, c.Username)
 	}
 	c.Username = ld.Username
 
-	cert, err := auth.FetchMojangCertificate(ld.AccessToken)
-	if err != nil {
-		return fmt.Errorf("fetch certificate: %w", err)
-	}
-
-	c.ChatSigner = chat.NewChatSigner()
-	c.ChatSigner.SetPrivateKey(cert.PrivateKey)
-
-	playerUUID, err := ns.UUIDFromString(ld.UUID)
-	if err != nil {
-		return fmt.Errorf("parse player uuid: %w", err)
-	}
-	c.ChatSigner.PlayerUUID = playerUUID
-	c.ChatSigner.X509PublicKey = cert.PublicKeyBytes
-
-	mojangSig, err := base64.StdEncoding.DecodeString(cert.Certificate.PublicKeySignatureV2)
-	if err != nil {
-		return fmt.Errorf("decode mojang signature: %w", err)
-	}
-	c.ChatSigner.SessionKey = mojangSig
-	if expiry, err := time.Parse(time.RFC3339Nano, cert.Certificate.ExpiresAt); err == nil {
-		c.ChatSigner.KeyExpiry = expiry
-	}
-
-	c.SessionClient = session_server.NewSessionServerClient()
+	c.sessionMu.Lock()
+	c.loginData = ld
+	c.authClient = authClient
+	c.sessionClient = sessionserver.New(nil)
+	c.sessionMu.Unlock()
 	return nil
 }

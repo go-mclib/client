@@ -11,24 +11,21 @@ import (
 	"sync"
 
 	"github.com/go-mclib/client"
-	"github.com/go-mclib/client/helpers"
+	"github.com/go-mclib/client/botcli"
 	"github.com/go-mclib/client/modules/self"
 )
 
 func main() {
-	var f helpers.Flags
-	helpers.RegisterFlags(&f)
+	var f botcli.Flags
+	botcli.RegisterFlags(&f)
 	flag.Parse()
 
-	c := helpers.NewClient(f)
+	c := botcli.NewClient(f)
 
 	// start reading stdin once, after the first spawn (OnSpawn also fires on respawn)
-	var once sync.Once
-	self.From(c).OnSpawn(func() {
-		once.Do(func() { go readInput(c) })
-	})
+	self.From(c).OnSpawn(sync.OnceFunc(func() { go readInput(c) }))
 
-	helpers.Run(c)
+	botcli.Run(c, f)
 }
 
 // readInput forwards each stdin line: '/'-prefixed lines as commands, the rest as chat.

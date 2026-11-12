@@ -2,6 +2,7 @@ package pathfinding
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/go-mclib/client/modules/physics"
@@ -22,7 +23,7 @@ func TestStopClearsMotionAndInvalidatesNavigation(t *testing.T) {
 	m.self = self.New()
 	m.physics = physics.New()
 	m.navigating = true
-	m.path = []PathNode{{X: 10, Y: 64, Z: 10}}
+	m.path = []Waypoint{{X: 10, Y: 64, Z: 10}}
 	m.physics.SetInput(1, 0, true)
 	m.Stop()
 	m.navigationTick()
@@ -33,9 +34,9 @@ func TestStopClearsMotionAndInvalidatesNavigation(t *testing.T) {
 }
 
 func TestCancelledSearchStopsBeforeReadingTerrain(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if _, err := New().FindPathContext(ctx, 0, 64, 0); err != context.Canceled {
+	if _, err := New().FindPathContext(ctx, 0, 64, 0); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled path planning continued: %v", err)
 	}
 }

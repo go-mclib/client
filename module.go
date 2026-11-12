@@ -1,6 +1,6 @@
 package client
 
-import jp "github.com/go-mclib/protocol/java_protocol"
+import jp "github.com/go-mclib/protocol/javaproto"
 
 // Module is a pluggable game-state component.
 type Module interface {
@@ -15,6 +15,14 @@ type Module interface {
 	Reset()
 }
 
+// ModuleAs returns the module registered under name as T, or the zero value
+// when no module is registered or it has a different type (for example a
+// wrapper registered under the same name).
+func ModuleAs[T Module](c *Client, name string) T {
+	m, _ := c.modulesByName[name].(T)
+	return m
+}
+
 // Wirer is optionally implemented by modules that depend on sibling modules.
 // Wire runs once after all modules are registered and before connecting, so a
 // module can resolve typed handles to its dependencies and fail fast if a
@@ -23,14 +31,8 @@ type Wirer interface {
 	Wire() error
 }
 
-// ChatSessionSender is optionally implemented by the chat module.
-// The protocol module calls this during config -> play transition.
-type ChatSessionSender interface {
-	SendChatSessionData() error
-}
-
 // ChatMessageSender is optionally implemented by the chat module.
-// The client forwards SendChatMessage/SendCommand through this for TUI support.
+// The client forwards SendChatMessage/SendCommand through this.
 type ChatMessageSender interface {
 	SendMessage(msg string) error
 	SendCommand(cmd string) error

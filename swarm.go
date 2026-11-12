@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"slices"
 	"sync"
 )
 
@@ -40,9 +41,7 @@ func (s *Swarm) Add(c *Client) {
 func (s *Swarm) Clients() []*Client {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]*Client, len(s.clients))
-	copy(out, s.clients)
-	return out
+	return slices.Clone(s.clients)
 }
 
 // Len returns the number of clients in the swarm.
@@ -102,9 +101,12 @@ func (s *Swarm) markPlay(c *Client) {
 	}
 }
 
-// Start connects all clients concurrently.
-// Returns the first error from any client, or nil if all exit cleanly.
+// Start connects all clients concurrently and waits for all of them to stop.
+// The first client error cancels the others; Start returns that error, or nil
+// if all exit cleanly.
 func (s *Swarm) Start(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	clients := s.Clients()
 
 	// wire the readiness barrier before any client connects
@@ -119,11 +121,12 @@ func (s *Swarm) Start(ctx context.Context) error {
 		}()
 	}
 
-	// return first error
+	var first error
 	for range clients {
-		if err := <-errs; err != nil {
-			return err
+		if err := <-errs; err != nil && first == nil {
+			first = err
+			cancel()
 		}
 	}
-	return nil
+	return first
 }

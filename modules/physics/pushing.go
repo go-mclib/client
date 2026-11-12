@@ -18,7 +18,7 @@ import (
 // Ordinary server pushes set needsSync (tracking players only), whereas hurtMarked
 // motion is sent to self too and replaces velocity in handleEntityMotion.
 func (m *Module) applyEntityPushing(x, y, z, height float64) {
-	if m.entities == nil || m.self == nil || m.self.IsDead() || m.self.Gamemode() == 3 ||
+	if m.entities == nil || m.self == nil || m.self.IsDead() || m.self.IsSpectator() ||
 		m.self.IsVehicle() || m.onClimbableAt(x, y, z) {
 		return
 	}
@@ -65,14 +65,14 @@ func entityPushSourceIntersects(e *entities.Entity, playerBox collisions.AABB) b
 // entityPushImpulse returns the local half of Entity.push. Preserve Java's
 // float constants widened to double and its sequential multiply operations.
 func entityPushImpulse(dx, dz float64) (float64, float64) {
-	distance := math.Max(math.Abs(dx), math.Abs(dz))
+	distance := max(math.Abs(dx), math.Abs(dz))
 	if !(distance >= float64(float32(0.01))) {
 		return 0, 0
 	}
 	distance = math.Sqrt(distance)
 	dx /= distance
 	dz /= distance
-	power := math.Min(1, 1/distance)
+	power := min(1, 1/distance)
 	dx *= power
 	dz *= power
 	dx *= float64(float32(0.05))
@@ -86,12 +86,12 @@ func entityPushImpulse(dx, dz float64) (float64, float64) {
 // onClimbableAt follows LivingEntity.onClimbable, including open trapdoors
 // continuing a ladder with the same facing. Tags use the generated vanilla set.
 func (m *Module) onClimbableAt(x, y, z float64) bool {
-	if m.world == nil || m.self != nil && m.self.Gamemode() == 3 {
+	if m.world == nil || m.self != nil && m.self.IsSpectator() {
 		return false
 	}
 	bx, by, bz := int(math.Floor(x)), int(math.Floor(y)), int(math.Floor(z))
-	id, props := blocks.StateProperties(int(m.world.GetBlock(bx, by, bz)))
-	name := blocks.BlockName(id)
+	id, props := blocks.StateProperties(m.world.GetBlock(bx, by, bz))
+	name := blocks.Name(id)
 	if m.self != nil && m.self.FallFlying() && slices.Contains(registries.TagData["minecraft:block"]["minecraft:can_glide_through"], name) {
 		return false
 	}
@@ -101,6 +101,6 @@ func (m *Module) onClimbableAt(x, y, z float64) bool {
 	if !strings.HasSuffix(name, "_trapdoor") || props["open"] != "true" {
 		return false
 	}
-	below, belowProps := blocks.StateProperties(int(m.world.GetBlock(bx, by-1, bz)))
-	return blocks.BlockName(below) == "minecraft:ladder" && belowProps["facing"] == props["facing"]
+	below, belowProps := blocks.StateProperties(m.world.GetBlock(bx, by-1, bz))
+	return blocks.Name(below) == "minecraft:ladder" && belowProps["facing"] == props["facing"]
 }

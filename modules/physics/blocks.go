@@ -6,7 +6,6 @@ import (
 
 	"github.com/go-mclib/client/modules/self"
 	"github.com/go-mclib/client/modules/world"
-	"github.com/go-mclib/data/block_shapes"
 	"github.com/go-mclib/data/blocks"
 	"github.com/go-mclib/data/registries"
 )
@@ -21,13 +20,13 @@ type blockEffects struct {
 }
 
 var (
-	waterBlockID        = blocks.BlockID("minecraft:water")
-	bubbleColumnBlockID = blocks.BlockID("minecraft:bubble_column")
+	waterBlockID        = blocks.ID("minecraft:water")
+	bubbleColumnBlockID = blocks.ID("minecraft:bubble_column")
 	effectWeaving       = registries.MobEffect.Get("minecraft:weaving")
 )
 
-// GetBlockFriction returns vanilla Block.getFriction(), widened from float.
-func GetBlockFriction(stateID int32) float64 {
+// getBlockFriction returns vanilla Block.getFriction(), widened from float.
+func getBlockFriction(stateID int32) float64 {
 	switch blockName(stateID) {
 	case "minecraft:ice", "minecraft:packed_ice":
 		return float64(float32(0.98))
@@ -41,11 +40,11 @@ func GetBlockFriction(stateID int32) float64 {
 }
 
 func blockName(stateID int32) string {
-	return blocks.BlockName(blocks.StateBlockID(stateID))
+	return blocks.Name(blocks.StateBlockID(stateID))
 }
 
 func blockSpeedFactorByID(blockID int32) float64 {
-	switch blocks.BlockName(blockID) {
+	switch blocks.Name(blockID) {
 	case "minecraft:soul_sand", "minecraft:honey_block":
 		return float64(float32(0.4))
 	default:
@@ -61,7 +60,7 @@ func supportingBlockAt(w *world.Module, x, y, z, width float64) (pos [3]int, fou
 	for by := int(math.Floor(y)) - 2; by <= int(math.Floor(y)); by++ {
 		for bz := int(math.Floor(z - half)); bz <= int(math.Floor(z+half)); bz++ {
 			for bx := int(math.Floor(x - half)); bx <= int(math.Floor(x+half)); bx++ {
-				for _, shape := range block_shapes.CollisionShape(w.GetBlock(bx, by, bz)) {
+				for _, shape := range blocks.CollisionShape(w.GetBlock(bx, by, bz)) {
 					if x+half <= float64(bx)+shape.MinX || x-half >= float64(bx)+shape.MaxX ||
 						z+half <= float64(bz)+shape.MinZ || z-half >= float64(bz)+shape.MaxZ ||
 						y <= float64(by)+shape.MinY || y-1e-6 >= float64(by)+shape.MaxY {
@@ -149,13 +148,7 @@ func (m *Module) applyLandingEffects(s *self.Module, x, y, z, incomingY, resolve
 			restitution = max(restitution, 0.75)
 		}
 	}
-	m.velY = collisionBounceY(incomingY, resolvedY, gravity, blockAirDrag(s), restitution)
-}
-
-func blockAirDrag(s *self.Module) float64 {
-	modifier := float32(s.AttributeValue("minecraft:air_drag_modifier", 1))
-	base := float32(0.98)
-	return float64(max(float32(0), min(float32(1), float32(1)-float32((float32(1)-base)*modifier))))
+	m.velY = collisionBounceY(incomingY, resolvedY, gravity, ModifiedFriction(VerticalAirFriction, s.AttributeValue("minecraft:air_drag_modifier", 1)), restitution)
 }
 
 func collisionBounceY(incoming, resolved, gravity, drag, restitution float64) float64 {
@@ -168,7 +161,7 @@ func collisionBounceY(incoming, resolved, gravity, drag, restitution float64) fl
 
 // Called after travel's gravity/drag, before entity pushing (LivingEntity.aiStep).
 func (m *Module) applyInsideBlockEffects(s *self.Module, fromX, fromY, fromZ, x, y, z, height float64) {
-	if s.Gamemode() == 3 {
+	if s.IsSpectator() {
 		return
 	}
 	if m.onGround {
@@ -214,7 +207,7 @@ func (m *Module) applyInsideBlock(s *self.Module, state int32, pos [3]int, to [3
 	// makeStuckInBlock resets fall distance as soon as the contact is applied.
 	switch blockName(state) {
 	case "minecraft:cobweb":
-		if s.AbilityFlags()&2 != 0 {
+		if s.IsFlying() {
 			return
 		}
 		m.blocks.stuckX, m.blocks.stuckY, m.blocks.stuckZ = 0.25, float64(float32(0.05)), 0.25
@@ -223,26 +216,26 @@ func (m *Module) applyInsideBlock(s *self.Module, state int32, pos [3]int, to [3
 			m.blocks.stuckX, m.blocks.stuckY, m.blocks.stuckZ = 0.5, 0.25, 0.5
 		}
 	case "minecraft:sweet_berry_bush":
-		if s.AbilityFlags()&2 != 0 {
+		if s.IsFlying() {
 			return
 		}
 		m.blocks.stuckX, m.blocks.stuckY, m.blocks.stuckZ = float64(float32(0.8)), 0.75, float64(float32(0.8))
 		m.fallDistance = 0
 	case "minecraft:powder_snow":
 		m.blocks.inPowderSnow = true
-		if s.AbilityFlags()&2 == 0 && blockName(m.world.GetBlock(int(math.Floor(to[0])), int(math.Floor(to[1])), int(math.Floor(to[2])))) == "minecraft:powder_snow" {
+		if !s.IsFlying() && blockName(m.world.GetBlock(int(math.Floor(to[0])), int(math.Floor(to[1])), int(math.Floor(to[2])))) == "minecraft:powder_snow" {
 			m.blocks.stuckX, m.blocks.stuckY, m.blocks.stuckZ = float64(float32(0.9)), 1.5, float64(float32(0.9))
 			m.fallDistance = 0
 		}
 	case "minecraft:honey_block":
 		m.applyHoneySlide(pos, to)
 	case "minecraft:bubble_column":
-		if precise && s.AbilityFlags()&2 == 0 {
-			_, props := blocks.StateProperties(int(state))
+		if precise && !s.IsFlying() {
+			_, props := blocks.StateProperties(state)
 			above := m.world.GetBlock(pos[0], pos[1]+1, pos[2])
-			fluid, _, _ := block_shapes.FluidState(above)
-			m.velY = bubbleColumnVelocity(m.velY, props["drag"] == "true", !block_shapes.HasCollision(above) && fluid == 0)
-			if block_shapes.HasCollision(above) || fluid != 0 {
+			fluid, _, _ := blocks.FluidState(above)
+			m.velY = bubbleColumnVelocity(m.velY, props["drag"] == "true", !blocks.HasCollision(above) && fluid == 0)
+			if blocks.HasCollision(above) || fluid != 0 {
 				m.fallDistance = 0
 			}
 		}

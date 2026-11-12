@@ -6,19 +6,19 @@ import (
 	"testing"
 
 	"github.com/go-mclib/client"
-	chatsign "github.com/go-mclib/client/chat"
+	"github.com/go-mclib/client/modules/chat/internal/signing"
 	"github.com/go-mclib/data/packets"
-	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	jp "github.com/go-mclib/protocol/javaproto"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 func TestSuppressedChatLogsPreserveDeliveryAndSigningState(t *testing.T) {
 	c := client.New("unused", "Grace", false)
-	c.SetState(jp.StatePlay)
+	client.NewSimulator(c).SetState(jp.StatePlay)
 	var logs bytes.Buffer
 	c.Logger = log.New(&logs, "", 0)
-	c.ChatSigner = chatsign.NewChatSigner()
 	m := New()
+	m.signer = signing.NewSigner()
 	m.SuppressChatLogs = true
 	c.Register(m)
 	const text = "content excluded by the application retention policy"
@@ -55,7 +55,47 @@ func TestSuppressedChatLogsPreserveDeliveryAndSigningState(t *testing.T) {
 	if player != 1 || system != 1 || disguised != 1 {
 		t.Fatalf("suppression lost delivery: player=%d system=%d disguised=%d", player, system, disguised)
 	}
-	if c.ChatSigner.Offset() != 1 {
+	if m.signer.Offset() != 1 {
 		t.Fatal("suppressing chat lost the received signature acknowledgement")
+	}
+}
+
+func TestChatEventsCarryMetadata(t *testing.T) {
+	c := client.New("unused", "Grace", false)
+	client.NewSimulator(c).SetState(jp.StatePlay)
+	m := New()
+	m.SuppressChatLogs = true
+	c.Register(m)
+	var player []PlayerChatEvent
+	var system []SystemChatEvent
+	var disguised []DisguisedChatEvent
+	m.OnPlayerChatEvent(func(e PlayerChatEvent) { player = append(player, e) })
+	m.OnSystemChatEvent(func(e SystemChatEvent) { system = append(system, e) })
+	m.OnDisguisedChatEvent(func(e DisguisedChatEvent) { disguised = append(disguised, e) })
+
+	sender := ns.UUID{1, 2, 3}
+	death := ns.TextComponent{Translate: "death.attack.generic", With: []ns.TextComponent{ns.NewTextComponent("Bob")}}
+	for _, packet := range []jp.Packet{
+		&packets.S2CPlayerChat{Sender: sender, Body: packets.SignedMessageBody{Content: "hi"},
+			FilterMask: packets.FilterMask{Type: packets.FilterMaskFullyFiltered},
+			ChatType:   packets.ChatTypeBound{Name: ns.NewTextComponent("Alice"), TargetName: ns.Some(ns.NewTextComponent("Grace"))}},
+		&packets.S2CSystemChat{Content: death, Overlay: true},
+		&packets.S2CDisguisedChat{Message: ns.NewTextComponent("hello"), ChatType: packets.ChatTypeBound{Name: ns.NewTextComponent("Server")}},
+	} {
+		wire, err := jp.ToWire(packet)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.HandlePacket(wire)
+	}
+	if len(player) != 1 || player[0] != (PlayerChatEvent{Sender: sender, Targeted: true, Filtered: true, Body: "hi"}) {
+		t.Fatalf("player chat event: %+v", player)
+	}
+	if len(system) != 1 || !system[0].Overlay || system[0].Content.Translate != "death.attack.generic" ||
+		len(system[0].Content.With) != 1 || system[0].Content.With[0].String() != "Bob" {
+		t.Fatalf("system chat event: %+v", system)
+	}
+	if len(disguised) != 1 || disguised[0] != (DisguisedChatEvent{Sender: "Server", Message: "hello"}) {
+		t.Fatalf("disguised chat event: %+v", disguised)
 	}
 }

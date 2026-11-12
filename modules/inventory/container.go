@@ -1,6 +1,9 @@
 package inventory
 
-import "github.com/go-mclib/data/packets"
+import (
+	"github.com/go-mclib/data/packets"
+	"github.com/go-mclib/data/slots"
+)
 
 // MenuType represents a Minecraft container menu type from the minecraft:menu registry.
 // MenuPlayer (-1) denotes the player's 46-slot inventory, which has no menu registry ID.
@@ -77,7 +80,7 @@ func menuSlots(menu MenuType) (own, player int) {
 func (m *Module) installContainerContentLocked(d packets.S2CContainerSetContent) bool {
 	c := m.container
 	own, player := menuSlots(c.menuType)
-	c.stateID = int32(d.StateId)
+	c.stateID = int32(d.StateID)
 	c.view = make([]slotEntry, len(d.Slots))
 	for i, raw := range d.Slots {
 		c.view[i] = decodeSlotEntry(raw)
@@ -87,8 +90,9 @@ func (m *Module) installContainerContentLocked(d packets.S2CContainerSetContent)
 		c.slots = c.view
 	} else {
 		c.slots = c.view[:own]
-		for i := range player {
-			m.slots[SlotMainStart+i] = c.view[own+i]
+		copy(m.slots[slots.PlayerMainStart:slots.PlayerMainStart+player], c.view[own:])
+		for i := slots.PlayerMainStart; i < slots.PlayerMainStart+player; i++ {
+			m.known[i] = true
 		}
 	}
 	m.cursor = decodeSlotEntry(d.CarriedItem)
@@ -104,18 +108,20 @@ func (m *Module) setContainerViewSlot(idx int, entry slotEntry) {
 	}
 	c.view[idx] = entry
 	if c.ready && idx >= len(c.slots) {
-		playerIdx := SlotMainStart + idx - len(c.slots)
-		if playerIdx < SlotHotbarEnd {
+		playerIdx := slots.PlayerMainStart + idx - len(c.slots)
+		if playerIdx < slots.PlayerHotbarEnd {
 			m.slots[playerIdx] = entry
+			m.known[playerIdx] = true
 		}
 	}
 }
 
 func (m *Module) setPlayerSlotLocked(idx int, entry slotEntry) {
 	m.slots[idx] = entry
+	m.known[idx] = true
 	c := m.container
-	if c != nil && c.ready && idx >= SlotMainStart && idx < SlotHotbarEnd {
-		viewIdx := len(c.slots) + idx - SlotMainStart
+	if c != nil && c.ready && idx >= slots.PlayerMainStart && idx < slots.PlayerHotbarEnd {
+		viewIdx := len(c.slots) + idx - slots.PlayerMainStart
 		if viewIdx < len(c.view) {
 			c.view[viewIdx] = entry
 		}

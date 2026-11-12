@@ -1,6 +1,9 @@
 package registry
 
-import "github.com/go-mclib/nbt"
+import (
+	"github.com/go-mclib/data/chunks"
+	"github.com/go-mclib/nbt"
+)
 
 // DimensionType holds the height-relevant fields of a dimension_type registry
 // entry. Datapacks may change these, so they must be read per server, not
@@ -33,6 +36,18 @@ func (m *Module) CurrentDimensionType() (DimensionType, bool) {
 		return DimensionType{}, false
 	}
 	return m.DimensionType(m.self.DimensionType())
+}
+
+// CurrentBounds returns the buildable Y range [minY, maxY) of the current
+// dimension, falling back to the vanilla overworld when the registry module is
+// absent (nil receiver) or the dimension type is unknown.
+func (m *Module) CurrentBounds() (minY, maxY int) {
+	if m != nil {
+		if dt, ok := m.CurrentDimensionType(); ok && dt.Height > 0 {
+			return int(dt.MinY), int(dt.MaxY())
+		}
+	}
+	return chunks.MinY, chunks.MaxY
 }
 
 // Biomes returns the namespaced ids of every available biome.

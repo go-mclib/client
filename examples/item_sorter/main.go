@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"math"
@@ -10,24 +11,26 @@ import (
 	"time"
 
 	"github.com/go-mclib/client"
-	"github.com/go-mclib/client/helpers"
+	"github.com/go-mclib/client/botcli"
 	"github.com/go-mclib/client/modules/collisions"
 	"github.com/go-mclib/client/modules/entities"
+	"github.com/go-mclib/client/modules/interaction"
 	"github.com/go-mclib/client/modules/inventory"
 	"github.com/go-mclib/client/modules/pathfinding"
 	"github.com/go-mclib/client/modules/self"
 	"github.com/go-mclib/client/modules/world"
 	"github.com/go-mclib/data/blocks"
-	dataEntities "github.com/go-mclib/data/entities"
+	dataentities "github.com/go-mclib/data/entities"
 	"github.com/go-mclib/data/items"
+	"github.com/go-mclib/data/slots"
 	"github.com/go-mclib/nbt"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 var containerBlockIDs = []int32{
-	blocks.BlockID("minecraft:chest"),
-	blocks.BlockID("minecraft:trapped_chest"),
-	blocks.BlockID("minecraft:barrel"),
+	blocks.ID("minecraft:chest"),
+	blocks.ID("minecraft:trapped_chest"),
+	blocks.ID("minecraft:barrel"),
 }
 
 // customCategories maps category names to match functions for use on signs.
@@ -114,11 +117,11 @@ func init() {
 		"mangrove", "cherry", "bamboo", "crimson", "warped", "pale_oak",
 	}
 	for _, wood := range woodTypes {
-		wallSignBlockIDs[blocks.BlockID("minecraft:"+wood+"_wall_sign")] = true
-		wallSignBlockIDs[blocks.BlockID("minecraft:"+wood+"_wall_hanging_sign")] = true
+		wallSignBlockIDs[blocks.ID("minecraft:"+wood+"_wall_sign")] = true
+		wallSignBlockIDs[blocks.ID("minecraft:"+wood+"_wall_hanging_sign")] = true
 	}
 	for _, name := range foodItemNames {
-		if id := items.ItemID(name); id >= 0 {
+		if id := items.ID(name); id >= 0 {
 			foodItemIDs = append(foodItemIDs, id)
 		}
 	}
@@ -246,7 +249,7 @@ func (sr *sorter) interactChest(pos blockPos) bool {
 		sr.mu.Unlock()
 	}()
 
-	if err := sr.c.InteractBlock(pos.x, pos.y, pos.z, 1, 0, 0.5, 0.5, 0.5); err != nil {
+	if err := interaction.UseItemOn(sr.c, pos.x, pos.y, pos.z, 1, 0, 0.5, 0.5, 0.5, sr.c.WritePacket); err != nil {
 		sr.c.Logger.Printf("interact failed: %v", err)
 		return false
 	}
@@ -356,12 +359,12 @@ func (sr *sorter) depositItem(itemID int32) (moved int, blocked bool) {
 		if !sr.inv.ContainerOpen() {
 			break
 		}
-		item := sr.inv.GetSlot(inventory.SlotMainStart + i)
+		item := sr.inv.GetSlot(slots.PlayerMainStart + i)
 		if item == nil || item.IsEmpty() || item.ID != itemID {
 			continue
 		}
 		viewIdx := slotCount + i
-		sr.c.Logger.Printf("  storing %s x%d", items.ItemName(item.ID), item.Count)
+		sr.c.Logger.Printf("  storing %s x%d", items.Name(item.ID), item.Count)
 		if err := sr.inv.ContainerShiftClick(viewIdx); err != nil {
 			sr.c.Logger.Printf("  shift-click failed: %v", err)
 			return moved, true
@@ -405,9 +408,9 @@ func (sr *sorter) eatIfHungry() {
 	if len(foodItemIDs) == 0 {
 		return
 	}
-	for sr.s.Food() < hungerThreshold {
-		sr.c.Logger.Printf("hungry (food=%d), eating...", sr.s.Food())
-		if err := sr.s.Eat(foodItemIDs); err != nil {
+	for sr.s.Vitals().Food < hungerThreshold {
+		sr.c.Logger.Printf("hungry (food=%d), eating...", sr.s.Vitals().Food)
+		if err := interaction.Eat(context.Background(), sr.c, foodItemIDs); err != nil {
 			sr.c.Logger.Printf("failed to eat: %v", err)
 			return
 		}
@@ -541,7 +544,7 @@ func (sr *sorter) depositAll() {
 			for _, id := range itemIDs {
 				moved, blocked := sr.depositItem(id)
 				if moved > 0 {
-					sr.c.Logger.Printf("stored %d stacks of %s", moved, items.ItemName(id))
+					sr.c.Logger.Printf("stored %d stacks of %s", moved, items.Name(id))
 				}
 				if blocked {
 					overflowIDs = append(overflowIDs, id)
@@ -584,7 +587,7 @@ func (sr *sorter) depositAll() {
 	for _, id := range uniqueTrash {
 		moved, _ := sr.depositItem(id)
 		if moved > 0 {
-			sr.c.Logger.Printf("trashed %d stacks of %s", moved, items.ItemName(id))
+			sr.c.Logger.Printf("trashed %d stacks of %s", moved, items.Name(id))
 		}
 		if !sr.inv.ContainerOpen() {
 			break
@@ -604,7 +607,7 @@ func (sr *sorter) groupSortableItems() map[blockPos][]int32 {
 	seen := make(map[int32]bool)
 
 	for i := range 36 {
-		item := sr.inv.GetSlot(inventory.SlotMainStart + i)
+		item := sr.inv.GetSlot(slots.PlayerMainStart + i)
 		if item == nil || item.IsEmpty() || seen[item.ID] {
 			continue
 		}
@@ -620,7 +623,7 @@ func (sr *sorter) groupSortableItems() map[blockPos][]int32 {
 		}
 
 		// category matcher
-		name := items.ItemName(item.ID)
+		name := items.Name(item.ID)
 		matched := false
 		for _, m := range sr.categoryMatchers {
 			if m.match(name) {
@@ -656,13 +659,13 @@ func (sr *sorter) buildLabelMap() {
 	var trashChest *blockPos
 
 	// scan item frames within radius
-	for _, typeID := range []int32{dataEntities.EntityTypeID("minecraft:item_frame"), dataEntities.EntityTypeID("minecraft:glow_item_frame")} {
+	for _, typeID := range []int32{dataentities.TypeID("minecraft:item_frame"), dataentities.TypeID("minecraft:glow_item_frame")} {
 		for _, e := range sr.ents.GetEntitiesByType(typeID) {
 			ex, ey, ez := int(math.Floor(e.X)), int(math.Floor(e.Y)), int(math.Floor(e.Z))
 			if intAbs(ex-cx) > scanRadius || intAbs(ey-cy) > scanRadius || intAbs(ez-cz) > scanRadius {
 				continue
 			}
-			itemData := e.Metadata.Get(dataEntities.ItemFrameIndexItem)
+			itemData := e.Metadata.Get(dataentities.ItemFrameIndexItem)
 			if itemData == nil {
 				continue
 			}
@@ -672,7 +675,7 @@ func (sr *sorter) buildLabelMap() {
 			}
 			if pos, ok := findContainerNear(sr.w, ex, ey, ez); ok {
 				labelMap[stack.ID] = pos
-				sr.c.Logger.Printf("label: %s -> %d,%d,%d (item frame)", items.ItemName(stack.ID), pos.x, pos.y, pos.z)
+				sr.c.Logger.Printf("label: %s -> %d,%d,%d (item frame)", items.Name(stack.ID), pos.x, pos.y, pos.z)
 			}
 		}
 	}
@@ -688,7 +691,7 @@ func (sr *sorter) buildLabelMap() {
 				if stateID == 0 {
 					continue
 				}
-				blockID, _ := blocks.StateProperties(int(stateID))
+				blockID, _ := blocks.StateProperties(stateID)
 				if !wallSignBlockIDs[blockID] {
 					continue
 				}
@@ -741,8 +744,8 @@ func (sr *sorter) processSignAt(x, y, z int, stateID int32, labelMap map[int32]b
 		trimmed := strings.TrimSpace(line)
 
 		// :category — pattern-based matcher
-		if strings.HasPrefix(trimmed, ":") {
-			cat := strings.ToLower(trimmed[1:])
+		if rest, ok := strings.CutPrefix(trimmed, ":"); ok {
+			cat := strings.ToLower(rest)
 			if match, ok := customCategories[cat]; ok {
 				*matchers = append(*matchers, categoryMatcher{match: match, pos: pos})
 				sr.c.Logger.Printf("category: :%s -> %d,%d,%d (sign)", cat, pos.x, pos.y, pos.z)
@@ -752,7 +755,7 @@ func (sr *sorter) processSignAt(x, y, z int, stateID int32, labelMap map[int32]b
 
 		for _, itemID := range resolveLabel(trimmed) {
 			labelMap[itemID] = pos
-			sr.c.Logger.Printf("label: %s -> %d,%d,%d (sign)", items.ItemName(itemID), pos.x, pos.y, pos.z)
+			sr.c.Logger.Printf("label: %s -> %d,%d,%d (sign)", items.Name(itemID), pos.x, pos.y, pos.z)
 		}
 	}
 }
@@ -797,8 +800,8 @@ func (sr *sorter) setup() {
 		}
 	})
 
-	sr.inv.OnSlotUpdate(func(index int, item *items.ItemStack) {
-		if index < inventory.SlotMainStart || index >= inventory.SlotHotbarEnd {
+	sr.inv.OnSlotUpdate(func(index int, item *items.Stack) {
+		if index < slots.PlayerMainStart || index >= slots.PlayerHotbarEnd {
 			return
 		}
 		if item == nil || item.IsEmpty() {
@@ -808,7 +811,7 @@ func (sr *sorter) setup() {
 		_, labeled := sr.labelMap[item.ID]
 		hasTrash := sr.trashChest != nil
 		if !labeled {
-			name := items.ItemName(item.ID)
+			name := items.Name(item.ID)
 			for _, m := range sr.categoryMatchers {
 				if m.match(name) {
 					labeled = true
@@ -838,7 +841,7 @@ func isContainer(blockID int32) bool {
 
 func findContainerNear(w *world.Module, x, y, z int) (blockPos, bool) {
 	stateID := w.GetBlock(x, y, z)
-	blockID, _ := blocks.StateProperties(int(stateID))
+	blockID, _ := blocks.StateProperties(stateID)
 	if isContainer(blockID) {
 		return blockPos{x, y, z}, true
 	}
@@ -852,7 +855,7 @@ func findAdjacentContainer(w *world.Module, x, y, z int) (blockPos, bool) {
 		if stateID == 0 {
 			continue
 		}
-		blockID, _ := blocks.StateProperties(int(stateID))
+		blockID, _ := blocks.StateProperties(stateID)
 		if isContainer(blockID) {
 			return blockPos{nx, ny, nz}, true
 		}
@@ -861,11 +864,11 @@ func findAdjacentContainer(w *world.Module, x, y, z int) (blockPos, bool) {
 }
 
 func findContainerForSign(w *world.Module, x, y, z int, stateID int32) (blockPos, bool) {
-	blockID, props := blocks.StateProperties(int(stateID))
+	blockID, props := blocks.StateProperties(stateID)
 	if wallSignBlockIDs[blockID] {
 		dx, dy, dz := wallSignFacingOffset(props["facing"])
 		cx, cy, cz := x+dx, y+dy, z+dz
-		checkBlockID, _ := blocks.StateProperties(int(w.GetBlock(cx, cy, cz)))
+		checkBlockID, _ := blocks.StateProperties(w.GetBlock(cx, cy, cz))
 		if isContainer(checkBlockID) {
 			return blockPos{cx, cy, cz}, true
 		}
@@ -924,19 +927,19 @@ func resolveLabel(line string) []int32 {
 		return nil
 	}
 
-	if strings.HasPrefix(line, "#") {
-		tag := strings.ToLower(line[1:])
+	if rest, ok := strings.CutPrefix(line, "#"); ok {
+		tag := strings.ToLower(rest)
 		if !strings.Contains(tag, ":") {
 			tag = "minecraft:" + tag
 		}
-		return items.ItemTag(tag)
+		return items.Tag(tag)
 	}
 
 	name := strings.ToLower(line)
 	if !strings.Contains(name, ":") {
 		name = "minecraft:" + name
 	}
-	if id := items.ItemID(name); id >= 0 {
+	if id := items.ID(name); id >= 0 {
 		return []int32{id}
 	}
 	return nil
@@ -950,11 +953,11 @@ func intAbs(x int) int {
 }
 
 func main() {
-	var f helpers.Flags
-	helpers.RegisterFlags(&f)
+	var f botcli.Flags
+	botcli.RegisterFlags(&f)
 	flag.Parse()
 
-	c := helpers.NewClient(f)
+	c := botcli.NewClient(f)
 	c.MaxReconnectAttempts = -1
 	c.Register(entities.New())
 	c.Register(pathfinding.New())
@@ -964,5 +967,5 @@ func main() {
 	sr.setup()
 	go sr.run()
 
-	helpers.Run(c)
+	botcli.Run(c, f)
 }

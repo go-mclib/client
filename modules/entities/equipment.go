@@ -6,8 +6,8 @@ import (
 
 	"github.com/go-mclib/data/items"
 	"github.com/go-mclib/data/packets"
-	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	jp "github.com/go-mclib/protocol/javaproto"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 // EquipmentItem is the observable portion of an equipment stack. Count zero
@@ -24,9 +24,9 @@ type EquipmentItem struct {
 }
 
 // ObserveItem decodes only the useful descriptive fields, never retaining raw
-// component buffers or mutable ItemStack defaults.
+// component buffers or mutable items.Stack defaults.
 func ObserveItem(slot ns.Slot) EquipmentItem {
-	result := EquipmentItem{ID: int32(slot.ItemID), Name: items.ItemName(int32(slot.ItemID)), Count: int32(slot.Count)}
+	result := EquipmentItem{ID: int32(slot.ItemID), Name: items.Name(int32(slot.ItemID)), Count: int32(slot.Count)}
 	if slot.Count <= 0 {
 		return EquipmentItem{ComponentsDecoded: true}
 	}
@@ -83,12 +83,12 @@ func cloneEntity(e *Entity) *Entity {
 
 func (m *Module) handleSetEquipment(pkt *jp.WirePacket) {
 	var d packets.S2CSetEquipment
-	if pkt.ReadInto(&d) != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	e := m.entities[int32(d.EntityId)]
+	e := m.entities[int32(d.EntityID)]
 	if e == nil {
 		return
 	}
@@ -102,7 +102,7 @@ func (m *Module) handleSetEquipment(pkt *jp.WirePacket) {
 
 func (m *Module) handleEntityEvent(pkt *jp.WirePacket) {
 	var event packets.S2CEntityEvent
-	if pkt.ReadInto(&event) != nil || event.EntityStatus != 55 {
+	if !m.client.Decode(pkt, &event) || event.EntityStatus != 55 {
 		return
 	}
 	// LivingEntity.handleHandSwap sends SWAP_HANDS (55) instead of separate
@@ -110,7 +110,7 @@ func (m *Module) handleEntityEvent(pkt *jp.WirePacket) {
 	// hand stays unknown, rather than becoming an explicitly empty stack.
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	e := m.entities[int32(event.EntityId)]
+	e := m.entities[int32(event.EntityID)]
 	if e == nil || e.Equipment == nil {
 		return
 	}

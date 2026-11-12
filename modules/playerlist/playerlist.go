@@ -5,25 +5,13 @@ import (
 	"sync"
 
 	"github.com/go-mclib/client"
-	"github.com/go-mclib/data/packet_ids"
+	"github.com/go-mclib/data/packetids"
 	"github.com/go-mclib/data/packets"
-	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	jp "github.com/go-mclib/protocol/javaproto"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 const ModuleName = "playerlist"
-
-// action bits in the S2CPlayerInfoUpdate FixedBitSet
-const (
-	actionAddPlayer       = 0x01
-	actionInitializeChat  = 0x02
-	actionUpdateGameMode  = 0x04
-	actionUpdateListed    = 0x08
-	actionUpdateLatency   = 0x10
-	actionUpdateDisplay   = 0x20
-	actionUpdateListOrder = 0x40
-	actionUpdateHat       = 0x80
-)
 
 // Property is a profile property (e.g. the "textures" skin/cape blob with its
 // Mojang signature). Kept so a proxy can replay the tab list with skins intact.
@@ -45,17 +33,18 @@ type Player struct {
 	DisplayName *string
 	ListOrder   int32
 	ShowHat     bool
-	displayRaw  string
+	// display is the original component, kept for snapshot replay; it is
+	// never mutated, so clones share it.
+	display ns.TextComponent
 }
 
 type Module struct {
 	client *client.Client
 	mu     sync.RWMutex
 
-	players              map[[16]byte]*Player
-	header, footer       string
-	headerRaw, footerRaw string
-	hasTabList           bool
+	players        map[[16]byte]*Player
+	header, footer string
+	hasTabList     bool
 
 	onPlayerJoin   []func(p *Player)
 	onPlayerLeave  []func(p *Player)
@@ -80,18 +69,12 @@ func (m *Module) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.players = make(map[[16]byte]*Player)
-	m.header, m.footer, m.headerRaw, m.footerRaw = "", "", "", ""
+	m.header, m.footer = "", ""
 	m.hasTabList = false
 }
 
 // From retrieves the player list module from a client.
-func From(c *client.Client) *Module {
-	mod := c.Module(ModuleName)
-	if mod == nil {
-		return nil
-	}
-	return mod.(*Module)
-}
+func From(c *client.Client) *Module { return client.ModuleAs[*Module](c, ModuleName) }
 
 func (m *Module) OnPlayerJoin(cb func(p *Player)) {
 	m.onPlayerJoin = append(m.onPlayerJoin, cb)
@@ -132,7 +115,7 @@ func (m *Module) GetAllPlayers() []*Player {
 	return result
 }
 
-func (m *Module) GetPlayerCount() int {
+func (m *Module) PlayerCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.players)
@@ -143,264 +126,72 @@ func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 		return
 	}
 	switch pkt.PacketID {
-	case packet_ids.S2CPlayerInfoUpdateID:
+	case packetids.S2CPlayerInfoUpdateID:
 		m.handlePlayerInfoUpdate(pkt)
-	case packet_ids.S2CPlayerInfoRemoveID:
+	case packetids.S2CPlayerInfoRemoveID:
 		m.handlePlayerInfoRemove(pkt)
-	case packet_ids.S2CTabListID:
+	case packetids.S2CTabListID:
 		m.handleTabList(pkt)
 	}
 }
 
 func (m *Module) handlePlayerInfoUpdate(pkt *jp.WirePacket) {
-	buf := ns.NewReader(pkt.Data)
-
-	// actions encoded as FixedBitSet(8) = 1 byte
-	actionByte, err := buf.ReadByte()
-	if err != nil {
-		return
-	}
-
-	// entry count
-	count, err := buf.ReadVarInt()
-	if err != nil {
-		return
-	}
-
-	for range int(count) {
-		uuid, err := buf.ReadUUID()
-		if err != nil {
-			return
-		}
-
-		var u entryUpdate
-		if err := u.decode(buf, actionByte); err != nil {
-			return
-		}
-
-		m.applyEntry([16]byte(uuid), &u)
+	var d packets.S2CPlayerInfoUpdate
+	if m.client.Decode(pkt, &d) {
+		m.applyPlayerInfoUpdate(&d)
 	}
 }
 
-// entryUpdate accumulates decoded state for one player_info_update entry.
-type entryUpdate struct {
-	name                             string
-	props                            []Property
-	gamemode                         ns.VarInt
-	ping                             ns.VarInt
-	listed                           bool
-	gotGamemode                      bool
-	gotListed                        bool
-	gotPing                          bool
-	isNew                            bool
-	displayName                      *string
-	displayRaw                       string
-	listOrder                        int32
-	showHat                          bool
-	gotDisplay, gotListOrder, gotHat bool
+// applyPlayerInfoUpdate applies every entry to the player map and fires callbacks.
+func (m *Module) applyPlayerInfoUpdate(d *packets.S2CPlayerInfoUpdate) {
+	for i := range d.Entries {
+		m.applyEntry(d.Actions, &d.Entries[i])
+	}
 }
 
-// decode reads all fields present in the action bitfield, in enum ordinal order.
-func (u *entryUpdate) decode(buf *ns.PacketBuffer, actionByte byte) error {
-	if actionByte&actionAddPlayer != 0 {
-		if err := u.decodeAddPlayer(buf); err != nil {
-			return err
-		}
-	}
-	if actionByte&actionInitializeChat != 0 {
-		if err := skipChatSession(buf); err != nil {
-			return err
-		}
-	}
-	if actionByte&actionUpdateGameMode != 0 {
-		if err := u.decodeGameMode(buf); err != nil {
-			return err
-		}
-	}
-	if actionByte&actionUpdateListed != 0 {
-		if err := u.decodeListed(buf); err != nil {
-			return err
-		}
-	}
-	if actionByte&actionUpdateLatency != 0 {
-		if err := u.decodeLatency(buf); err != nil {
-			return err
-		}
-	}
-	if actionByte&actionUpdateDisplay != 0 {
-		if err := u.decodeDisplayName(buf); err != nil {
-			return err
-		}
-	}
-	if actionByte&actionUpdateListOrder != 0 {
-		order, err := buf.ReadVarInt()
-		if err != nil {
-			return err
-		}
-		u.listOrder, u.gotListOrder = int32(order), true
-	}
-	if actionByte&actionUpdateHat != 0 {
-		hat, err := buf.ReadBool()
-		if err != nil {
-			return err
-		}
-		u.showHat, u.gotHat = bool(hat), true
-	}
-	return nil
-}
-
-// decodeAddPlayer reads the player name and profile properties.
-func (u *entryUpdate) decodeAddPlayer(buf *ns.PacketBuffer) error {
-	u.isNew = true
-	// player name (String, max 16 chars)
-	n, err := buf.ReadString(16)
-	if err != nil {
-		return err
-	}
-	u.name = string(n)
-
-	// properties: VarInt count, each has name + value + optional signature
-	propCount, err := buf.ReadVarInt()
-	if err != nil {
-		return err
-	}
-	for range int(propCount) {
-		pname, err := buf.ReadString(64)
-		if err != nil {
-			return err
-		}
-		pval, err := buf.ReadString(32767)
-		if err != nil {
-			return err
-		}
-		hasSig, err := buf.ReadBool()
-		if err != nil {
-			return err
-		}
-		var sig ns.String
-		if hasSig {
-			if sig, err = buf.ReadString(1024); err != nil {
-				return err
-			}
-		}
-		u.props = append(u.props, Property{Name: string(pname), Value: string(pval), Signature: string(sig), HasSignature: bool(hasSig)})
-	}
-	return nil
-}
-
-func (u *entryUpdate) decodeGameMode(buf *ns.PacketBuffer) error {
-	gm, err := buf.ReadVarInt()
-	if err != nil {
-		return err
-	}
-	u.gamemode = gm
-	u.gotGamemode = true
-	return nil
-}
-
-func (u *entryUpdate) decodeListed(buf *ns.PacketBuffer) error {
-	l, err := buf.ReadBool()
-	if err != nil {
-		return err
-	}
-	u.listed = bool(l)
-	u.gotListed = true
-	return nil
-}
-
-func (u *entryUpdate) decodeLatency(buf *ns.PacketBuffer) error {
-	p, err := buf.ReadVarInt()
-	if err != nil {
-		return err
-	}
-	u.ping = p
-	u.gotPing = true
-	return nil
-}
-
-// skipChatSession skips the optional chat session data (initialize_chat action).
-func skipChatSession(buf *ns.PacketBuffer) error {
-	// optional chat session: bool + (UUID + Long + ByteArray(512) + ByteArray(4096))
-	hasSession, err := buf.ReadBool()
-	if err != nil {
-		return err
-	}
-	if !hasSession {
-		return nil
-	}
-	if _, err := buf.ReadUUID(); err != nil { // session UUID
-		return err
-	}
-	if _, err := buf.ReadInt64(); err != nil { // expires at (epoch millis)
-		return err
-	}
-	if _, err := buf.ReadByteArray(512); err != nil { // public key
-		return err
-	}
-	if _, err := buf.ReadByteArray(4096); err != nil { // key signature
-		return err
-	}
-	return nil
-}
-
-// decodeDisplayName retains readable text and the original component for replay.
-func (u *entryUpdate) decodeDisplayName(buf *ns.PacketBuffer) error {
-	hasDisplay, err := buf.ReadBool()
-	if err != nil {
-		return err
-	}
-	u.gotDisplay = true
-	if hasDisplay {
-		text, err := buf.ReadTextComponent()
-		if err != nil {
-			return err
-		}
-		plain := text.String()
-		u.displayName = &plain
-		writer := ns.NewWriter()
-		if err := writer.WriteTextComponent(text); err != nil {
-			return err
-		}
-		u.displayRaw = string(writer.Bytes())
-	}
-	return nil
-}
-
-// applyEntry applies a decoded entry to the player map and fires callbacks.
-func (m *Module) applyEntry(key [16]byte, u *entryUpdate) {
+func (m *Module) applyEntry(actions packets.PlayerInfoActions, e *packets.PlayerInfoEntry) {
+	key := [16]byte(e.UUID)
+	isNew := actions.Has(packets.PlayerInfoAddPlayer)
 	m.mu.Lock()
 	p := m.players[key]
-	if u.isNew {
-		p = &Player{UUID: key, Name: u.name, Properties: slices.Clone(u.props)}
+	if isNew {
+		p = &Player{UUID: key, Name: string(e.Name), Properties: make([]Property, len(e.Properties))}
+		for i, prop := range e.Properties {
+			sig, hasSig := prop.Signature.Get()
+			p.Properties[i] = Property{Name: string(prop.Name), Value: string(prop.Value), Signature: string(sig), HasSignature: hasSig}
+		}
 		m.players[key] = p
 	}
 	if p == nil {
 		m.mu.Unlock()
 		return
 	}
-	if u.gotGamemode {
-		p.Gamemode = int32(u.gamemode)
+	if actions.Has(packets.PlayerInfoUpdateGameMode) {
+		p.Gamemode = int32(e.GameMode)
 	}
-	if u.gotListed {
-		p.Listed = u.listed
+	if actions.Has(packets.PlayerInfoUpdateListed) {
+		p.Listed = bool(e.Listed)
 	}
-	if u.gotPing {
-		p.Ping = int32(u.ping)
+	if actions.Has(packets.PlayerInfoUpdateLatency) {
+		p.Ping = int32(e.Latency)
 	}
-	if u.gotDisplay {
-		p.DisplayName = u.displayName
-		p.displayRaw = u.displayRaw
+	if actions.Has(packets.PlayerInfoUpdateDisplayName) {
+		p.DisplayName, p.display = nil, ns.TextComponent{}
+		if text, ok := e.DisplayName.Get(); ok {
+			plain := text.String()
+			p.DisplayName, p.display = &plain, text
+		}
 	}
-	if u.gotListOrder {
-		p.ListOrder = u.listOrder
+	if actions.Has(packets.PlayerInfoUpdateListOrder) {
+		p.ListOrder = int32(e.ListOrder)
 	}
-	if u.gotHat {
-		p.ShowHat = u.showHat
+	if actions.Has(packets.PlayerInfoUpdateHat) {
+		p.ShowHat = bool(e.ShowHat)
 	}
 	p = clonePlayer(p)
 	m.mu.Unlock()
 	callbacks := m.onPlayerUpdate
-	if u.isNew {
+	if isNew {
 		callbacks = m.onPlayerJoin
 	}
 	for _, cb := range callbacks {
@@ -409,34 +200,23 @@ func (m *Module) applyEntry(key [16]byte, u *entryUpdate) {
 }
 
 func (m *Module) handlePlayerInfoRemove(pkt *jp.WirePacket) {
-	// wire format: VarInt(count) + UUID[count]
-	buf := ns.NewReader(pkt.Data)
-	count, err := buf.ReadVarInt()
-	if err != nil {
-		return
+	var d packets.S2CPlayerInfoRemove
+	if m.client.Decode(pkt, &d) {
+		m.applyPlayerInfoRemove(&d)
 	}
+}
 
-	removed := make([]*Player, 0, int(count))
-
-	for range int(count) {
-		uuid, err := buf.ReadUUID()
-		if err != nil {
-			return
-		}
+func (m *Module) applyPlayerInfoRemove(d *packets.S2CPlayerInfoRemove) {
+	removed := make([]*Player, 0, len(d.UUIDs))
+	m.mu.Lock()
+	for _, uuid := range d.UUIDs {
 		key := [16]byte(uuid)
-
-		m.mu.Lock()
-		p := m.players[key]
-		if p != nil {
+		if p := m.players[key]; p != nil {
 			delete(m.players, key)
-		}
-		m.mu.Unlock()
-
-		if p != nil {
 			removed = append(removed, p)
 		}
 	}
-
+	m.mu.Unlock()
 	for _, p := range removed {
 		for _, cb := range m.onPlayerLeave {
 			cb(clonePlayer(p))
@@ -454,36 +234,29 @@ func (m *Module) BuildSnapshot() *packets.S2CPlayerInfoUpdate {
 		return nil
 	}
 
-	// All retained per-player actions are replayed in enum ordinal order.
-	const actions = actionAddPlayer | actionUpdateGameMode | actionUpdateListed | actionUpdateLatency | actionUpdateDisplay | actionUpdateListOrder | actionUpdateHat
-	buf := ns.NewWriter()
-	_ = buf.WriteByte(actions)
-	_ = buf.WriteVarInt(ns.VarInt(len(players)))
-	for _, p := range players {
-		_ = buf.WriteUUID(ns.UUID(p.UUID))
-		_ = buf.WriteString(ns.String(p.Name))
-		_ = buf.WriteVarInt(ns.VarInt(len(p.Properties)))
-		for _, prop := range p.Properties {
-			_ = buf.WriteString(ns.String(prop.Name))
-			_ = buf.WriteString(ns.String(prop.Value))
-			_ = buf.WriteBool(ns.Boolean(prop.HasSignature))
+	// Every retained per-player action is replayed.
+	snap := &packets.S2CPlayerInfoUpdate{
+		Actions: packets.PlayerInfoAddPlayer | packets.PlayerInfoUpdateGameMode | packets.PlayerInfoUpdateListed |
+			packets.PlayerInfoUpdateLatency | packets.PlayerInfoUpdateDisplayName | packets.PlayerInfoUpdateListOrder | packets.PlayerInfoUpdateHat,
+		Entries: make([]packets.PlayerInfoEntry, len(players)),
+	}
+	for i, p := range players {
+		e := &snap.Entries[i]
+		e.UUID, e.Name = ns.UUID(p.UUID), ns.String(p.Name)
+		e.Properties = make([]packets.GameProfileProperty, len(p.Properties))
+		for j, prop := range p.Properties {
+			e.Properties[j] = packets.GameProfileProperty{Name: ns.String(prop.Name), Value: ns.String(prop.Value)}
 			if prop.HasSignature {
-				_ = buf.WriteString(ns.String(prop.Signature))
+				e.Properties[j].Signature = ns.Some(ns.String(prop.Signature))
 			}
 		}
-		_ = buf.WriteVarInt(ns.VarInt(p.Gamemode))
-		_ = buf.WriteBool(ns.Boolean(p.Listed))
-		_ = buf.WriteVarInt(ns.VarInt(p.Ping))
-		_ = buf.WriteBool(ns.Boolean(p.DisplayName != nil))
+		e.GameMode, e.Listed, e.Latency = ns.VarInt(p.Gamemode), ns.Boolean(p.Listed), ns.VarInt(p.Ping)
 		if p.DisplayName != nil {
-			var text ns.TextComponent
-			_ = text.Decode(ns.NewReader([]byte(p.displayRaw)))
-			_ = buf.WriteTextComponent(text)
+			e.DisplayName = ns.Some(p.display)
 		}
-		_ = buf.WriteVarInt(ns.VarInt(p.ListOrder))
-		_ = buf.WriteBool(ns.Boolean(p.ShowHat))
+		e.ListOrder, e.ShowHat = ns.VarInt(p.ListOrder), ns.Boolean(p.ShowHat)
 	}
-	return &packets.S2CPlayerInfoUpdate{Data: ns.ByteArray(buf.Bytes())}
+	return snap
 }
 
 func clonePlayer(p *Player) *Player {
@@ -501,17 +274,12 @@ func clonePlayer(p *Player) *Player {
 
 func (m *Module) handleTabList(pkt *jp.WirePacket) {
 	var d packets.S2CTabList
-	if pkt.ReadInto(&d) != nil {
-		return
-	}
-	header, footer := ns.NewWriter(), ns.NewWriter()
-	if header.WriteTextComponent(d.Header) != nil || footer.WriteTextComponent(d.Footer) != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.header, m.footer = d.Header.String(), d.Footer.String()
-	m.headerRaw, m.footerRaw = string(header.Bytes()), string(footer.Bytes())
 	m.hasTabList = true
 }
 
@@ -520,19 +288,4 @@ func (m *Module) TabList() (header, footer string, known bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.header, m.footer, m.hasTabList
-}
-
-// BuildTabSnapshot complements BuildSnapshot with an independent header/footer packet.
-func (m *Module) BuildTabSnapshot() *packets.S2CTabList {
-	m.mu.RLock()
-	header, footer, known := m.headerRaw, m.footerRaw, m.hasTabList
-	m.mu.RUnlock()
-	if !known {
-		return nil
-	}
-	result := &packets.S2CTabList{}
-	if result.Header.Decode(ns.NewReader([]byte(header))) != nil || result.Footer.Decode(ns.NewReader([]byte(footer))) != nil {
-		return nil
-	}
-	return result
 }

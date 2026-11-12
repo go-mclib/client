@@ -1,15 +1,15 @@
 package interaction
 
 import (
-	"fmt"
+	"errors"
 	"math"
 
 	"github.com/go-mclib/client"
 	"github.com/go-mclib/client/modules/inventory"
 	"github.com/go-mclib/client/modules/self"
 	"github.com/go-mclib/data/packets"
-	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	jp "github.com/go-mclib/protocol/javaproto"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 // BeginItemUse submits one vanilla 26.3 use-item request with the current aim.
@@ -20,22 +20,22 @@ import (
 func BeginItemUse(c *client.Client, hand int, send func(jp.Packet) error) (Submission, error) {
 	var result Submission
 	if c == nil || send == nil || hand < 0 || hand > 1 {
-		return result, fmt.Errorf("client, session transport and hand 0 or 1 are required")
+		return result, errInvalidRequest
 	}
 	me, inv := self.From(c), inventory.From(c)
 	if me == nil || inv == nil || c.State() != jp.StatePlay || me.IsDead() {
-		return result, fmt.Errorf("item use requires a living play session with self/inventory")
+		return result, errors.New("item use requires a living play session with self/inventory")
 	}
 	item := inv.HeldItem()
 	if hand == 1 {
-		item = inv.GetOffhand()
+		item = inv.Offhand()
 	}
 	if item.IsEmpty() {
-		return result, fmt.Errorf("selected hand is empty")
+		return result, errors.New("selected hand is empty")
 	}
 	yaw, pitch := me.Rotation()
 	if math.IsNaN(float64(yaw)) || math.IsInf(float64(yaw), 0) || math.IsNaN(float64(pitch)) || math.IsInf(float64(pitch), 0) || pitch < -90 || pitch > 90 {
-		return result, fmt.Errorf("item use requires finite yaw and pitch within -90..90")
+		return result, errors.New("item use requires finite yaw and pitch within -90..90")
 	}
 	result.Sequence = c.NextBISequence()
 	return result, send(&packets.C2SUseItem{Hand: ns.VarInt(hand), Sequence: ns.VarInt(result.Sequence), Yaw: ns.Float32(yaw), Pitch: ns.Float32(pitch)})
@@ -47,7 +47,7 @@ func BeginItemUse(c *client.Client, hand int, send func(jp.Packet) error) (Submi
 // context. No current-client lookup is made: cleanup must not target a reconnect.
 func ReleaseItemUse(send func(jp.Packet) error) error {
 	if send == nil {
-		return fmt.Errorf("captured session transport is required")
+		return errors.New("captured session transport is required")
 	}
 	return send(&packets.C2SPlayerAction{Status: packets.PlayerActionReleaseUseItem, Location: ns.Position{}, Face: 0, Sequence: 0})
 }

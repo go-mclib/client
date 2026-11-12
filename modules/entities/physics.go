@@ -2,22 +2,23 @@ package entities
 
 import (
 	"encoding/binary"
-	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"strings"
 
 	"github.com/go-mclib/client/modules/collisions"
+	"github.com/go-mclib/client/modules/self"
 	dataentities "github.com/go-mclib/data/entities"
 	"github.com/go-mclib/data/packets"
 	"github.com/go-mclib/data/registries"
-	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	jp "github.com/go-mclib/protocol/javaproto"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 // IsBoat identifies registered AbstractBoat types, including bamboo rafts.
 func IsBoat(name string) bool {
-	return (strings.HasSuffix(name, "_boat") || strings.HasSuffix(name, "_raft")) && dataentities.EntityTypeID(name) >= 0
+	return (strings.HasSuffix(name, "_boat") || strings.HasSuffix(name, "_raft")) && dataentities.TypeID(name) >= 0
 }
 
 func (m *Module) trackEntityLocked(e *Entity) {
@@ -95,6 +96,15 @@ func (e *Entity) movePath(path packets.PositionPath, yaw, pitch float32, absolut
 		e.remainingTicks = 0
 		e.interpolationSpeed = 1
 	}
+	if len(e.positionSteps)+max(len(path.Steps), 1) > maxPositionSteps {
+		// Only the physics tick drains the queue. Without it (or while it is
+		// paused) a backlog would grow per move packet; snap to the target.
+		e.physicsX, e.physicsY, e.physicsZ = x, y, z
+		e.positionSteps = nil
+		e.remainingTicks = 0
+		e.interpolationSpeed = 1
+		return
+	}
 	if len(path.Steps) == 0 || samePosition {
 		e.positionSteps = append(e.positionSteps, packets.PositionStep{
 			X: ns.Float64(x), Y: ns.Float64(y), Z: ns.Float64(z), TickOffset: ns.VarInt(e.interpolationInterval()),
@@ -111,6 +121,9 @@ func (e *Entity) movePath(path packets.PositionPath, yaw, pitch float32, absolut
 		}
 	}
 }
+
+// maxPositionSteps caps the queued interpolation backlog of one entity.
+const maxPositionSteps = 64
 
 func (e *Entity) interpolationInterval() float32 {
 	// EntityTypes overrides the default three-tick interval for these living types.
@@ -155,6 +168,8 @@ func (e *Entity) tickPositionPath() {
 // TickPhysics advances remote collision positions once per client game tick.
 // Packet-facing X/Y/Z remain the codec targets used by relative movement packets;
 // collision and push queries use these independently interpolated positions.
+// The physics module drives it once per tick; do not call it otherwise, or
+// remote entities interpolate faster than vanilla.
 func (m *Module) TickPhysics() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -269,12 +284,12 @@ func (e *Entity) physicsScale() float32 {
 
 func (m *Module) handleUpdateAttributes(pkt *jp.WirePacket) {
 	var d packets.S2CUpdateAttributes
-	if pkt.ReadInto(&d) != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	e := m.entities[int32(d.EntityId)]
+	e := m.entities[int32(d.EntityID)]
 	if e == nil || !dataentities.IsAttackable(e.TypeName) {
 		return
 	}
@@ -282,23 +297,7 @@ func (m *Module) handleUpdateAttributes(pkt *jp.WirePacket) {
 		if registries.Attribute.ByID(int32(attribute.Type)) != "minecraft:scale" {
 			continue
 		}
-		value := float64(attribute.Base)
-		for _, modifier := range attribute.Modifiers {
-			if modifier.Operation == 0 {
-				value += float64(modifier.Amount)
-			}
-		}
-		base := value
-		for _, modifier := range attribute.Modifiers {
-			if modifier.Operation == 1 {
-				value += base * float64(modifier.Amount)
-			}
-		}
-		for _, modifier := range attribute.Modifiers {
-			if modifier.Operation == 2 {
-				value *= 1 + float64(modifier.Amount)
-			}
-		}
+		value := self.Attribute(attribute).Value()
 		if math.IsNaN(value) {
 			value = 0.0625
 		}
@@ -383,33 +382,25 @@ func (m *Module) rootVehicleLocked(id int32) int32 {
 
 func (m *Module) removeVehicleLocked(id int32) {
 	delete(m.vehicles, id)
-	for passenger, vehicle := range m.vehicles {
-		if vehicle == id {
-			delete(m.vehicles, passenger)
-		}
-	}
+	maps.DeleteFunc(m.vehicles, func(_, vehicle int32) bool { return vehicle == id })
 }
 
 func (m *Module) handleSetPassengers(pkt *jp.WirePacket) {
 	var d packets.S2CSetPassengers
-	if pkt.ReadInto(&d) != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for passenger, vehicle := range m.vehicles {
-		if vehicle == int32(d.EntityId) {
-			delete(m.vehicles, passenger)
-		}
-	}
+	maps.DeleteFunc(m.vehicles, func(_, vehicle int32) bool { return vehicle == int32(d.EntityID) })
 	for _, passenger := range d.Passengers {
-		m.vehicles[int32(passenger)] = int32(d.EntityId)
+		m.vehicles[int32(passenger)] = int32(d.EntityID)
 	}
 }
 
 func (m *Module) handleSetPlayerTeam(pkt *jp.WirePacket) {
 	var d packets.S2CSetPlayerTeam
-	if pkt.ReadInto(&d) != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 	m.mu.Lock()
@@ -420,11 +411,7 @@ func (m *Module) handleSetPlayerTeam(pkt *jp.WirePacket) {
 		m.teams[name] = int32(d.Parameters.CollisionRule)
 	case 1:
 		delete(m.teams, name)
-		for member, team := range m.memberTeams {
-			if team == name {
-				delete(m.memberTeams, member)
-			}
-		}
+		maps.DeleteFunc(m.memberTeams, func(_, team string) bool { return team == name })
 	}
 	for _, player := range d.Players {
 		if d.Method == 0 || d.Method == 3 {
@@ -442,7 +429,7 @@ func (m *Module) CollisionBoxes(minX, minY, minZ, maxX, maxY, maxZ float64) []co
 	ownID := m.ownEntityID()
 	playerY := minY
 	if m.self != nil {
-		if m.self.Gamemode() == 3 {
+		if m.self.IsSpectator() {
 			return nil
 		}
 		_, playerY, _ = m.self.Position()
@@ -471,8 +458,4 @@ func (m *Module) CollisionBoxes(minX, minY, minZ, maxX, maxY, maxZ float64) []co
 		boxes = append(boxes, box)
 	}
 	return boxes
-}
-
-func entityUUIDName(uuid [16]byte) string {
-	return fmt.Sprintf("%x-%x-%x-%x-%x", uuid[0:4], uuid[4:6], uuid[6:8], uuid[8:10], uuid[10:16])
 }

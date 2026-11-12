@@ -3,7 +3,7 @@ package entities
 import (
 	"math"
 
-	"github.com/go-mclib/client/modules/self"
+	"github.com/go-mclib/client/modules/collisions"
 )
 
 // GetEntity returns an independent snapshot by ID, or nil if not found.
@@ -67,17 +67,10 @@ func (m *Module) GetEntitiesInAABB(minX, minY, minZ, maxX, maxY, maxZ float64) [
 	ownID := m.ownEntityID()
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	query := collisions.NewAABB(minX, minY, minZ, maxX, maxY, maxZ)
 	var result []*Entity
 	for _, e := range m.entities {
-		if e.ID == ownID {
-			continue
-		}
-		hw := e.Width / 2
-		eMinX, eMinY, eMinZ := e.X-hw, e.Y, e.Z-hw
-		eMaxX, eMaxY, eMaxZ := e.X+hw, e.Y+e.Height, e.Z+hw
-		if eMinX < maxX && eMaxX > minX &&
-			eMinY < maxY && eMaxY > minY &&
-			eMinZ < maxZ && eMaxZ > minZ {
+		if e.ID != ownID && collisions.EntityAABB(e.X, e.Y, e.Z, e.Width, e.Height).Intersects(query) {
 			result = append(result, cloneEntity(e))
 		}
 	}
@@ -116,8 +109,8 @@ func (m *Module) GetEntityByUUID(uuid [16]byte) *Entity {
 	return nil
 }
 
-// GetEntityCount returns the number of tracked entities.
-func (m *Module) GetEntityCount() int {
+// EntityCount returns the number of tracked entities.
+func (m *Module) EntityCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.entities)
@@ -134,10 +127,7 @@ func (m *Module) CanSee(entityID int32) bool {
 		return false
 	}
 
-	sx, sy, sz := m.self.Position()
-	eyeX := sx
-	eyeY := sy + self.EyeHeight
-	eyeZ := sz
+	eyeX, eyeY, eyeZ := m.self.EyePosition()
 	hit, _, _, _ := m.collisions.RaycastBlocks(eyeX, eyeY, eyeZ, e.X, e.Y+e.EyeHeight, e.Z)
 	return !hit
 }

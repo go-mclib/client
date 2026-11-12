@@ -6,14 +6,14 @@
 package registry
 
 import (
-	"fmt"
+	"errors"
 	"sync"
 
 	"github.com/go-mclib/client"
 	"github.com/go-mclib/client/modules/protocol"
 	"github.com/go-mclib/client/modules/self"
 	"github.com/go-mclib/nbt"
-	jp "github.com/go-mclib/protocol/java_protocol"
+	jp "github.com/go-mclib/protocol/javaproto"
 )
 
 const ModuleName = "registry"
@@ -37,7 +37,7 @@ type Module struct {
 	self   *self.Module // optional, for current-dimension helpers
 
 	mu    sync.Mutex
-	index map[string][]Entry // nil until built; cleared on reconnect/transfer
+	index map[string][]Entry // nil until built; cleared on transfer and on entering play
 }
 
 func New() *Module { return &Module{} }
@@ -47,11 +47,13 @@ func (m *Module) Name() string { return ModuleName }
 func (m *Module) Init(c *client.Client) {
 	m.client = c
 	c.OnTransfer(m.Reset)
+	// Configuration may run again before play; drop anything indexed from it.
+	c.OnPlay(m.Reset)
 }
 
 func (m *Module) Wire() error {
 	if m.proto = protocol.From(m.client); m.proto == nil {
-		return fmt.Errorf("requires protocol module")
+		return errors.New("requires protocol module")
 	}
 	m.self = self.From(m.client)
 	return nil
@@ -67,13 +69,7 @@ func (m *Module) Reset() {
 }
 
 // From retrieves the registry module from a client.
-func From(c *client.Client) *Module {
-	mod := c.Module(ModuleName)
-	if mod == nil {
-		return nil
-	}
-	return mod.(*Module)
-}
+func From(c *client.Client) *Module { return client.ModuleAs[*Module](c, ModuleName) }
 
 // Registry returns all entries of the named registry, in index order, or nil.
 func (m *Module) Registry(name string) []Entry {
@@ -127,9 +123,9 @@ func (m *Module) buildLocked() {
 					data = c
 				}
 			}
-			entries[i] = Entry{ID: string(e.EntryId), Index: i, Data: data}
+			entries[i] = Entry{ID: string(e.EntryID), Index: i, Data: data}
 		}
-		idx[string(rd.RegistryId)] = entries
+		idx[string(rd.RegistryID)] = entries
 	}
 	m.index = idx
 }

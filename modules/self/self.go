@@ -4,15 +4,17 @@ import (
 	"sync"
 
 	"github.com/go-mclib/client"
-	"github.com/go-mclib/data/packet_ids"
+	"github.com/go-mclib/data/packetids"
 	"github.com/go-mclib/data/packets"
-	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	jp "github.com/go-mclib/protocol/javaproto"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 const (
 	ModuleName = "self"
-	EyeHeight  = 1.62
+	// EyeHeight is the unscaled standing eye height. CurrentEyeHeight and
+	// EyePosition account for pose and scale.
+	EyeHeight = 1.62
 )
 
 type Module struct {
@@ -21,60 +23,26 @@ type Module struct {
 
 	autoRespawn bool
 
-	// login state
-	entityID            int32
-	isHardcore          bool
-	dimensionNames      []string
-	maxPlayers          int32
-	viewDistance        int32
-	simulationDistance  int32
-	reducedDebugInfo    bool
-	enableRespawnScreen bool
-	doLimitedCrafting   bool
-	dimensionType       int32
-	dimensionName       string
-	hashedSeed          int64
-	gamemode            uint8
-	previousGameMode    int8
-	isDebug             bool
-	isFlat              bool
-	deathLocation       ns.PrefixedOptional[ns.GlobalPos]
-	portalCooldown      int32
-	seaLevel            int32
-	enforcesSecureChat  bool
+	// login is the last S2CLogin, patched by respawn and game-mode changes so
+	// it always describes the current spawn (see LoginPacket).
+	login packets.S2CLogin
 
-	// health & experience
-	health          float32
-	food            int32
-	foodSaturation  float32
-	experienceBar   float32
-	level           int32
-	totalExperience int32
+	vitals     Vitals
+	experience Experience
+	difficulty Difficulty
+	abilities  Abilities
+	time       WorldTime
 
 	// position & rotation
 	x, y, z float64
 	yaw     float32
 	pitch   float32
 
-	// difficulty
-	difficulty       uint8
-	difficultyLocked bool
-
-	// abilities
-	abilityFlags int8
-	flyingSpeed  float32
-	fovModifier  float32
-
 	// spawn position
 	spawnDimension string
 	spawnPosition  ns.Position
 	spawnYaw       float32
 	spawnPitch     float32
-
-	// time
-	worldAge       int64
-	timeOfDay      int64
-	timeIncreasing bool
 
 	// op level (0-4, derived from entity event status 24-28)
 	opLevel int8
@@ -92,10 +60,13 @@ type Module struct {
 	isVehicle   bool
 	vehicleID   int32
 
-	attributes map[string]*Attribute
+	// eye height of the current pose published by physics; 0 when unknown
+	eyeHeight float64
+
+	attributes map[string]Attribute
 
 	effectsMu     sync.Mutex
-	activeEffects map[int32]*EffectInstance
+	activeEffects map[int32]*effectInstance
 
 	onDeath            []func()
 	onSpawn            []func()
@@ -113,19 +84,17 @@ type Module struct {
 	onTimeUpdate       []func(worldAge, timeOfDay int64)
 	onExperienceChange []func(bar float32, level, total int32)
 	onAttributeUpdate  []func(name string, value float64)
+	onVehicleChange    []func(previous, current int32)
 }
 
 func New() *Module {
-	return &Module{
-		autoRespawn:    true,
-		health:         20,
-		food:           20,
-		foodSaturation: 5,
-		flyingSpeed:    0.05,
-		fovModifier:    0.1,
-		activeEffects:  make(map[int32]*EffectInstance),
-		attributes:     make(map[string]*Attribute),
+	m := &Module{
+		autoRespawn:   true,
+		activeEffects: make(map[int32]*effectInstance),
+		attributes:    make(map[string]Attribute),
 	}
+	m.Reset()
+	return m
 }
 
 func (m *Module) Name() string { return ModuleName }
@@ -134,7 +103,12 @@ func (m *Module) Init(c *client.Client) {
 	m.client = c
 	c.OnTransfer(m.Reset)
 
-	// clear world and entity state on dimension change/respawn
+	// Clear chunks on dimension change/respawn. This is registered in Init,
+	// before any Wire-time OnRespawn subscriber, on purpose: consumers such as
+	// pproxy start polling for the new dimension's chunks from their OnRespawn
+	// callback and must not observe the previous dimension's terrain. It cannot
+	// move to world.Wire for that reason. Entities clear their own instances on
+	// S2CRespawn (keeping scoreboard teams, which vanilla does not re-send).
 	m.OnRespawn(func() {
 		if w := c.Module("world"); w != nil {
 			type chunkClearer interface{ ClearChunks() }
@@ -142,42 +116,23 @@ func (m *Module) Init(c *client.Client) {
 				cc.ClearChunks()
 			}
 		}
-		if e := c.Module("entities"); e != nil {
-			e.Reset()
-		}
 	})
 }
 
+// Vanilla defaults of a freshly spawned player.
+var (
+	defaultVitals    = Vitals{Health: 20, Food: 20, FoodSaturation: 5}
+	defaultAbilities = Abilities{FlyingSpeed: 0.05, FOVModifier: 0.1}
+)
+
 func (m *Module) Reset() {
 	m.mu.Lock()
-	m.health = 20
-	m.food = 20
-	m.foodSaturation = 5
-	m.experienceBar = 0
-	m.level = 0
-	m.totalExperience = 0
-	m.x = 0
-	m.y = 0
-	m.z = 0
-	m.yaw = 0
-	m.pitch = 0
-	m.sprinting = false
-	m.sneaking = false
-	m.entityFlags, m.livingFlags = 0, 0
-	m.noGravity, m.sleeping, m.isVehicle = false, false, false
-	m.vehicleID = 0
-	m.difficulty = 0
-	m.difficultyLocked = false
-	m.abilityFlags = 0
-	m.flyingSpeed = 0.05
-	m.fovModifier = 0.1
-	m.spawnDimension = ""
-	m.spawnPosition = ns.Position{}
-	m.spawnYaw = 0
-	m.spawnPitch = 0
-	m.worldAge = 0
-	m.timeOfDay = 0
-	m.timeIncreasing = false
+	m.login = packets.S2CLogin{}
+	m.vitals, m.experience = defaultVitals, Experience{}
+	m.difficulty, m.abilities, m.time = Difficulty{}, defaultAbilities, WorldTime{}
+	m.x, m.y, m.z, m.yaw, m.pitch = 0, 0, 0, 0, 0
+	m.resetEntityStateLocked()
+	m.spawnDimension, m.spawnPosition, m.spawnYaw, m.spawnPitch = "", ns.Position{}, 0, 0
 	m.opLevel = 0
 	clear(m.attributes)
 	m.mu.Unlock()
@@ -186,53 +141,58 @@ func (m *Module) Reset() {
 	m.effectsMu.Unlock()
 }
 
-// From retrieves the self module from a client.
-func From(c *client.Client) *Module {
-	mod := c.Module(ModuleName)
-	if mod == nil {
-		return nil
-	}
-	return mod.(*Module)
+// resetEntityStateLocked clears synchronized entity state that a new player
+// entity (respawn, dimension change, transfer) does not inherit. Reset and
+// respawn do not fire OnVehicleChange; respawn reports a dismount itself.
+func (m *Module) resetEntityStateLocked() {
+	m.sprinting, m.sneaking = false, false
+	m.entityFlags, m.livingFlags = 0, 0
+	m.noGravity, m.sleeping, m.isVehicle = false, false, false
+	m.vehicleID = 0
+	m.eyeHeight = 0
 }
+
+// From retrieves the self module from a client.
+func From(c *client.Client) *Module { return client.ModuleAs[*Module](c, ModuleName) }
 
 func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 	if m.client.State() != jp.StatePlay {
 		return
 	}
 	switch pkt.PacketID {
-	case packet_ids.S2CLoginID:
+	case packetids.S2CLoginID:
 		m.handleLogin(pkt)
-	case packet_ids.S2CSetHealthID:
+	case packetids.S2CSetHealthID:
 		m.handleSetHealth(pkt)
-	case packet_ids.S2CSetExperienceID:
+	case packetids.S2CSetExperienceID:
 		m.handleSetExperience(pkt)
-	case packet_ids.S2CPlayerPositionID:
+	case packetids.S2CPlayerPositionID:
 		m.handlePlayerPosition(pkt)
-	case packet_ids.S2CPlayerCombatKillID:
+	case packetids.S2CPlayerCombatKillID:
 		m.handleCombatKill(pkt)
-	case packet_ids.S2CGameEventID:
+	case packetids.S2CGameEventID:
 		m.handleGameEvent(pkt)
-	case packet_ids.S2CUpdateMobEffectID:
+	case packetids.S2CUpdateMobEffectID:
 		m.handleUpdateMobEffect(pkt)
-	case packet_ids.S2CRemoveMobEffectID:
+	case packetids.S2CRemoveMobEffectID:
 		m.handleRemoveMobEffect(pkt)
-	case packet_ids.S2CChangeDifficultyID:
+	case packetids.S2CChangeDifficultyID:
 		m.handleChangeDifficulty(pkt)
-	case packet_ids.S2CPlayerAbilitiesID:
+	case packetids.S2CPlayerAbilitiesID:
 		m.handlePlayerAbilities(pkt)
-	case packet_ids.S2CSetDefaultSpawnPositionID:
+	case packetids.S2CSetDefaultSpawnPositionID:
 		m.handleSetDefaultSpawnPosition(pkt)
-	case packet_ids.S2CSetTimeID:
+	case packetids.S2CSetTimeID:
 		m.handleSetTime(pkt)
-	case packet_ids.S2CEntityEventID:
+	case packetids.S2CEntityEventID:
 		m.handleEntityEvent(pkt)
-	case packet_ids.S2CRespawnID:
+	case packetids.S2CRespawnID:
 		m.handleRespawn(pkt)
-	case packet_ids.S2CUpdateAttributesID:
+	case packetids.S2CUpdateAttributesID:
 		m.handleUpdateAttributes(pkt)
-	case packet_ids.S2CSetEntityDataID:
+	case packetids.S2CSetEntityDataID:
 		m.handleOwnMetadata(pkt)
-	case packet_ids.S2CSetPassengersID:
+	case packetids.S2CSetPassengersID:
 		m.handlePassengers(pkt)
 	}
 }

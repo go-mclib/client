@@ -8,20 +8,37 @@ import (
 
 	"github.com/go-mclib/client"
 	"github.com/go-mclib/client/modules/collisions"
+	"github.com/go-mclib/client/modules/interaction"
 	"github.com/go-mclib/client/modules/physics"
 	"github.com/go-mclib/client/modules/self"
 	"github.com/go-mclib/client/modules/world"
 	"github.com/go-mclib/data/blocks"
 	"github.com/go-mclib/data/chunks"
 	"github.com/go-mclib/data/packets"
-	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	jp "github.com/go-mclib/protocol/javaproto"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
-func navigationTerrain(t *testing.T) (*Module, *chunks.ChunkColumn) {
+// terrainColumn edits the fixture chunk through block-update packets: world
+// only hands out snapshots, never its live columns.
+type terrainColumn struct {
+	t *testing.T
+	m *Module
+}
+
+func (c terrainColumn) SetBlockState(x, y, z int, state int32) {
+	c.t.Helper()
+	wire, err := jp.ToWire(&packets.S2CBlockUpdate{Location: ns.Position{X: x, Y: y, Z: z}, BlockID: ns.VarInt(state)})
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	c.m.world.HandlePacket(wire)
+}
+
+func navigationTerrain(t *testing.T) (*Module, terrainColumn) {
 	t.Helper()
 	c := client.New("", "navigation-test", false)
-	c.SetState(jp.StatePlay)
+	client.NewSimulator(c).SetState(jp.StatePlay)
 	m := New()
 	m.client = c
 	m.self, m.world, m.collisions, m.physics = self.New(), world.New(), collisions.New(), physics.New()
@@ -41,7 +58,7 @@ func navigationTerrain(t *testing.T) (*Module, *chunks.ChunkColumn) {
 	column := chunks.NewColumn(0, 0)
 	column.Sections[7] = chunks.NewEmptySection()
 	column.Sections[8] = chunks.NewEmptySection()
-	stone := blocks.DefaultStateID(blocks.BlockID("minecraft:stone"))
+	stone := blocks.DefaultStateID(blocks.ID("minecraft:stone"))
 	for x := range 16 {
 		for z := range 16 {
 			column.SetBlockState(x, 63, z, stone)
@@ -56,22 +73,21 @@ func navigationTerrain(t *testing.T) (*Module, *chunks.ChunkColumn) {
 		t.Fatal(err)
 	}
 	m.world.HandlePacket(packet)
-	column = m.world.GetChunk(0, 0)
-	if column == nil {
+	if m.world.GetChunk(0, 0) == nil {
 		t.Fatal("terrain fixture chunk was not loaded")
 	}
 	m.self.SetPosition(4.5, 64, 8.5)
-	return m, column
+	return m, terrainColumn{t, m}
 }
 
 func terrainState(t *testing.T, name string, overrides map[string]string) int32 {
 	t.Helper()
-	id := blocks.BlockID("minecraft:" + name)
-	_, props := blocks.StateProperties(int(blocks.DefaultStateID(id)))
+	id := blocks.ID("minecraft:" + name)
+	_, props := blocks.StateProperties(blocks.DefaultStateID(id))
 	for key, value := range overrides {
 		props[key] = value
 	}
-	state := blocks.StateID(int(id), props)
+	state := blocks.StateID(id, props)
 	if state < 0 {
 		t.Fatalf("invalid fixture state %s %v", name, props)
 	}
@@ -94,7 +110,7 @@ func TestStairWalkingUsesSuccessiveCollisionSteps(t *testing.T) {
 			t.Fatal("stair path required a jump instead of automatic steps")
 		}
 	}
-	column.SetBlockState(5, 64, 8, blocks.DefaultStateID(blocks.BlockID("minecraft:stone")))
+	column.SetBlockState(5, 64, 8, blocks.DefaultStateID(blocks.ID("minecraft:stone")))
 	if canPassBetween(m.world, m.collisions, 4, 8, 5, 8, 64, 65, playerHeight, cfg) {
 		t.Fatal("a full block was invented as an automatic step")
 	}
@@ -106,9 +122,9 @@ func TestFenceAndClosedGateDoNotBecomeGoalShortcuts(t *testing.T) {
 			m, column := navigationTerrain(t)
 			cfg := m.simulationConfig()
 			column.SetBlockState(5, 64, 8, terrainState(t, name, nil))
-			open := &nodeHeap{}
-			tryMove(m.world, m.collisions, nil, &PathNode{X: 4, Y: 64, Z: 8}, 64, 5, 65, 8, 5, 65, 8, map[[3]int]float64{}, open, cfg)
-			if len(*open) != 0 {
+			s := newSearch(t.Context(), m.world, m.collisions, nil, 5, 65, 8, cfg)
+			s.tryMove(&node{Waypoint: Waypoint{X: 4, Y: 64, Z: 8}}, 64, 5, 65, 8)
+			if s.open.Len() != 0 {
 				t.Fatal("goal bypassed tall collision geometry")
 			}
 			if canPassBetween(m.world, m.collisions, 4, 8, 5, 8, 64, 64, playerHeight, cfg) {
@@ -133,7 +149,7 @@ func TestJumpRejectsUnknownSweptTerrainAndCancelledContext(t *testing.T) {
 	if jumpTerrain(m.world, 14.5, 64, 8.5, 17.5, 64, 8.5, cfg) {
 		t.Fatal("jump treated an unloaded swept chunk as air")
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if _, ok := simulateOneJump(ctx, m.collisions, m.world, 4.5, 64, 8.5, 270, cfg); ok {
 		t.Fatal("cancelled trajectory produced a landing")
@@ -143,9 +159,9 @@ func TestJumpRejectsUnknownSweptTerrainAndCancelledContext(t *testing.T) {
 func TestFailedEdgeIsExcludedFromRecoveryRoute(t *testing.T) {
 	m, _ := navigationTerrain(t)
 	defer m.Stop()
-	m.navigationContext = context.Background()
+	m.navigationContext = t.Context()
 	m.navigating = true
-	m.path = []PathNode{{X: 4, Y: 64, Z: 8}, {X: 5, Y: 64, Z: 8}}
+	m.path = []Waypoint{{X: 4, Y: 64, Z: 8}, {X: 5, Y: 64, Z: 8}}
 	m.pathIndex = 1
 	m.goalX, m.goalY, m.goalZ = 7.5, 64, 8.5
 	m.bestWaypointDistance = math.Inf(1)
@@ -161,7 +177,7 @@ func TestFailedEdgeIsExcludedFromRecoveryRoute(t *testing.T) {
 	if forward != 0 || strafe != 0 || jump {
 		t.Fatal("failed edge retained movement input")
 	}
-	path, err := findPath(context.Background(), m.world, m.collisions, nil, 4, 64, 8, 7, 64, 8, 1000, cfg)
+	path, err := newSearch(t.Context(), m.world, m.collisions, nil, 7, 64, 8, cfg).run(4, 64, 8, 1000, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +191,7 @@ func TestFailedEdgeIsExcludedFromRecoveryRoute(t *testing.T) {
 
 func TestNavigationCancellationClearsInputWithoutAnotherPhysicsTick(t *testing.T) {
 	m, _ := navigationTerrain(t)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	completed := make(chan bool, 1)
 	m.OnNavigationComplete(func(reached bool) { completed <- reached })
@@ -198,7 +214,7 @@ func TestNavigationCancellationClearsInputWithoutAnotherPhysicsTick(t *testing.T
 func TestTerrainUsesConfiguredStepHeightAndScaledBody(t *testing.T) {
 	m, column := navigationTerrain(t)
 	cfg := m.simulationConfig()
-	stone := blocks.DefaultStateID(blocks.BlockID("minecraft:stone"))
+	stone := blocks.DefaultStateID(blocks.ID("minecraft:stone"))
 	column.SetBlockState(5, 64, 8, stone)
 	cfg.maxStep = 1
 	if !canPassBetween(m.world, m.collisions, 4, 8, 5, 8, 64, 65, cfg.height, cfg) {
@@ -213,5 +229,26 @@ func TestTerrainUsesConfiguredStepHeightAndScaledBody(t *testing.T) {
 	cfg.sneakingHeight = float64(float32(playerSneakingHeight) * float32(0.5))
 	if !canStandAt(m.world, m.collisions, 4, 64, 8, cfg) {
 		t.Fatal("scaled player was rejected from an opening its body fits")
+	}
+}
+
+func TestReachSearchAgreesWithInteraction(t *testing.T) {
+	m, column := navigationTerrain(t)
+	stone := blocks.DefaultStateID(blocks.ID("minecraft:stone"))
+	column.SetBlockState(10, 64, 8, stone)
+	const reach = 4.5
+
+	x, y, z, ok := FindReachablePosition(m.collisions, 4.5, 64, 8.5, 10, 64, 8, reach)
+	if !ok {
+		t.Fatal("no stand position found for a loaded, visible block")
+	}
+	eyeY := nodeSurfaceY(m.collisions, x, y, z, defaultSimulationConfig()) + eyeHeight
+	if !interaction.CanReachBlockFrom(m.world, m.collisions, float64(x)+0.5, eyeY, float64(z)+0.5, 10, 64, 8, reach) {
+		t.Fatalf("planner chose (%d,%d,%d), which interaction rejects", x, y, z)
+	}
+
+	// Terrain outside loaded chunks never passes the executor's reach test.
+	if _, _, _, ok := FindReachablePosition(m.collisions, 4.5, 64, 8.5, 40, 64, 8, reach); ok {
+		t.Fatal("stand position found for an unloaded target")
 	}
 }

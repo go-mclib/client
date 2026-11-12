@@ -2,25 +2,25 @@ package chat
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"math"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
+	"github.com/go-mclib/client"
 	"github.com/go-mclib/data/packets"
-	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	jp "github.com/go-mclib/protocol/javaproto"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 const commandSuggestionTimeout = 5 * time.Second
 
-type suggestionSession struct {
-	ctx       context.Context
-	cancel    context.CancelFunc
-	transport *jp.TCPClient
-	conn      *jp.Conn
+// playPhase is the session captured at OnPlay. Its context also ends on
+// module reset, which cancels pending requests.
+type playPhase struct {
+	session *client.Session
+	ctx     context.Context
+	cancel  context.CancelFunc
 }
 
 type pendingSuggestion struct {
@@ -37,12 +37,10 @@ func (m *Module) startSuggestions() {
 	m.suggestionMu.Lock()
 	defer m.suggestionMu.Unlock()
 	m.resetSuggestionsLocked()
-	transport := m.client.TCPClient
-	if transport == nil || transport.Conn() == nil {
-		return
+	if session := m.client.Session(); session != nil {
+		ctx, cancel := context.WithCancel(session.Context())
+		m.play = &playPhase{session: session, ctx: ctx, cancel: cancel}
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	m.suggestionSession = &suggestionSession{ctx: ctx, cancel: cancel, transport: transport, conn: transport.Conn()}
 }
 
 func (m *Module) resetSuggestions() {
@@ -52,9 +50,9 @@ func (m *Module) resetSuggestions() {
 }
 
 func (m *Module) resetSuggestionsLocked() {
-	if m.suggestionSession != nil {
-		m.suggestionSession.cancel()
-		m.suggestionSession = nil
+	if m.play != nil {
+		m.play.cancel()
+		m.play = nil
 	}
 	clear(m.pendingSuggestions)
 	// IDs are never reused, including across resets: late replies cannot match
@@ -65,18 +63,12 @@ func (m *Module) resetSuggestionsLocked() {
 // command. Input is the exact slash-prefixed partial command, including trailing
 // spaces and unfinished quoted arguments. Start and Length remain UTF-16 code
 // units in that input. Suggestions are neither exhaustive nor permission proof.
+// A non-nil session must be the current play session, so a caller bound to an
+// old connection cannot submit on a replacement; nil selects the current one.
 // This method is safe concurrently with HandlePacket and Reset. Do not hold a
 // packet-dispatch or chat lock while waiting for it. Requests time out after five
 // seconds, or earlier if ctx is canceled or the play session ends.
-func (m *Module) SuggestCommandContext(ctx context.Context, input string) (packets.S2CCommandSuggestions, error) {
-	return m.SuggestCommandContextForConnection(ctx, input, nil)
-}
-
-// SuggestCommandContextForConnection additionally requires the captured play
-// connection to equal expected. Session-bound callers can release their own chat
-// lock before calling without allowing an old turn to submit on a replacement.
-// A nil expected connection selects the current play session.
-func (m *Module) SuggestCommandContextForConnection(ctx context.Context, input string, expected *jp.Conn) (packets.S2CCommandSuggestions, error) {
+func (m *Module) SuggestCommandContext(ctx context.Context, session *client.Session, input string) (packets.S2CCommandSuggestions, error) {
 	var empty packets.S2CCommandSuggestions
 	if err := ctx.Err(); err != nil {
 		return empty, err
@@ -88,10 +80,10 @@ func (m *Module) SuggestCommandContextForConnection(ctx context.Context, input s
 	defer cancel()
 
 	m.suggestionMu.Lock()
-	session := m.suggestionSession
-	if session == nil || session.ctx.Err() != nil || (expected != nil && expected != session.conn) {
+	play := m.play
+	if play == nil || play.ctx.Err() != nil || (session != nil && session != play.session) {
 		m.suggestionMu.Unlock()
-		return empty, fmt.Errorf("command suggestion session is inactive or connection changed")
+		return empty, errInactiveSession
 	}
 	if err := ctx.Err(); err != nil {
 		m.suggestionMu.Unlock()
@@ -99,16 +91,16 @@ func (m *Module) SuggestCommandContextForConnection(ctx context.Context, input s
 	}
 	if m.nextSuggestionID > math.MaxInt32 {
 		m.suggestionMu.Unlock()
-		return empty, fmt.Errorf("command suggestion transaction IDs exhausted")
+		return empty, errors.New("command suggestion transaction IDs exhausted")
 	}
 	id := ns.VarInt(m.nextSuggestionID)
 	m.nextSuggestionID++
-	pending := &pendingSuggestion{inputLength: commandUTF16Length(input), result: make(chan suggestionResult, 1)}
+	pending := &pendingSuggestion{inputLength: utf16Len(input), result: make(chan suggestionResult, 1)}
 	if m.pendingSuggestions == nil {
 		m.pendingSuggestions = make(map[ns.VarInt]*pendingSuggestion)
 	}
 	m.pendingSuggestions[id] = pending
-	stopSession := context.AfterFunc(session.ctx, cancel)
+	stopSession := context.AfterFunc(play.ctx, cancel)
 	m.suggestionMu.Unlock()
 	defer stopSession()
 	defer func() {
@@ -117,74 +109,30 @@ func (m *Module) SuggestCommandContextForConnection(ctx context.Context, input s
 		m.suggestionMu.Unlock()
 	}()
 
-	// Unlike the client's reconnectable queue, this write targets only the
-	// transport captured at OnPlay. No module or packet-loop lock spans I/O.
-	// Canceling a blocked write closes only that captured connection; canceling
-	// while awaiting the reply does not close a healthy connection.
-	if err := ctx.Err(); err != nil {
+	// The write targets only the session captured at OnPlay; no module or
+	// packet-loop lock spans I/O. Canceling a blocked write closes only that
+	// session's connection; canceling while awaiting the reply does not close
+	// a healthy connection.
+	if err := play.session.Write(ctx, &packets.C2SCommandSuggestion{TransactionID: id, Text: ns.String(input)}); err != nil {
 		return empty, err
 	}
-	if err := session.ctx.Err(); err != nil {
-		return empty, err
-	}
-	stopWrite := context.AfterFunc(ctx, func() { _ = session.conn.Close() })
-	err := session.transport.WritePacket(suggestionPacket{
-		C2SCommandSuggestion: &packets.C2SCommandSuggestion{TransactionId: id, Text: ns.String(input)},
-		ctx:                  ctx,
-		sessionCtx:           session.ctx,
-	})
-	stopWrite()
-	if ctx.Err() != nil {
-		return empty, ctx.Err()
-	}
-	if err := session.ctx.Err(); err != nil {
-		return empty, err
-	}
-	if err != nil {
-		return empty, err
-	}
+	// the play phase ending cancels ctx
 	select {
 	case <-ctx.Done():
 		return empty, ctx.Err()
-	case <-session.ctx.Done():
-		return empty, session.ctx.Err()
 	case result := <-pending.result:
 		if err := ctx.Err(); err != nil {
-			return empty, err
-		}
-		if err := session.ctx.Err(); err != nil {
 			return empty, err
 		}
 		return result.packet, result.err
 	}
 }
 
-type suggestionPacket struct {
-	*packets.C2SCommandSuggestion
-	ctx        context.Context
-	sessionCtx context.Context
-}
-
-func (p suggestionPacket) Write(buf *ns.PacketBuffer) error {
-	if err := p.ctx.Err(); err != nil {
-		return err
-	}
-	if err := p.sessionCtx.Err(); err != nil {
-		return err
-	}
-	return p.C2SCommandSuggestion.Write(buf)
-}
-
 func validSuggestionInput(input string) error {
-	if !utf8.ValidString(input) || !strings.HasPrefix(input, "/") || commandUTF16Length(input) > 32500 {
-		return fmt.Errorf("command completion requires a slash-prefixed UTF-8 input of at most 32500 UTF-16 code units")
+	if !strings.HasPrefix(input, "/") || utf16Len(input) > 32500 {
+		return errors.New("command completion requires a slash-prefixed input of at most 32500 UTF-16 code units")
 	}
-	for _, r := range input {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029' {
-			return fmt.Errorf("commands must be one line without control characters")
-		}
-	}
-	return nil
+	return validChatLine(input)
 }
 
 func (m *Module) handleCommandSuggestions(pkt *jp.WirePacket) {
@@ -205,7 +153,7 @@ func (m *Module) handleCommandSuggestions(pkt *jp.WirePacket) {
 	if result.err == nil {
 		start, length := int64(result.packet.Start), int64(result.packet.Length)
 		if start < 0 || length < 0 || start+length > int64(pending.inputLength) {
-			result.err = fmt.Errorf("server returned an invalid command suggestion UTF-16 replacement range")
+			result.err = errors.New("server returned an invalid command suggestion UTF-16 replacement range")
 		}
 	}
 	m.suggestionMu.Lock()

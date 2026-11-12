@@ -60,12 +60,12 @@ func simulateOneJump(ctx context.Context, col *collisions.Module, w *world.Modul
 		}
 		if tick == 0 {
 			jx, jy, jz := physics.JumpImpulse(yaw, cfg.jumpPower, true)
-			vx, vy, vz = vx+jx, math.Max(vy, jy), vz+jz
+			vx, vy, vz = vx+jx, max(vy, jy), vz+jz
 		}
 		friction := 1.0
 		speed := physics.SprintFlyingSpeed
 		if onGround {
-			friction = physics.ModifiedFriction(physics.GetBlockFrictionAt(w, x, y, z, cfg.width), cfg.frictionModifier)
+			friction = physics.ModifiedFriction(physics.BlockFrictionAt(w, x, y, z, cfg.width), cfg.frictionModifier)
 			speed = physics.GroundAcceleration(cfg.speed, friction)
 		}
 		ax, _, az := physics.MoveRelative(speed, forward, strafe, yaw)
@@ -109,9 +109,9 @@ func simulateOneJump(ctx context.Context, col *collisions.Module, w *world.Modul
 // skipping an unloaded chunk or a fluid between two known endpoints is unsafe.
 func jumpTerrain(w *world.Module, x, y, z, nx, ny, nz float64, cfg simulationConfig) bool {
 	half := cfg.width / 2
-	for bx := int(math.Floor(math.Min(x, nx) - half)); bx <= int(math.Floor(math.Max(x, nx)+half)); bx++ {
-		for bz := int(math.Floor(math.Min(z, nz) - half)); bz <= int(math.Floor(math.Max(z, nz)+half)); bz++ {
-			for by := int(math.Floor(math.Min(y, ny))) - 1; by <= int(math.Floor(math.Max(y, ny)+cfg.height+cfg.maxStep)); by++ {
+	for bx := int(math.Floor(min(x, nx) - half)); bx <= int(math.Floor(max(x, nx)+half)); bx++ {
+		for bz := int(math.Floor(min(z, nz) - half)); bz <= int(math.Floor(max(z, nz)+half)); bz++ {
+			for by := int(math.Floor(min(y, ny))) - 1; by <= int(math.Floor(max(y, ny)+cfg.height+cfg.maxStep)); by++ {
 				state, loaded := w.GetLoadedBlock(bx, by, bz)
 				if !loaded {
 					return false
@@ -119,11 +119,11 @@ func jumpTerrain(w *world.Module, x, y, z, nx, ny, nz float64, cfg simulationCon
 				if blockDangerCost(state) >= 50 {
 					return false
 				}
-				id, props := blocks.StateProperties(int(state))
+				id, props := blocks.StateProperties(state)
 				if props["waterlogged"] == "true" {
 					return false
 				}
-				switch blocks.BlockName(id) {
+				switch blocks.Name(id) {
 				case "minecraft:water", "minecraft:lava", "minecraft:bubble_column",
 					"minecraft:slime_block", "minecraft:honey_block", "minecraft:cobweb",
 					"minecraft:soul_sand", "minecraft:sweet_berry_bush", "minecraft:powder_snow",

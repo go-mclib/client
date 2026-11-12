@@ -4,18 +4,17 @@ import (
 	"math"
 
 	"github.com/go-mclib/client/modules/collisions"
-	"github.com/go-mclib/client/modules/inventory"
 	"github.com/go-mclib/client/modules/registry"
-	"github.com/go-mclib/data/block_shapes"
 	"github.com/go-mclib/data/blocks"
 	"github.com/go-mclib/data/items"
 	"github.com/go-mclib/data/registries"
+	"github.com/go-mclib/data/slots"
 	"github.com/go-mclib/nbt"
 )
 
 var (
-	leatherBootsID  = items.ItemID("minecraft:leather_boots")
-	scaffoldingID   = blocks.BlockID("minecraft:scaffolding")
+	leatherBootsID  = items.ID("minecraft:leather_boots")
+	scaffoldingID   = blocks.ID("minecraft:scaffolding")
 	effectBlindness = registries.MobEffect.Get("minecraft:blindness")
 )
 
@@ -64,7 +63,7 @@ func (m *Module) canWalkOnPowderSnow() bool {
 	if m.inventory == nil {
 		return false
 	}
-	boots := m.inventory.GetSlot(inventory.SlotArmorFeet)
+	boots := m.inventory.GetSlot(slots.PlayerArmorFeet)
 	return boots != nil && boots.Count > 0 && boots.ID == leatherBootsID
 }
 
@@ -94,7 +93,7 @@ func (m *Module) itemUseEffects() (factor float64, canSprint bool) {
 	}
 	item := m.inventory.HeldItem()
 	if m.self.UsingOffhand() {
-		item = m.inventory.GetSlot(inventory.SlotOffhand)
+		item = m.inventory.GetSlot(slots.PlayerOffhand)
 	}
 	if item != nil && item.Components != nil && item.Components.UseEffects != nil {
 		effect := item.Components.UseEffects
@@ -119,10 +118,10 @@ func (m *Module) updatePose(x, y, z float64) {
 	desired := collisions.PlayerHeight
 	if m.swimming || m.self.FallFlying() {
 		desired = collisions.PlayerWidth
-	} else if m.self.Sneaking() && m.self.AbilityFlags()&2 == 0 {
+	} else if m.self.Sneaking() && !m.self.IsFlying() {
 		desired = collisions.PlayerSneakingHeight
 	}
-	if m.self.Gamemode() != 3 && !canFit(desired) {
+	if !m.self.IsSpectator() && !canFit(desired) {
 		if canFit(collisions.PlayerSneakingHeight) {
 			desired = collisions.PlayerSneakingHeight
 		} else {
@@ -133,7 +132,7 @@ func (m *Module) updatePose(x, y, z float64) {
 }
 
 func (m *Module) updateSwimming(previousEyeInWater bool, x, y, z float64) {
-	if m.self.AbilityFlags()&2 != 0 || m.self.Gamemode() == 3 || !m.self.Sprinting() {
+	if m.self.IsFlying() || m.self.IsSpectator() || !m.self.Sprinting() {
 		m.swimming = false
 		return
 	}
@@ -141,7 +140,7 @@ func (m *Module) updateSwimming(previousEyeInWater bool, x, y, z float64) {
 		m.swimming = m.fluid.waterHeight > 0
 		return
 	}
-	kind, _, _ := block_shapes.FluidState(m.world.GetBlock(int(math.Floor(x)), int(math.Floor(y)), int(math.Floor(z))))
+	kind, _, _ := blocks.FluidState(m.world.GetBlock(int(math.Floor(x)), int(math.Floor(y)), int(math.Floor(z))))
 	m.swimming = previousEyeInWater && kind == fluidWater
 }
 
@@ -150,8 +149,8 @@ func (m *Module) updateSprinting(crouching bool, previousEyeInWater bool) {
 	if !s.Sprinting() {
 		return
 	}
-	flying := s.AbilityFlags()&2 != 0
-	possible := !s.HasEffect(effectBlindness) && (s.Food() > 6 || s.AbilityFlags()&4 != 0)
+	flying := s.IsFlying()
+	possible := !s.HasEffect(effectBlindness) && (s.Vitals().Food > 6 || s.MayFly())
 	forward := m.forwardImpulse > float64(float32(1e-5))
 	if m.swimming {
 		possible = possible && m.fluid.waterHeight > 0 && (forward || m.onGround || s.Sneaking())
@@ -171,7 +170,7 @@ func (m *Module) applyJumpInput(yaw float64) {
 	if m.noJumpDelay > 0 {
 		m.noJumpDelay--
 	}
-	if !m.jumping || m.self.AbilityFlags()&2 != 0 {
+	if !m.jumping || m.self.IsFlying() {
 		m.noJumpDelay = 0
 		return
 	}
@@ -190,7 +189,7 @@ func (m *Module) applyJumpInput(yaw float64) {
 }
 
 func (m *Module) backOffFromEdge(x, y, z, dx, dy, dz, maxStep float64) (float64, float64) {
-	if !m.self.Sneaking() || m.self.AbilityFlags()&2 != 0 || dy > 0 {
+	if !m.self.Sneaking() || m.self.IsFlying() || dy > 0 {
 		return dx, dz
 	}
 	halfWidth := m.bodyWidth() / 2
@@ -240,7 +239,7 @@ func (m *Module) applySwimSteering(x, y, z float64, pitch float32) {
 	if lookY < -0.2 {
 		multiplier = 0.085
 	}
-	kind, _, _ := block_shapes.FluidState(m.world.GetBlock(int(math.Floor(x)), int(math.Floor((y+1)-0.1)), int(math.Floor(z))))
+	kind, _, _ := blocks.FluidState(m.world.GetBlock(int(math.Floor(x)), int(math.Floor((y+1)-0.1)), int(math.Floor(z))))
 	if lookY <= 0 || m.jumping || kind != 0 {
 		m.velY += (lookY - m.velY) * multiplier
 	}

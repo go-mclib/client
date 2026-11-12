@@ -1,7 +1,6 @@
 package pathfinding
 
 import (
-	"context"
 	"math"
 	"testing"
 	"time"
@@ -10,8 +9,8 @@ import (
 	"github.com/go-mclib/data/blocks"
 	"github.com/go-mclib/data/chunks"
 	"github.com/go-mclib/data/packets"
-	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	jp "github.com/go-mclib/protocol/javaproto"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 func waitNavigationPlanner(t *testing.T, m *Module) {
@@ -43,7 +42,7 @@ func dryNavigationStep(t *testing.T, m *Module, velocity *[3]float64) bool {
 		m.nextPlan = time.Time{}
 	}
 	m.mu.Unlock()
-	wire, err := jp.ToWire(&packets.S2CSetEntityMotion{EntityId: ns.VarInt(m.self.EntityID()), Velocity: ns.LpVec3{X: velocity[0], Y: velocity[1], Z: velocity[2]}})
+	wire, err := jp.ToWire(&packets.S2CSetEntityMotion{EntityID: ns.VarInt(m.self.EntityID()), Velocity: ns.LpVec3{X: velocity[0], Y: velocity[1], Z: velocity[2]}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +75,7 @@ func dryNavigationStep(t *testing.T, m *Module, velocity *[3]float64) bool {
 		acceleration = physics.SprintFlyingSpeed
 	}
 	if onGround {
-		friction = physics.ModifiedFriction(physics.GetBlockFrictionAt(m.world, x, y, z, cfg.width), cfg.frictionModifier)
+		friction = physics.ModifiedFriction(physics.BlockFrictionAt(m.world, x, y, z, cfg.width), cfg.frictionModifier)
 		acceleration = physics.GroundAcceleration(m.self.MovementSpeed(m.self.Sprinting()), friction)
 	}
 	dx, _, dz := physics.MoveRelative(acceleration, forward, strafe, float64(yaw))
@@ -101,7 +100,7 @@ func TestNavigationBrakesWithoutEndpointOscillation(t *testing.T) {
 		t.Run(surface, func(t *testing.T) {
 			m, column := navigationTerrain(t)
 			defer m.Stop()
-			state := blocks.DefaultStateID(blocks.BlockID("minecraft:" + surface))
+			state := blocks.DefaultStateID(blocks.ID("minecraft:" + surface))
 			for x := range 16 {
 				for z := range 16 {
 					column.SetBlockState(x, 63, z, state)
@@ -136,7 +135,7 @@ func TestNavigationBrakesWithoutEndpointOscillation(t *testing.T) {
 func TestLookaheadCannotCutWallCornerOrUnsupportedGap(t *testing.T) {
 	m, column := navigationTerrain(t)
 	cfg := m.simulationConfig()
-	stone := blocks.DefaultStateID(blocks.BlockID("minecraft:stone"))
+	stone := blocks.DefaultStateID(blocks.ID("minecraft:stone"))
 	column.SetBlockState(5, 64, 8, stone)
 	column.SetBlockState(5, 65, 8, stone)
 	if walkCorridor(m.world, m.collisions, 4.7, 64, 8.5, 5.5, 64, 9.5, false, cfg) {
@@ -154,7 +153,7 @@ func loadNavigationColumn(t *testing.T, m *Module, cx int32) {
 	t.Helper()
 	column := chunks.NewColumn(cx, 0)
 	column.Sections[7], column.Sections[8] = chunks.NewEmptySection(), chunks.NewEmptySection()
-	stone := blocks.DefaultStateID(blocks.BlockID("minecraft:stone"))
+	stone := blocks.DefaultStateID(blocks.ID("minecraft:stone"))
 	for x := range 16 {
 		for z := range 16 {
 			column.SetBlockState(int(cx)*16+x, 63, z, stone)
@@ -176,7 +175,7 @@ func TestNavigationContinuesAcrossMultipleLoadedFrontiers(t *testing.T) {
 	defer m.Stop()
 	completed := make(chan bool, 1)
 	m.OnNavigationComplete(func(ok bool) { completed <- ok })
-	if err := m.NavigateToContext(context.Background(), 40.5, 64, 8.5); err != nil {
+	if err := m.NavigateToContext(t.Context(), 40.5, 64, 8.5); err != nil {
 		t.Fatal(err)
 	}
 	var velocity [3]float64
@@ -240,14 +239,14 @@ func TestPlannedJumpPressesOnceAndSettlesAtLanding(t *testing.T) {
 		column.SetBlockState(x, 63, 8, 0)
 	}
 	cfg := m.simulationConfig()
-	landing, ok := simulateOneJump(context.Background(), m.collisions, m.world, 4.5, 64, 8.5, 270, cfg)
+	landing, ok := simulateOneJump(t.Context(), m.collisions, m.world, 4.5, 64, 8.5, 270, cfg)
 	if !ok {
 		t.Fatal("fixture jump has no simulated landing")
 	}
-	m.navigationContext = context.Background()
+	m.navigationContext = t.Context()
 	m.navigating, m.segmentFinal = true, true
 	m.goalX, m.goalY, m.goalZ = float64(landing.X)+0.5, float64(landing.Y), float64(landing.Z)+0.5
-	m.path = []PathNode{{X: 4, Y: 64, Z: 8}, {X: landing.X, Y: landing.Y, Z: landing.Z, Jump: true, JumpYaw: 270}}
+	m.path = []Waypoint{{X: 4, Y: 64, Z: 8}, {X: landing.X, Y: landing.Y, Z: landing.Z, Jump: true, JumpYaw: 270}}
 	m.resetWaypoint()
 	var velocity [3]float64
 	presses := 0
@@ -270,7 +269,7 @@ func TestControllerTraversesStairsDescentsAndCrouchedCorridor(t *testing.T) {
 		t.Run(terrain, func(t *testing.T) {
 			m, column := navigationTerrain(t)
 			defer m.Stop()
-			stone := blocks.DefaultStateID(blocks.BlockID("minecraft:stone"))
+			stone := blocks.DefaultStateID(blocks.ID("minecraft:stone"))
 			goalY := 64.0
 			switch terrain {
 			case "stairs":
@@ -325,7 +324,7 @@ func TestChangedTerrainReplansRatherThanDrivingIntoNewWall(t *testing.T) {
 		waitNavigationPlanner(t, m)
 		x, _, _ := m.self.Position()
 		if !changed && x > 5.5 {
-			stone := blocks.DefaultStateID(blocks.BlockID("minecraft:stone"))
+			stone := blocks.DefaultStateID(blocks.ID("minecraft:stone"))
 			column.SetBlockState(8, 64, 8, stone)
 			column.SetBlockState(8, 65, 8, stone)
 			changed = true
@@ -347,8 +346,8 @@ func loadBedIceColumn(t *testing.T, m *Module, cx, cz int32) {
 	t.Helper()
 	column := chunks.NewColumn(cx, cz)
 	column.Sections[0] = chunks.NewEmptySection()
-	grass := blocks.DefaultStateID(blocks.BlockID("minecraft:grass_block"))
-	ice := blocks.DefaultStateID(blocks.BlockID("minecraft:blue_ice"))
+	grass := blocks.DefaultStateID(blocks.ID("minecraft:grass_block"))
+	ice := blocks.DefaultStateID(blocks.ID("minecraft:blue_ice"))
 	for lx := range 16 {
 		for lz := range 16 {
 			x, z := int(cx)*16+lx, int(cz)*16+lz
@@ -425,12 +424,12 @@ func TestReachedWaypointRejectsOutgoingBedCornerRatherThanIncomingEdge(t *testin
 		}
 	}
 	m.self.SetPosition(21.5, -60, 21.5)
-	m.navigationContext = context.Background()
+	m.navigationContext = t.Context()
 	m.navigating = true
 	m.frontiers = make(map[[3]int]int)
 	m.goalX, m.goalY, m.goalZ = 25.5, -60, 22.5
 	m.segmentFinal = true
-	m.path = []PathNode{{X: 21, Y: -60, Z: 21}, {X: 22, Y: -60, Z: 22}, {X: 25, Y: -60, Z: 22}}
+	m.path = []Waypoint{{X: 21, Y: -60, Z: 21}, {X: 22, Y: -60, Z: 22}, {X: 25, Y: -60, Z: 22}}
 	m.resetWaypoint()
 	var velocity [3]float64
 	for range 160 {

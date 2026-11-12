@@ -3,22 +3,22 @@ package main
 import (
 	"flag"
 
-	"github.com/go-mclib/client/helpers"
+	"github.com/go-mclib/client/botcli"
 	"github.com/go-mclib/client/modules/combat"
 	"github.com/go-mclib/client/modules/entities"
 	"github.com/go-mclib/client/modules/inventory"
 	"github.com/go-mclib/client/modules/physics"
 	"github.com/go-mclib/client/modules/self"
-	dataEntities "github.com/go-mclib/data/entities"
+	dataentities "github.com/go-mclib/data/entities"
 )
 
 func main() {
-	var f helpers.Flags
-	helpers.RegisterFlags(&f)
+	var f botcli.Flags
+	botcli.RegisterFlags(&f)
 	rotate := flag.Bool("rotate", false, "rotate to face nearest entity before attacking")
 	flag.Parse()
 
-	c := helpers.NewClient(f)
+	c := botcli.NewClient(f)
 	c.Register(entities.New())
 	c.Register(combat.New())
 	c.Register(inventory.New())
@@ -29,7 +29,7 @@ func main() {
 	p := physics.From(c)
 
 	filter := func(e *entities.Entity) bool {
-		if !dataEntities.IsAttackable(e.TypeName) {
+		if !dataentities.IsAttackable(e.TypeName) {
 			return false
 		}
 		// without -rotate, only attack entities already under the crosshair
@@ -54,5 +54,5 @@ func main() {
 		}
 	})
 
-	helpers.Run(c)
+	botcli.Run(c, f)
 }

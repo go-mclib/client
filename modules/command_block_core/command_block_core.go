@@ -12,15 +12,17 @@
 package command_block_core
 
 import (
-	"fmt"
+	"cmp"
+	"errors"
 	"sync"
 	"time"
 
 	"github.com/go-mclib/client"
+	"github.com/go-mclib/client/modules/inventory"
 	"github.com/go-mclib/client/modules/registry"
 	"github.com/go-mclib/client/modules/self"
 	"github.com/go-mclib/client/modules/world"
-	jp "github.com/go-mclib/protocol/java_protocol"
+	jp "github.com/go-mclib/protocol/javaproto"
 )
 
 const ModuleName = "command_block_core"
@@ -102,10 +104,11 @@ type Config struct {
 }
 
 type Module struct {
-	client   *client.Client
-	self     *self.Module
-	registry *registry.Module // optional: auto-detect PearlY
-	world    *world.Module    // optional: find a placement spot
+	client    *client.Client
+	self      *self.Module
+	inventory *inventory.Module
+	registry  *registry.Module // optional: auto-detect PearlY
+	world     *world.Module    // optional: find a placement spot
 
 	cfg Config
 
@@ -124,9 +127,7 @@ func New(cfg Config) *Module {
 	if cfg.Size <= 0 || cfg.Size > 16 {
 		cfg.Size = 16
 	}
-	if cfg.PearlTag == "" {
-		cfg.PearlTag = "vc_fl"
-	}
+	cfg.PearlTag = cmp.Or(cfg.PearlTag, "vc_fl")
 	if cfg.CommandsPerTick <= 0 {
 		cfg.CommandsPerTick = 512
 	}
@@ -141,11 +142,15 @@ func (m *Module) Name() string { return ModuleName }
 func (m *Module) Init(c *client.Client) {
 	m.client = c
 	c.OnTransfer(m.Reset)
+	c.OnDisconnect(m.Reset)
 }
 
 func (m *Module) Wire() error {
 	if m.self = self.From(m.client); m.self == nil {
-		return fmt.Errorf("requires self module")
+		return errors.New("requires self module")
+	}
+	if m.inventory = inventory.From(m.client); m.inventory == nil {
+		return errors.New("requires inventory module")
 	}
 	m.registry = registry.From(m.client)
 	m.world = world.From(m.client)
@@ -156,7 +161,7 @@ func (m *Module) HandlePacket(_ *jp.WirePacket) {
 	// TODO: watch S2CSystemChat for advMode.notAllowed / setCommand.disabled.
 }
 
-// Reset stops dispatch and clears volatile state (called on reconnect/transfer).
+// Reset stops dispatch and clears volatile state (called on disconnect/transfer).
 func (m *Module) Reset() {
 	m.mu.Lock()
 	if m.cancel != nil {
@@ -183,13 +188,7 @@ func (m *Module) setState(s State) {
 }
 
 // From retrieves the core module from a client.
-func From(c *client.Client) *Module {
-	mod := c.Module(ModuleName)
-	if mod == nil {
-		return nil
-	}
-	return mod.(*Module)
-}
+func From(c *client.Client) *Module { return client.ModuleAs[*Module](c, ModuleName) }
 
 // SetOrigin overrides the cube's top origin before Build — e.g. a position
 // computed at runtime once the bot has spawned.
@@ -209,23 +208,12 @@ func (m *Module) resolvePearlY() int {
 	return fallbackPearlY
 }
 
-// dimensionBounds returns the buildable Y range [minY, maxY) for the current
-// dimension, falling back to the vanilla overworld without a registry.
-func (m *Module) dimensionBounds() (minY, maxY int) {
-	if m.registry != nil {
-		if dt, ok := m.registry.CurrentDimensionType(); ok {
-			return int(dt.MinY), int(dt.MaxY())
-		}
-	}
-	return -64, 320
-}
-
 // cubeBounds returns the cube's [bottom, top] world Y. The cube grows away from
 // the nearer world boundary — up from Origin.Y when it's in the lower half of
 // the world, down when in the upper half — so a low origin doesn't fall through
 // the floor (and a high one doesn't poke through the ceiling).
 func (m *Module) cubeBounds() (bottom, top int) {
-	minY, maxY := m.dimensionBounds()
+	minY, maxY := m.registry.CurrentBounds()
 	if m.cfg.Origin.Y < (minY+maxY)/2 {
 		return m.cfg.Origin.Y, m.cfg.Origin.Y + m.cfg.Size - 1 // grow up
 	}

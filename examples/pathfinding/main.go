@@ -7,25 +7,25 @@ import (
 	"strings"
 
 	"github.com/go-mclib/client"
-	"github.com/go-mclib/client/helpers"
+	"github.com/go-mclib/client/botcli"
 	"github.com/go-mclib/client/modules/chat"
 	"github.com/go-mclib/client/modules/entities"
 	"github.com/go-mclib/client/modules/pathfinding"
 	"github.com/go-mclib/client/modules/self"
 	"github.com/go-mclib/client/modules/world"
-	"github.com/go-mclib/data/packet_ids"
+	"github.com/go-mclib/data/packetids"
 	"github.com/go-mclib/data/packets"
-	jp "github.com/go-mclib/protocol/java_protocol"
+	jp "github.com/go-mclib/protocol/javaproto"
 )
 
 func main() {
-	var f helpers.Flags
-	helpers.RegisterFlags(&f)
+	var f botcli.Flags
+	botcli.RegisterFlags(&f)
 	flag.Parse()
 
 	f.MaxReconnectAttempts = -1
 
-	c := helpers.NewClient(f)
+	c := botcli.NewClient(f)
 
 	// register extended modules (order matters: dependencies first)
 	c.Register(entities.New())
@@ -48,7 +48,7 @@ func main() {
 	// listen for "come" in player chat by intercepting the raw packet
 	// to get the sender UUID and match it to a tracked entity
 	c.RegisterHandler(func(c *client.Client, pkt *jp.WirePacket) {
-		if pkt.PacketID != packet_ids.S2CPlayerChatID {
+		if pkt.PacketID != packetids.S2CPlayerChatID {
 			return
 		}
 
@@ -99,7 +99,7 @@ func main() {
 		w := world.From(c)
 		bx, by, bz := s.Position()
 		c.Logger.Printf("%s said 'come' — entity at (%.2f, %.2f, %.2f)", senderName, e.X, e.Y, e.Z)
-		c.Logger.Printf("bot at (%.2f, %.2f, %.2f), chunks loaded: %d", bx, by, bz, w.GetLoadedChunkCount())
+		c.Logger.Printf("bot at (%.2f, %.2f, %.2f), chunks loaded: %d", bx, by, bz, w.LoadedChunkCount())
 		ch.SendMessage(fmt.Sprintf("Coming to you, %s!", senderName))
 
 		if err := pf.NavigateTo(e.X, e.Y, e.Z); err != nil {
@@ -108,5 +108,5 @@ func main() {
 		}
 	})
 
-	helpers.Run(c)
+	botcli.Run(c, f)
 }

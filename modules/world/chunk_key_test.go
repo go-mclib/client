@@ -1,9 +1,8 @@
-package world_test
+package world
 
 import (
 	"testing"
 
-	"github.com/go-mclib/client/modules/world"
 	"github.com/go-mclib/data/chunks"
 )
 
@@ -23,17 +22,17 @@ func TestChunkKey(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		key := world.ChunkKey(tt.x, tt.z)
+		key := chunkKey(tt.x, tt.z)
 		gotX := int32(key >> 32)
 		gotZ := int32(key)
 		if gotX != tt.x || gotZ != tt.z {
-			t.Errorf("ChunkKey(%d, %d) roundtrip failed: got (%d, %d)", tt.x, tt.z, gotX, gotZ)
+			t.Errorf("chunkKey(%d, %d) roundtrip failed: got (%d, %d)", tt.x, tt.z, gotX, gotZ)
 		}
 	}
 }
 
 func TestGetSetBlock(t *testing.T) {
-	m := world.New()
+	m := New()
 
 	// create a test chunk at (0, 0) with an empty section at Y=64 (section index 8)
 	column := chunks.NewColumn(0, 0)
@@ -55,7 +54,7 @@ func TestGetSetBlock(t *testing.T) {
 }
 
 func TestGetBlockUnloadedChunk(t *testing.T) {
-	m := world.New()
+	m := New()
 
 	got := m.GetBlock(1000, 64, 1000)
 	if got != 0 {
@@ -64,7 +63,7 @@ func TestGetBlockUnloadedChunk(t *testing.T) {
 }
 
 func TestIsChunkLoaded(t *testing.T) {
-	m := world.New()
+	m := New()
 
 	if m.IsChunkLoaded(0, 0) {
 		t.Error("IsChunkLoaded(0, 0) = true, want false")
@@ -78,18 +77,18 @@ func TestIsChunkLoaded(t *testing.T) {
 }
 
 func TestReset(t *testing.T) {
-	m := world.New()
+	m := New()
 
 	m.PutChunk(0, 0, chunks.NewColumn(0, 0))
 	m.PutChunk(1, 1, chunks.NewColumn(1, 1))
 
-	if m.GetLoadedChunkCount() != 2 {
-		t.Errorf("GetLoadedChunkCount() = %d, want 2", m.GetLoadedChunkCount())
+	if m.LoadedChunkCount() != 2 {
+		t.Errorf("LoadedChunkCount() = %d, want 2", m.LoadedChunkCount())
 	}
 
 	m.Reset()
 
-	if m.GetLoadedChunkCount() != 0 {
-		t.Errorf("GetLoadedChunkCount() after Reset() = %d, want 0", m.GetLoadedChunkCount())
+	if m.LoadedChunkCount() != 0 {
+		t.Errorf("LoadedChunkCount() after Reset() = %d, want 0", m.LoadedChunkCount())
 	}
 }

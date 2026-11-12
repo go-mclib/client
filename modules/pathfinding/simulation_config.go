@@ -29,7 +29,7 @@ func (m *Module) simulationConfig() simulationConfig {
 		gravity = 0
 	}
 	return simulationConfig{
-		jumpPower: m.physics.GetJumpPower(), speed: s.MovementSpeed(true), gravity: gravity,
+		jumpPower: m.physics.JumpPower(), speed: s.MovementSpeed(true), gravity: gravity,
 		frictionModifier: s.AttributeValue("minecraft:friction_modifier", 1),
 		airDragModifier:  s.AttributeValue("minecraft:air_drag_modifier", 1),
 		maxStep:          float64(float32(s.AttributeValue("minecraft:step_height", collisions.StepUpHeight))),

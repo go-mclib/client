@@ -9,13 +9,14 @@ import (
 
 	"github.com/go-mclib/data/items"
 	"github.com/go-mclib/data/packets"
-	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	"github.com/go-mclib/data/slots"
+	jp "github.com/go-mclib/protocol/javaproto"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 func testInventorySession(t *testing.T, m *Module, send func(context.Context, jp.Packet) error) {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	m.session = &inventorySession{ctx: ctx, cancel: cancel, send: send}
 	t.Cleanup(m.Reset)
 }
@@ -75,14 +76,14 @@ func TestExecuteRequiresFullAuthoritativeMutation(t *testing.T) {
 	m := New()
 	outgoing := make(chan jp.Packet, 4)
 	testInventorySession(t, m, func(_ context.Context, p jp.Packet) error { outgoing <- p; return nil })
-	slots := make([]ns.Slot, TotalSlots)
-	slots[9] = ns.NewSlot(ns.VarInt(items.ItemID("minecraft:stone")), 9)
-	applyInventoryPacket(t, m, &packets.S2CContainerSetContent{WindowId: 0, StateId: 10, Slots: slots})
+	contents := make([]ns.Slot, slots.PlayerInvSize)
+	contents[9] = ns.NewSlot(ns.VarInt(items.ID("minecraft:stone")), 9)
+	applyInventoryPacket(t, m, &packets.S2CContainerSetContent{WindowID: 0, StateID: 10, Slots: contents})
 	done := make(chan inventoryOutcome, 1)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	go func() {
-		r, err := m.Execute(ctx, Operation{Kind: "move", From: 9, To: 10})
+		r, err := m.Execute(ctx, Operation{Kind: OpMove, From: 9, To: 10})
 		done <- inventoryOutcome{r, err}
 	}()
 	select {
@@ -94,16 +95,16 @@ func TestExecuteRequiresFullAuthoritativeMutation(t *testing.T) {
 		t.Fatal("packet submission predicted local contents")
 	}
 	// A partial slot/cursor update must not allow the next click yet.
-	applyInventoryPacket(t, m, &packets.S2CContainerSetSlot{WindowId: 0, StateId: 11, Slot: 9})
-	cursor := slots[9]
+	applyInventoryPacket(t, m, &packets.S2CContainerSetSlot{WindowID: 0, StateID: 11, Slot: 9})
+	cursor := contents[9]
 	applyInventoryPacket(t, m, &packets.S2CSetCursorItem{CarriedItem: cursor})
 	select {
 	case <-outgoing:
 		t.Fatal("partial update advanced transaction")
 	default:
 	}
-	slots[9] = ns.EmptySlot()
-	applyInventoryPacket(t, m, &packets.S2CContainerSetContent{WindowId: 0, StateId: 12, Slots: slots, CarriedItem: cursor})
+	contents[9] = ns.EmptySlot()
+	applyInventoryPacket(t, m, &packets.S2CContainerSetContent{WindowID: 0, StateID: 12, Slots: contents, CarriedItem: cursor})
 	select {
 	case <-outgoing:
 	case <-time.After(time.Second):
@@ -114,10 +115,10 @@ func TestExecuteRequiresFullAuthoritativeMutation(t *testing.T) {
 		t.Fatal("placement was labeled confirmed before server update")
 	default:
 	}
-	slots[10] = cursor
-	applyInventoryPacket(t, m, &packets.S2CContainerSetContent{WindowId: 0, StateId: 13, Slots: slots})
+	contents[10] = cursor
+	applyInventoryPacket(t, m, &packets.S2CContainerSetContent{WindowID: 0, StateID: 13, Slots: contents})
 	outcome := awaitInventoryOutcome(t, done)
-	if outcome.err != nil || outcome.result.Status != "confirmed" || outcome.result.Snapshot.Slots[10].Count != 9 || !outcome.result.Snapshot.Cursor.IsEmpty() {
+	if outcome.err != nil || outcome.result.Status != StatusConfirmed || outcome.result.Snapshot.Slots[10].Count != 9 || !outcome.result.Snapshot.Cursor.IsEmpty() {
 		t.Fatalf("move not confirmed: %+v, %v", outcome.result, outcome.err)
 	}
 }
@@ -137,11 +138,12 @@ type storageTestServer struct {
 }
 
 func newStorageTestServer(t *testing.T, window int32) *storageTestServer {
+	t.Helper()
 	m := New()
-	s := &storageTestServer{t: t, m: m, window: window, slots: make([]ns.Slot, TotalSlots)}
+	s := &storageTestServer{t: t, m: m, window: window, slots: make([]ns.Slot, slots.PlayerInvSize)}
 	if window != 0 {
 		s.slots = make([]ns.Slot, 27+36)
-		applyInventoryPacket(t, m, &packets.S2COpenScreen{WindowId: ns.VarInt(window), WindowType: ns.VarInt(MenuGeneric9x3)})
+		applyInventoryPacket(t, m, &packets.S2COpenScreen{WindowID: ns.VarInt(window), WindowType: ns.VarInt(MenuGeneric9x3)})
 	}
 	testInventorySession(t, m, s.send)
 	return s
@@ -149,7 +151,7 @@ func newStorageTestServer(t *testing.T, window int32) *storageTestServer {
 
 func (s *storageTestServer) publish() {
 	s.state++
-	applyInventoryPacket(s.t, s.m, &packets.S2CContainerSetContent{WindowId: ns.VarInt(s.window), StateId: s.state, Slots: s.slots, CarriedItem: s.cursor})
+	applyInventoryPacket(s.t, s.m, &packets.S2CContainerSetContent{WindowID: ns.VarInt(s.window), StateID: s.state, Slots: s.slots, CarriedItem: s.cursor})
 }
 
 func (s *storageTestServer) send(ctx context.Context, p jp.Packet) error {
@@ -158,7 +160,7 @@ func (s *storageTestServer) send(ctx context.Context, p jp.Packet) error {
 	}
 	c := decodeInventoryClick(s.t, p)
 	s.clicks++
-	if int32(c.WindowId) != s.window {
+	if int32(c.WindowID) != s.window {
 		return errors.New("wrong server window")
 	}
 	i := int(c.Slot)
@@ -217,12 +219,12 @@ func (s *storageTestServer) send(ctx context.Context, p jp.Packet) error {
 
 func TestSplitMergeCountsAndComponentIdentity(t *testing.T) {
 	s := newStorageTestServer(t, 0)
-	stone := ns.VarInt(items.ItemID("minecraft:stone"))
+	stone := ns.VarInt(items.ID("minecraft:stone"))
 	s.slots[9] = ns.NewSlot(stone, 9)
 	// A custom stack limit must survive splitting and govern merging.
 	s.slots[9].Components.Add = []ns.RawSlotComponent{{ID: items.ComponentMaxStackSize, Data: []byte{9}}}
 	s.publish()
-	r, err := s.m.Execute(context.Background(), Operation{Kind: "split", From: 9, To: 10, Count: 4})
+	r, err := s.m.Execute(t.Context(), Operation{Kind: OpSplit, From: 9, To: 10, Count: 4})
 	if err != nil || r.Snapshot.Slots[9].Count != 5 || r.Snapshot.Slots[10].Count != 4 || !r.Snapshot.Cursor.IsEmpty() {
 		t.Fatalf("odd split lost items or left cursor: %+v %v", r, err)
 	}
@@ -234,10 +236,10 @@ func TestSplitMergeCountsAndComponentIdentity(t *testing.T) {
 	s.slots[11].Components.Add = []ns.RawSlotComponent{{ID: items.ComponentMaxStackSize, Data: []byte{8}}}
 	s.publish()
 	before := s.clicks
-	if _, err := s.m.Execute(context.Background(), Operation{Kind: "move", From: 10, To: 11}); err == nil || s.clicks != before {
+	if _, err := s.m.Execute(t.Context(), Operation{Kind: OpMove, From: 10, To: 11}); err == nil || s.clicks != before {
 		t.Fatal("component-distinct move submitted a click")
 	}
-	r, err = s.m.Execute(context.Background(), Operation{Kind: "move", From: 10, To: 9})
+	r, err = s.m.Execute(t.Context(), Operation{Kind: OpMove, From: 10, To: 9})
 	if err != nil || r.Snapshot.Slots[9].Count != 9 || !r.Snapshot.Slots[10].IsEmpty() {
 		t.Fatalf("merge at custom stack limit failed: %v", err)
 	}
@@ -245,17 +247,17 @@ func TestSplitMergeCountsAndComponentIdentity(t *testing.T) {
 	s.slots[10].Count = 1
 	s.publish()
 	before = s.clicks
-	if _, err := s.m.Execute(context.Background(), Operation{Kind: "move", From: 10, To: 9}); err == nil || s.clicks != before {
+	if _, err := s.m.Execute(t.Context(), Operation{Kind: OpMove, From: 10, To: 9}); err == nil || s.clicks != before {
 		t.Fatal("over-limit merge submitted a click")
 	}
 }
 
 func TestSwapSameItemCountsAndDistinctComponents(t *testing.T) {
 	s := newStorageTestServer(t, 0)
-	stone := ns.VarInt(items.ItemID("minecraft:stone"))
+	stone := ns.VarInt(items.ID("minecraft:stone"))
 	s.slots[9], s.slots[10] = ns.NewSlot(stone, 9), ns.NewSlot(stone, 5)
 	s.publish()
-	r, err := s.m.Execute(context.Background(), Operation{Kind: "swap", From: 9, To: 10})
+	r, err := s.m.Execute(t.Context(), Operation{Kind: OpSwap, From: 9, To: 10})
 	if err != nil || r.Snapshot.Slots[9].Count != 5 || r.Snapshot.Slots[10].Count != 9 {
 		t.Fatalf("equal-identity swap merged instead: %v", err)
 	}
@@ -265,7 +267,7 @@ func TestSwapSameItemCountsAndDistinctComponents(t *testing.T) {
 	// Slot decoding canonicalizes nil component slices to empty slices.
 	before := s.m.Snapshot()
 	a, b := before.Slots[9], before.Slots[10]
-	r, err = s.m.Execute(context.Background(), Operation{Kind: "swap", From: 9, To: 10})
+	r, err = s.m.Execute(t.Context(), Operation{Kind: OpSwap, From: 9, To: 10})
 	if err != nil || !reflect.DeepEqual(r.Snapshot.Slots[9], b) || !reflect.DeepEqual(r.Snapshot.Slots[10], a) || !r.Snapshot.Cursor.IsEmpty() {
 		t.Fatalf("component-distinct swap lost identity: %v", err)
 	}
@@ -273,16 +275,16 @@ func TestSwapSameItemCountsAndDistinctComponents(t *testing.T) {
 
 func TestCanceledMovePreservesCursorAndAllowsExplicitRecovery(t *testing.T) {
 	s := newStorageTestServer(t, 0)
-	s.slots[9] = ns.NewSlot(ns.VarInt(items.ItemID("minecraft:stone")), 7)
+	s.slots[9] = ns.NewSlot(ns.VarInt(items.ID("minecraft:stone")), 7)
 	s.publish()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	s.afterClick = cancel
-	r, err := s.m.Execute(ctx, Operation{Kind: "move", From: 9, To: 10})
+	r, err := s.m.Execute(ctx, Operation{Kind: OpMove, From: 9, To: 10})
 	if !errors.Is(err, context.Canceled) || s.clicks != 1 || r.Snapshot.Cursor.Count != 7 || !r.Snapshot.Slots[10].IsEmpty() {
 		t.Fatalf("cancellation sent later click or lost cursor: %+v %v", r, err)
 	}
 	s.afterClick = nil
-	r, err = s.m.Execute(context.Background(), Operation{Kind: "move", From: -1, To: 9})
+	r, err = s.m.Execute(t.Context(), Operation{Kind: OpMove, From: -1, To: 9})
 	if err != nil || r.Snapshot.Slots[9].Count != 7 || !r.Snapshot.Cursor.IsEmpty() {
 		t.Fatalf("explicit cursor recovery failed: %v", err)
 	}
@@ -290,38 +292,38 @@ func TestCanceledMovePreservesCursorAndAllowsExplicitRecovery(t *testing.T) {
 
 func TestWindowReplacementAndStaleRevisionPreventClicks(t *testing.T) {
 	s := newStorageTestServer(t, 1)
-	s.slots[0] = ns.NewSlot(ns.VarInt(items.ItemID("minecraft:stone")), 2)
+	s.slots[0] = ns.NewSlot(ns.VarInt(items.ID("minecraft:stone")), 2)
 	s.publish()
 	old := s.m.Snapshot()
 	s.publish()
-	if _, err := s.m.Execute(context.Background(), Operation{Kind: "drop", WindowID: 1, Revision: old.Revision, From: 0}); err == nil || s.clicks != 0 {
+	if _, err := s.m.Execute(t.Context(), Operation{Kind: OpDrop, WindowID: 1, Revision: old.Revision, From: 0}); err == nil || s.clicks != 0 {
 		t.Fatal("stale revision submitted destructive click")
 	}
 	s.afterClick = func() {
 		// Reuse the numeric window ID: epoch, not just WindowID, must fence work.
-		applyInventoryPacket(t, s.m, &packets.S2COpenScreen{WindowId: 1, WindowType: ns.VarInt(MenuGeneric9x3)})
+		applyInventoryPacket(t, s.m, &packets.S2COpenScreen{WindowID: 1, WindowType: ns.VarInt(MenuGeneric9x3)})
 	}
-	r, err := s.m.Execute(context.Background(), Operation{Kind: "move", WindowID: 1, From: 0, To: 1})
-	if err == nil || s.clicks != 1 || r.Status == "confirmed" {
+	r, err := s.m.Execute(t.Context(), Operation{Kind: OpMove, WindowID: 1, From: 0, To: 1})
+	if err == nil || s.clicks != 1 || r.Status == StatusConfirmed {
 		t.Fatal("replaced view accepted stale transaction")
 	}
 }
 
 func TestSortOnlyStorageAndKeepComponentDistinctStacks(t *testing.T) {
 	s := newStorageTestServer(t, 0)
-	stone, dirt := ns.VarInt(items.ItemID("minecraft:stone")), ns.VarInt(items.ItemID("minecraft:dirt"))
+	stone, dirt := ns.VarInt(items.ID("minecraft:stone")), ns.VarInt(items.ID("minecraft:dirt"))
 	s.slots[0] = ns.NewSlot(dirt, 1)
-	s.slots[5] = ns.NewSlot(ns.VarInt(items.ItemID("minecraft:diamond_helmet")), 1)
+	s.slots[5] = ns.NewSlot(ns.VarInt(items.ID("minecraft:diamond_helmet")), 1)
 	s.slots[45] = ns.NewSlot(dirt, 2)
 	s.slots[9], s.slots[11], s.slots[44] = ns.NewSlot(stone, 40), ns.NewSlot(stone, 30), ns.NewSlot(dirt, 3)
 	s.slots[10] = ns.NewSlot(stone, 2)
 	s.slots[10].Components.Remove = []ns.VarInt{items.ComponentCustomName}
 	s.publish()
-	r, err := s.m.Execute(context.Background(), Operation{Kind: "sort"})
+	r, err := s.m.Execute(t.Context(), Operation{Kind: OpSort})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Snapshot.Slots[0].Count != 1 || r.Snapshot.Slots[5].ItemID != ns.VarInt(items.ItemID("minecraft:diamond_helmet")) || r.Snapshot.Slots[45].Count != 2 {
+	if r.Snapshot.Slots[0].Count != 1 || r.Snapshot.Slots[5].ItemID != ns.VarInt(items.ID("minecraft:diamond_helmet")) || r.Snapshot.Slots[45].Count != 2 {
 		t.Fatal("sort touched non-storage slots")
 	}
 	plain, patched, dirtCount, plainStacks := 0, 0, 0, 0
@@ -345,16 +347,16 @@ func TestSortOnlyStorageAndKeepComponentDistinctStacks(t *testing.T) {
 
 func TestServerRejectionNeverConfirmsDrop(t *testing.T) {
 	m := New()
-	slots := make([]ns.Slot, TotalSlots)
-	slots[9] = ns.NewSlot(ns.VarInt(items.ItemID("minecraft:stone")), 6)
+	contents := make([]ns.Slot, slots.PlayerInvSize)
+	contents[9] = ns.NewSlot(ns.VarInt(items.ID("minecraft:stone")), 6)
 	testInventorySession(t, m, func(_ context.Context, p jp.Packet) error {
 		decodeInventoryClick(t, p)
-		applyInventoryPacket(t, m, &packets.S2CContainerSetContent{WindowId: 0, StateId: 2, Slots: slots})
+		applyInventoryPacket(t, m, &packets.S2CContainerSetContent{WindowID: 0, StateID: 2, Slots: contents})
 		return nil
 	})
-	applyInventoryPacket(t, m, &packets.S2CContainerSetContent{WindowId: 0, StateId: 1, Slots: slots})
-	r, err := m.Execute(context.Background(), Operation{Kind: "drop", From: 9, Count: 3})
-	if err == nil || r.Status == "confirmed" || r.Clicks != 1 || r.Snapshot.Slots[9].Count != 6 {
+	applyInventoryPacket(t, m, &packets.S2CContainerSetContent{WindowID: 0, StateID: 1, Slots: contents})
+	r, err := m.Execute(t.Context(), Operation{Kind: OpDrop, From: 9, Count: 3})
+	if err == nil || r.Status == StatusConfirmed || r.Clicks != 1 || r.Snapshot.Slots[9].Count != 6 {
 		t.Fatalf("server rejection treated as success: %+v %v", r, err)
 	}
 }

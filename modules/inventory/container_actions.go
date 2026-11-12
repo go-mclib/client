@@ -2,7 +2,7 @@ package inventory
 
 import (
 	"context"
-	"fmt"
+	"errors"
 
 	"github.com/go-mclib/data/items"
 )
@@ -14,12 +14,12 @@ func (m *Module) ContainerOpen() bool {
 	return m.container != nil
 }
 
-// ContainerMenuType returns the menu type of the open container, or -1 if none.
+// ContainerMenuType returns the menu type of the open container, or MenuPlayer if none.
 func (m *Module) ContainerMenuType() MenuType {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.container == nil {
-		return -1
+		return MenuPlayer
 	}
 	return m.container.menuType
 }
@@ -36,7 +36,7 @@ func (m *Module) ContainerSlotCount() int {
 }
 
 // ContainerSlot returns the item at a container slot index (0-based, container slots only).
-func (m *Module) ContainerSlot(index int) *items.ItemStack {
+func (m *Module) ContainerSlot(index int) *items.Stack {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.container == nil || index < 0 || index >= len(m.container.slots) {
@@ -46,13 +46,13 @@ func (m *Module) ContainerSlot(index int) *items.ItemStack {
 }
 
 // ContainerSlots returns all container-specific slot items.
-func (m *Module) ContainerSlots() []*items.ItemStack {
+func (m *Module) ContainerSlots() []*items.Stack {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.container == nil {
 		return nil
 	}
-	result := make([]*items.ItemStack, len(m.container.slots))
+	result := make([]*items.Stack, len(m.container.slots))
 	for i, s := range m.container.slots {
 		result[i] = s.item
 	}
@@ -74,20 +74,11 @@ func (m *Module) ContainerRightClick(viewIndex int) error {
 }
 
 func (m *Module) containerPickup(viewIndex, button int) error {
-	snapshot := m.Snapshot()
-	tx, done, err := m.beginTransaction(context.Background(), Operation{WindowID: snapshot.WindowID, Revision: snapshot.Revision})
+	tx, done, err := m.beginCurrent(context.Background())
 	if err != nil {
 		return err
 	}
 	defer done()
-	if !tx.current.Ready {
-		if err := tx.click(-1, 0, 0, nil); err != nil {
-			return err
-		}
-	}
-	if !tx.current.Ready {
-		return fmt.Errorf("unsupported or incomplete menu")
-	}
 	return tx.pickup(viewIndex, button)
 }
 
@@ -98,20 +89,18 @@ func (m *Module) containerPickup(viewIndex, button int) error {
 func (m *Module) ContainerShiftClick(viewIndex int) error {
 	snapshot := m.Snapshot()
 	if snapshot.WindowID == 0 {
-		return fmt.Errorf("no container open")
+		return errors.New("no container open")
 	}
-	tx, done, err := m.beginTransaction(context.Background(), Operation{WindowID: snapshot.WindowID, Revision: snapshot.Revision})
+	tx, done, err := m.beginCurrent(context.Background())
 	if err != nil {
 		return err
 	}
 	defer done()
-	if !tx.current.Ready {
-		if err := tx.click(-1, 0, 0, nil); err != nil {
-			return err
-		}
+	if tx.current.WindowID != snapshot.WindowID {
+		return errInventoryChanged
 	}
 	if !tx.current.Cursor.IsEmpty() {
-		return fmt.Errorf("clear the cursor before shift-clicking")
+		return errors.New("clear the cursor before shift-clicking")
 	}
 	if _, _, err := storageRange(tx.current); err != nil {
 		return err
@@ -149,7 +138,7 @@ func (m *Module) ContainerShiftClick(viewIndex int) error {
 		}
 	}
 	if !tx.current.Slots[viewIndex].IsEmpty() {
-		return fmt.Errorf("destination full; source stack not fully transferred")
+		return errors.New("destination full; source stack not fully transferred")
 	}
 	return nil
 }
@@ -159,8 +148,8 @@ func (m *Module) ContainerShiftClick(viewIndex int) error {
 func (m *Module) CloseContainer() error {
 	snapshot := m.Snapshot()
 	if snapshot.WindowID == 0 {
-		return fmt.Errorf("no container open")
+		return errors.New("no container open")
 	}
-	_, err := m.Execute(context.Background(), Operation{Kind: "close", WindowID: snapshot.WindowID, Revision: snapshot.Revision})
+	_, err := m.Execute(context.Background(), Operation{Kind: OpClose, WindowID: snapshot.WindowID, Revision: snapshot.Revision})
 	return err
 }

@@ -9,11 +9,10 @@ import (
 	"github.com/go-mclib/client/modules/playerlist"
 	"github.com/go-mclib/client/modules/self"
 	"github.com/go-mclib/data/entities"
-	"github.com/go-mclib/data/entity_hitboxes"
-	"github.com/go-mclib/data/packet_ids"
+	"github.com/go-mclib/data/packetids"
 	"github.com/go-mclib/data/packets"
-	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	jp "github.com/go-mclib/protocol/javaproto"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 const ModuleName = "entities"
@@ -70,12 +69,9 @@ type Module struct {
 }
 
 func New() *Module {
-	return &Module{
-		entities:    make(map[int32]*Entity),
-		vehicles:    make(map[int32]int32),
-		teams:       make(map[string]int32),
-		memberTeams: make(map[string]string),
-	}
+	m := &Module{}
+	m.Reset()
+	return m
 }
 
 func (m *Module) Name() string { return ModuleName }
@@ -88,11 +84,17 @@ func (m *Module) Init(c *client.Client) {
 func (m *Module) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.clearInstancesLocked()
+	m.teams = make(map[string]int32)
+	m.memberTeams = make(map[string]string)
+}
+
+// clearInstancesLocked forgets every tracked entity and passenger link.
+// Scoreboard teams are kept: they survive dimension changes.
+func (m *Module) clearInstancesLocked() {
 	m.entities = make(map[int32]*Entity)
 	m.entityOrder = nil
 	m.vehicles = make(map[int32]int32)
-	m.teams = make(map[string]int32)
-	m.memberTeams = make(map[string]string)
 }
 
 func (m *Module) Wire() error {
@@ -102,13 +104,7 @@ func (m *Module) Wire() error {
 	return nil
 }
 
-func From(c *client.Client) *Module {
-	mod := c.Module(ModuleName)
-	if mod == nil {
-		return nil
-	}
-	return mod.(*Module)
-}
+func From(c *client.Client) *Module { return client.ModuleAs[*Module](c, ModuleName) }
 
 func (m *Module) OnEntitySpawn(cb func(e *Entity)) { m.onEntitySpawn = append(m.onEntitySpawn, cb) }
 func (m *Module) OnEntityRemove(cb func(entityID int32)) {
@@ -139,64 +135,62 @@ func (m *Module) HandlePacket(pkt *jp.WirePacket) {
 		return
 	}
 	switch pkt.PacketID {
-	case packet_ids.S2CRespawnID:
+	case packetids.S2CRespawnID:
 		// Scoreboard teams survive dimension changes, unlike entity instances.
 		m.mu.Lock()
-		m.entities = make(map[int32]*Entity)
-		m.entityOrder = nil
-		m.vehicles = make(map[int32]int32)
+		m.clearInstancesLocked()
 		m.mu.Unlock()
-	case packet_ids.S2CSetPassengersID:
+	case packetids.S2CSetPassengersID:
 		m.handleSetPassengers(pkt)
-	case packet_ids.S2CSetPlayerTeamID:
+	case packetids.S2CSetPlayerTeamID:
 		m.handleSetPlayerTeam(pkt)
-	case packet_ids.S2CUpdateAttributesID:
+	case packetids.S2CUpdateAttributesID:
 		m.handleUpdateAttributes(pkt)
-	case packet_ids.S2CEntityEventID:
+	case packetids.S2CEntityEventID:
 		m.handleEntityEvent(pkt)
-	case packet_ids.S2CSetEquipmentID:
+	case packetids.S2CSetEquipmentID:
 		m.handleSetEquipment(pkt)
-	case packet_ids.S2CAddEntityID:
+	case packetids.S2CAddEntityID:
 		m.handleAddEntity(pkt)
-	case packet_ids.S2CRemoveEntitiesID:
+	case packetids.S2CRemoveEntitiesID:
 		m.handleRemoveEntities(pkt)
-	case packet_ids.S2CForgetLevelChunkID:
+	case packetids.S2CForgetLevelChunkID:
 		m.handleForgetLevelChunk(pkt)
-	case packet_ids.S2CMoveEntityPosID:
+	case packetids.S2CMoveEntityPosID:
 		m.handleMoveEntityPos(pkt)
-	case packet_ids.S2CMoveEntityPosRotID:
+	case packetids.S2CMoveEntityPosRotID:
 		m.handleMoveEntityPosRot(pkt)
-	case packet_ids.S2CMoveEntityRotID:
+	case packetids.S2CMoveEntityRotID:
 		m.handleMoveEntityRot(pkt)
-	case packet_ids.S2CSetEntityMotionID:
+	case packetids.S2CSetEntityMotionID:
 		m.handleSetEntityMotion(pkt)
-	case packet_ids.S2CEntityPositionSyncID:
+	case packetids.S2CEntityPositionSyncID:
 		m.handleEntityPositionSync(pkt)
-	case packet_ids.S2CSetEntityDataID:
+	case packetids.S2CSetEntityDataID:
 		m.handleSetEntityData(pkt)
-	case packet_ids.S2CDamageEventID:
+	case packetids.S2CDamageEventID:
 		m.handleDamageEvent(pkt)
-	case packet_ids.S2CAnimateID:
+	case packetids.S2CAnimateID:
 		m.handleAnimate(pkt)
-	case packet_ids.S2CSwingAnimationID:
+	case packetids.S2CSwingAnimationID:
 		m.handleSwingAnimation(pkt)
-	case packet_ids.S2CHurtAnimationID:
+	case packetids.S2CHurtAnimationID:
 		m.handleHurtAnimation(pkt)
 	}
 }
 
 func (m *Module) handleAddEntity(pkt *jp.WirePacket) {
 	var d packets.S2CAddEntity
-	if err := pkt.ReadInto(&d); err != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 
-	typeName := entities.EntityTypeName(int32(d.Type))
-	width, height, eyeHeight := entity_hitboxes.Dimensions(typeName)
+	typeName := entities.TypeName(int32(d.Type))
+	width, height, eyeHeight := entities.Dimensions(typeName)
 
 	e := &Entity{
-		ID:        int32(d.EntityId),
-		UUID:      [16]byte(d.EntityUuid),
+		ID:        int32(d.EntityID),
+		UUID:      [16]byte(d.EntityUUID),
 		TypeID:    int32(d.Type),
 		TypeName:  typeName,
 		X:         float64(d.X),
@@ -214,7 +208,7 @@ func (m *Module) handleAddEntity(pkt *jp.WirePacket) {
 		SpawnData: int32(d.Data),
 	}
 	e.physicsX, e.physicsY, e.physicsZ = e.X, e.Y, e.Z
-	e.scoreName = entityUUIDName(e.UUID)
+	e.scoreName = ns.UUID(e.UUID).String()
 
 	m.mu.Lock()
 	m.trackEntityLocked(e)
@@ -226,39 +220,27 @@ func (m *Module) handleAddEntity(pkt *jp.WirePacket) {
 }
 
 func (m *Module) handleRemoveEntities(pkt *jp.WirePacket) {
-	// parse manually: S2CRemoveEntities is a VarInt array (count + elements),
-	// but the packet struct treats it as ByteArray which misreads the format
-	buf := ns.NewReader(pkt.Data)
-	count, err := buf.ReadVarInt()
-	if err != nil {
+	var d packets.S2CRemoveEntities
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 
-	ids := make([]int32, 0, int(count))
-	for range int(count) {
-		id, err := buf.ReadVarInt()
-		if err != nil {
-			break
-		}
-		ids = append(ids, int32(id))
-	}
-
 	m.mu.Lock()
-	for _, id := range ids {
-		m.removeTrackedEntityLocked(id)
+	for _, id := range d.EntityIds {
+		m.removeTrackedEntityLocked(int32(id))
 	}
 	m.mu.Unlock()
 
-	for _, id := range ids {
+	for _, id := range d.EntityIds {
 		for _, cb := range m.onEntityRemove {
-			cb(id)
+			cb(int32(id))
 		}
 	}
 }
 
 func (m *Module) handleForgetLevelChunk(pkt *jp.WirePacket) {
 	var d packets.S2CForgetLevelChunk
-	if err := pkt.ReadInto(&d); err != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 
@@ -285,12 +267,12 @@ func (m *Module) handleForgetLevelChunk(pkt *jp.WirePacket) {
 
 func (m *Module) handleMoveEntityPos(pkt *jp.WirePacket) {
 	var d packets.S2CMoveEntityPos
-	if err := pkt.ReadInto(&d); err != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 
 	m.mu.Lock()
-	e := m.entities[int32(d.EntityId)]
+	e := m.entities[int32(d.EntityID)]
 	if e != nil {
 		e.moveDelta(d.Delta, e.Yaw, e.Pitch)
 		e.OnGround = bool(d.OnGround)
@@ -309,12 +291,12 @@ func (m *Module) handleMoveEntityPos(pkt *jp.WirePacket) {
 
 func (m *Module) handleMoveEntityPosRot(pkt *jp.WirePacket) {
 	var d packets.S2CMoveEntityPosRot
-	if err := pkt.ReadInto(&d); err != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 
 	m.mu.Lock()
-	e := m.entities[int32(d.EntityId)]
+	e := m.entities[int32(d.EntityID)]
 	if e != nil {
 		e.moveDelta(d.Delta, float32(d.Yaw.Degrees()), float32(d.Pitch.Degrees()))
 		e.OnGround = bool(d.OnGround)
@@ -333,12 +315,12 @@ func (m *Module) handleMoveEntityPosRot(pkt *jp.WirePacket) {
 
 func (m *Module) handleMoveEntityRot(pkt *jp.WirePacket) {
 	var d packets.S2CMoveEntityRot
-	if err := pkt.ReadInto(&d); err != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 
 	m.mu.Lock()
-	e := m.entities[int32(d.EntityId)]
+	e := m.entities[int32(d.EntityID)]
 	if e != nil {
 		e.moveTo(e.X, e.Y, e.Z, float32(d.Yaw.Degrees()), float32(d.Pitch.Degrees()), false)
 		e.OnGround = bool(d.OnGround)
@@ -348,12 +330,12 @@ func (m *Module) handleMoveEntityRot(pkt *jp.WirePacket) {
 
 func (m *Module) handleSetEntityMotion(pkt *jp.WirePacket) {
 	var d packets.S2CSetEntityMotion
-	if err := pkt.ReadInto(&d); err != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 
 	m.mu.Lock()
-	e := m.entities[int32(d.EntityId)]
+	e := m.entities[int32(d.EntityID)]
 	if e != nil {
 		e.VelX = d.Velocity.X
 		e.VelY = d.Velocity.Y
@@ -373,12 +355,12 @@ func (m *Module) handleSetEntityMotion(pkt *jp.WirePacket) {
 
 func (m *Module) handleEntityPositionSync(pkt *jp.WirePacket) {
 	var d packets.S2CEntityPositionSync
-	if err := pkt.ReadInto(&d); err != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 
 	m.mu.Lock()
-	e := m.entities[int32(d.EntityId)]
+	e := m.entities[int32(d.EntityID)]
 	if e != nil {
 		e.movePath(d.Path, float32(d.Yaw), float32(d.Pitch), true)
 		e.OnGround = bool(d.OnGround)
@@ -397,12 +379,12 @@ func (m *Module) handleEntityPositionSync(pkt *jp.WirePacket) {
 
 func (m *Module) handleSetEntityData(pkt *jp.WirePacket) {
 	var d packets.S2CSetEntityData
-	if err := pkt.ReadInto(&d); err != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 
 	m.mu.Lock()
-	e := m.entities[int32(d.EntityId)]
+	e := m.entities[int32(d.EntityID)]
 	if e != nil {
 		// merge entries instead of replacing — S2CSetEntityData only sends
 		// dirty entries, so replacing would lose previously set values
@@ -415,44 +397,44 @@ func (m *Module) handleSetEntityData(pkt *jp.WirePacket) {
 
 func (m *Module) handleDamageEvent(pkt *jp.WirePacket) {
 	var d packets.S2CDamageEvent
-	if err := pkt.ReadInto(&d); err != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 
 	for _, cb := range m.onEntityDamage {
-		cb(int32(d.EntityId), int32(d.SourceTypeId), int32(d.SourceCauseId), int32(d.SourceDirectId))
+		cb(int32(d.EntityID), int32(d.SourceTypeID), int32(d.SourceCauseID), int32(d.SourceDirectID))
 	}
 }
 
 func (m *Module) handleAnimate(pkt *jp.WirePacket) {
 	var d packets.S2CAnimate
-	if err := pkt.ReadInto(&d); err != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 
 	for _, cb := range m.onEntityAnimation {
-		cb(int32(d.EntityId), uint8(d.Animation))
+		cb(int32(d.EntityID), uint8(d.Animation))
 	}
 }
 
 func (m *Module) handleSwingAnimation(pkt *jp.WirePacket) {
 	var d packets.S2CSwingAnimation
-	if pkt.ReadInto(&d) != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 	for _, cb := range m.onSwingAnimation {
-		cb(int32(d.EntityId), int32(d.Hand), int32(d.Type), int32(d.Duration))
+		cb(int32(d.EntityID), int32(d.Hand), int32(d.Type), int32(d.Duration))
 	}
 }
 
 func (m *Module) handleHurtAnimation(pkt *jp.WirePacket) {
 	var d packets.S2CHurtAnimation
-	if err := pkt.ReadInto(&d); err != nil {
+	if !m.client.Decode(pkt, &d) {
 		return
 	}
 
 	for _, cb := range m.onHurtAnimation {
-		cb(int32(d.EntityId), float32(d.Yaw))
+		cb(int32(d.EntityID), float32(d.Yaw))
 	}
 }
 

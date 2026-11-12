@@ -10,8 +10,8 @@ import (
 	dataentities "github.com/go-mclib/data/entities"
 	"github.com/go-mclib/data/packets"
 	"github.com/go-mclib/data/registries"
-	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	jp "github.com/go-mclib/protocol/javaproto"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 func TestPhysicsPositionInterpolatesRetargetsAndSnaps(t *testing.T) {
@@ -63,7 +63,7 @@ func TestSteppedMovementPreservesCollisionRouteAndVelocity(t *testing.T) {
 	e := &Entity{ID: 1, TypeName: "minecraft:zombie", Width: 0.6, Height: 1.8, VelX: 0.5, VelY: -0.25, VelZ: 0.75}
 	m.trackEntityLocked(e)
 	m.handleMoveEntityPos(equipmentPacket(t, &packets.S2CMoveEntityPos{
-		EntityId: 1, Delta: packets.VecDelta{Steps: []packets.VecDeltaStep{
+		EntityID: 1, Delta: packets.VecDelta{Steps: []packets.VecDeltaStep{
 			{Ticks: 2, X: 8192},
 			{Ticks: 1, Z: 12288},
 		}},
@@ -79,7 +79,7 @@ func TestSteppedMovementPreservesCollisionRouteAndVelocity(t *testing.T) {
 		}
 	}
 	m.handleEntityPositionSync(equipmentPacket(t, &packets.S2CEntityPositionSync{
-		EntityId: 1, Path: packets.PositionPath{Steps: []packets.PositionStep{
+		EntityID: 1, Path: packets.PositionPath{Steps: []packets.PositionStep{
 			{X: 4, Z: 3, TickOffset: 2}, {X: 4, Z: 6, TickOffset: 1},
 		}},
 	}))
@@ -89,7 +89,7 @@ func TestSteppedMovementPreservesCollisionRouteAndVelocity(t *testing.T) {
 		t.Fatalf("absolute path collapsed into its endpoint: %+v", got)
 	}
 	m.handleEntityPositionSync(equipmentPacket(t, &packets.S2CEntityPositionSync{
-		EntityId: 1, Path: packets.PositionPath{X: 100},
+		EntityID: 1, Path: packets.PositionPath{X: 100},
 	}))
 	if target := m.GetEntity(1); target.VelX != 0.5 || target.VelY != -0.25 || target.VelZ != 0.75 {
 		t.Fatalf("position-only sync changed velocity: %+v", target)
@@ -118,18 +118,18 @@ func TestLivingMovementQueuesTargetsAndUsesEntityInterval(t *testing.T) {
 
 func TestSwingAnimationDispatchIsSeparateFromCriticalAnimation(t *testing.T) {
 	c := client.New("unused", "test", false)
-	c.SetState(jp.StatePlay)
+	client.NewSimulator(c).SetState(jp.StatePlay)
 	m := New()
 	c.Register(m)
 	var swing [4]int32
 	var animate uint8 = 255
 	m.OnSwingAnimation(func(entityID, hand, kind, duration int32) { swing = [4]int32{entityID, hand, kind, duration} })
 	m.OnEntityAnimation(func(_ int32, kind uint8) { animate = kind })
-	m.HandlePacket(equipmentPacket(t, &packets.S2CSwingAnimation{EntityId: 7, Hand: 1, Type: 2, Duration: 0}))
+	m.HandlePacket(equipmentPacket(t, &packets.S2CSwingAnimation{EntityID: 7, Hand: 1, Type: 2, Duration: 0}))
 	if swing != [4]int32{7, 1, 2, 0} || animate != 255 {
 		t.Fatalf("swing hand/type/zero duration lost or treated as Animate: %v %d", swing, animate)
 	}
-	m.HandlePacket(equipmentPacket(t, &packets.S2CAnimate{EntityId: 7, Animation: 1}))
+	m.HandlePacket(equipmentPacket(t, &packets.S2CAnimate{EntityID: 7, Animation: 1}))
 	if animate != 1 || swing != [4]int32{7, 1, 2, 0} {
 		t.Fatal("critical animation overwrote swing event")
 	}
@@ -170,12 +170,12 @@ func TestPushTeamsAndNestedPassengers(t *testing.T) {
 	if !m.CanPushLocal(e) {
 		t.Fatal("removed team continued suppressing pushes")
 	}
-	m.handleSetPassengers(equipmentPacket(t, &packets.S2CSetPassengers{EntityId: 7, Passengers: []ns.VarInt{ns.VarInt(m.self.EntityID()), 8}}))
-	m.handleSetPassengers(equipmentPacket(t, &packets.S2CSetPassengers{EntityId: 8, Passengers: []ns.VarInt{42}}))
+	m.handleSetPassengers(equipmentPacket(t, &packets.S2CSetPassengers{EntityID: 7, Passengers: []ns.VarInt{ns.VarInt(m.self.EntityID()), 8}}))
+	m.handleSetPassengers(equipmentPacket(t, &packets.S2CSetPassengers{EntityID: 8, Passengers: []ns.VarInt{42}}))
 	if m.CanPushLocal(e) {
 		t.Fatal("indirect passengers of the same vehicle push each other")
 	}
-	m.handleSetPassengers(equipmentPacket(t, &packets.S2CSetPassengers{EntityId: 8}))
+	m.handleSetPassengers(equipmentPacket(t, &packets.S2CSetPassengers{EntityID: 8}))
 	if !m.CanPushLocal(e) {
 		t.Fatal("dismount did not restore pushing")
 	}
@@ -236,7 +236,7 @@ func TestRemoteScaleAttributesChangeContactGeometry(t *testing.T) {
 		t.Fatal("unscaled player intersects distant query")
 	}
 	m.handleUpdateAttributes(equipmentPacket(t, &packets.S2CUpdateAttributes{
-		EntityId: 42,
+		EntityID: 42,
 		Attributes: []packets.AttributeSnapshot{{
 			Type: ns.VarInt(registries.Attribute.Get("minecraft:scale")),
 			Base: 1,
@@ -287,5 +287,22 @@ func TestHappyGhastStillStateAndBabyCollision(t *testing.T) {
 	}
 	if box := e.BoundingBox(); box.MaxY != float64(float32(4)*float32(0.2375)) {
 		t.Fatalf("baby happy ghast push dimensions = %v", box)
+	}
+}
+
+func TestPositionBacklogIsBoundedWithoutPhysicsTicks(t *testing.T) {
+	e := &Entity{TypeName: "minecraft:zombie"}
+	for i := range 10 * maxPositionSteps {
+		e.moveTo(float64(i+1), 64, 0, 0, 0, false)
+		if len(e.positionSteps) > maxPositionSteps {
+			t.Fatalf("backlog grew to %d steps", len(e.positionSteps))
+		}
+	}
+	e = &Entity{TypeName: "minecraft:zombie"}
+	for i := range maxPositionSteps + 1 {
+		e.moveTo(float64(i+1), 64, 0, 0, 0, false)
+	}
+	if e.physicsX != e.X || len(e.positionSteps) != 0 {
+		t.Fatalf("overflow did not snap to the target: physics=%v target=%v steps=%d", e.physicsX, e.X, len(e.positionSteps))
 	}
 }

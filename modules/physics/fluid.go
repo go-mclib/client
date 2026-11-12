@@ -5,7 +5,6 @@ import (
 
 	"github.com/go-mclib/client/modules/collisions"
 	"github.com/go-mclib/client/modules/self"
-	"github.com/go-mclib/data/block_shapes"
 	"github.com/go-mclib/data/blocks"
 	"github.com/go-mclib/data/registries"
 )
@@ -20,8 +19,8 @@ const (
 
 var (
 	effectDolphinsGrace    = registries.MobEffect.Get("minecraft:dolphins_grace")
-	fluidIceBlockID        = blocks.BlockID("minecraft:ice")
-	fluidFrostedIceBlockID = blocks.BlockID("minecraft:frosted_ice")
+	fluidIceBlockID        = blocks.ID("minecraft:ice")
+	fluidFrostedIceBlockID = blocks.ID("minecraft:frosted_ice")
 )
 
 // The pose eye height and dimension fast-lava flag are supplied by the tick
@@ -74,7 +73,7 @@ func scanFluids(w fluidBlockReader, x, y, z, width, height, eyeHeight float64) (
 	for bx := int(math.Floor(minX)); bx < int(math.Ceil(maxX)); bx++ {
 		for by := int(math.Floor(minY)); by < int(math.Ceil(maxY)); by++ {
 			for bz := int(math.Floor(minZ)); bz < int(math.Ceil(maxZ)); bz++ {
-				kind, _, _ := block_shapes.FluidState(w.GetBlock(bx, by, bz))
+				kind, _, _ := blocks.FluidState(w.GetBlock(bx, by, bz))
 				if kind == 0 {
 					continue
 				}
@@ -122,7 +121,7 @@ func (m *Module) updateFluidState(x, y, z, height float64) {
 	m.fluid.waterHeight, m.fluid.lavaHeight = water.height, lava.height
 	m.fluid.eyeInWater = water.eyesInside
 	// Player.isPushedByFluid excludes creative flight, but still tracks immersion.
-	if m.self.AbilityFlags()&0x02 != 0 {
+	if m.self.IsFlying() {
 		return
 	}
 	fx, fy, fz := water.impulse(m.velX, m.velZ, waterFlowScale)
@@ -136,11 +135,11 @@ func (m *Module) updateFluidState(x, y, z, height float64) {
 }
 
 func fluidHeightAt(w fluidBlockReader, x, y, z int) float64 {
-	kind, amount, _ := block_shapes.FluidState(w.GetBlock(x, y, z))
+	kind, amount, _ := blocks.FluidState(w.GetBlock(x, y, z))
 	if kind == 0 {
 		return 0
 	}
-	above, _, _ := block_shapes.FluidState(w.GetBlock(x, y+1, z))
+	above, _, _ := blocks.FluidState(w.GetBlock(x, y+1, z))
 	if above == kind {
 		return 1
 	}
@@ -152,20 +151,20 @@ func fluidHeightAt(w fluidBlockReader, x, y, z int) float64 {
 var fluidDirections = [...]struct{ x, z, face int }{{0, -1, 2}, {1, 0, 5}, {0, 1, 3}, {-1, 0, 4}}
 
 func getFluidFlow(w fluidBlockReader, kind uint8, bx, by, bz int) (flowX, flowY, flowZ float64) {
-	_, amount, falling := block_shapes.FluidState(w.GetBlock(bx, by, bz))
+	_, amount, falling := blocks.FluidState(w.GetBlock(bx, by, bz))
 	ownHeight := float32(amount) / float32(9)
 	for _, dir := range fluidDirections {
 		nx, nz := bx+dir.x, bz+dir.z
 		state := w.GetBlock(nx, by, nz)
-		neighborKind, neighborAmount, _ := block_shapes.FluidState(state)
+		neighborKind, neighborAmount, _ := blocks.FluidState(state)
 		if neighborKind != 0 && neighborKind != kind {
 			continue
 		}
 		neighborHeight := float32(neighborAmount) / float32(9)
 		var distance float32
 		if neighborHeight == 0 {
-			if !block_shapes.BlocksFluidFlow(state) {
-				belowKind, belowAmount, _ := block_shapes.FluidState(w.GetBlock(nx, by-1, nz))
+			if !blocks.BlocksFluidFlow(state) {
+				belowKind, belowAmount, _ := blocks.FluidState(w.GetBlock(nx, by-1, nz))
 				if belowKind == kind && belowAmount > 0 {
 					neighborHeight = float32(belowAmount) / float32(9)
 					distance = ownHeight - (neighborHeight - float32(0.8888889))
@@ -190,9 +189,9 @@ func getFluidFlow(w fluidBlockReader, kind uint8, bx, by, bz int) (flowX, flowY,
 }
 
 func fluidSolidFace(state int32, kind uint8, face int) bool {
-	neighborKind, _, _ := block_shapes.FluidState(state)
+	neighborKind, _, _ := blocks.FluidState(state)
 	blockID := blocks.StateBlockID(state)
-	return neighborKind != kind && blockID != fluidIceBlockID && blockID != fluidFrostedIceBlockID && block_shapes.IsFaceSturdy(state, face)
+	return neighborKind != kind && blockID != fluidIceBlockID && blockID != fluidFrostedIceBlockID && blocks.IsFaceSturdy(state, face)
 }
 
 func normalizeFluidVector(x, y, z float64) (float64, float64, float64) {
@@ -224,7 +223,7 @@ func waterTravelCoefficients(sprinting, onGround, dolphinsGrace bool, efficiency
 func (m *Module) applyWaterInputScaled(s *self.Module, yaw, forward, strafe float64) {
 	m.fluid.falling = m.velY <= 0
 	m.fluid.gravity = m.getEffectiveGravity(s)
-	drag, acceleration := waterTravelCoefficients(s.Sprinting(), m.onGround, s.HasEffect(effectDolphinsGrace), float32(s.AttributeValue("minecraft:water_movement_efficiency", 0)), float32(m.getEffectiveSpeed(s)))
+	drag, acceleration := waterTravelCoefficients(s.Sprinting(), m.onGround, s.HasEffect(effectDolphinsGrace), float32(s.AttributeValue("minecraft:water_movement_efficiency", 0)), float32(s.MovementSpeed(s.Sprinting())))
 	m.fluid.waterDrag = drag
 	dx, _, dz := MoveRelative(float64(acceleration), forward, strafe, yaw)
 	m.velX, m.velZ = m.velX+dx, m.velZ+dz
@@ -293,7 +292,7 @@ func containsFluid(w fluidBlockReader, box collisions.AABB) bool {
 	for x := int(math.Floor(box.MinX)); x < int(math.Ceil(box.MaxX)); x++ {
 		for y := int(math.Floor(box.MinY)); y < int(math.Ceil(box.MaxY)); y++ {
 			for z := int(math.Floor(box.MinZ)); z < int(math.Ceil(box.MaxZ)); z++ {
-				kind, _, _ := block_shapes.FluidState(w.GetBlock(x, y, z))
+				kind, _, _ := blocks.FluidState(w.GetBlock(x, y, z))
 				if kind != 0 {
 					return true
 				}

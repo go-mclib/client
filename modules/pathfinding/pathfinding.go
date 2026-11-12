@@ -2,8 +2,10 @@ package pathfinding
 
 import (
 	"context"
-	"fmt"
+	"errors"
+	"maps"
 	"math"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,8 +17,8 @@ import (
 	"github.com/go-mclib/client/modules/self"
 	"github.com/go-mclib/client/modules/world"
 	"github.com/go-mclib/data/packets"
-	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	jp "github.com/go-mclib/protocol/javaproto"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 const ModuleName = "pathfinding"
@@ -40,7 +42,7 @@ type Module struct {
 	planCancel                    context.CancelFunc
 	planID                        uint64
 	planning                      bool
-	path                          []PathNode
+	path                          []Waypoint
 	pathIndex                     int
 	goalX, goalY, goalZ           float64
 	segmentFinal                  bool
@@ -60,7 +62,7 @@ type Module struct {
 	plannedRevision               uint64
 	terrainRevision               atomic.Uint64
 	corrected                     atomic.Bool
-	onPathFound                   []func(path []PathNode)
+	onPathFound                   []func(path []Waypoint)
 	onNavigationComplete          []func(reached bool)
 }
 
@@ -75,7 +77,7 @@ func (m *Module) Wire() error {
 	m.self, m.world = self.From(m.client), world.From(m.client)
 	m.collisions, m.physics = collisions.From(m.client), physics.From(m.client)
 	if m.self == nil || m.world == nil || m.collisions == nil || m.physics == nil {
-		return fmt.Errorf("requires self, world, collisions and physics modules")
+		return errors.New("requires self, world, collisions and physics modules")
 	}
 	m.entities = entities.From(m.client)
 	m.physics.OnTick(m.navigationTick)
@@ -89,14 +91,9 @@ func (m *Module) Wire() error {
 	m.world.OnBlockUpdate(func(int, int, int, int32) { m.terrainRevision.Add(1) })
 	return nil
 }
-func (m *Module) Reset() { m.Stop() }
-func From(c *client.Client) *Module {
-	if mod := c.Module(ModuleName); mod != nil {
-		return mod.(*Module)
-	}
-	return nil
-}
-func (m *Module) OnPathFound(cb func(path []PathNode)) { m.onPathFound = append(m.onPathFound, cb) }
+func (m *Module) Reset()                               { m.Stop() }
+func From(c *client.Client) *Module                    { return client.ModuleAs[*Module](c, ModuleName) }
+func (m *Module) OnPathFound(cb func(path []Waypoint)) { m.onPathFound = append(m.onPathFound, cb) }
 func (m *Module) OnNavigationComplete(cb func(reached bool)) {
 	m.onNavigationComplete = append(m.onNavigationComplete, cb)
 }
@@ -109,15 +106,15 @@ func validGoal(x, y, z float64) bool {
 
 // FindPath returns a complete route in currently loaded terrain; unlike
 // NavigateTo it does not stream successive segments or return a partial route.
-func (m *Module) FindPath(x, y, z float64) ([]PathNode, error) {
+func (m *Module) FindPath(x, y, z float64) ([]Waypoint, error) {
 	return m.FindPathContext(context.Background(), x, y, z)
 }
-func (m *Module) FindPathContext(ctx context.Context, x, y, z float64) ([]PathNode, error) {
+func (m *Module) FindPathContext(ctx context.Context, x, y, z float64) ([]Waypoint, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if !validGoal(x, y, z) {
-		return nil, fmt.Errorf("pathfinding: invalid goal")
+		return nil, errInvalidGoal
 	}
 	cfg := m.simulationConfig()
 	gx, gy, gz := int(math.Floor(x)), int(math.Floor(y)), int(math.Floor(z))
@@ -125,14 +122,14 @@ func (m *Module) FindPathContext(ctx context.Context, x, y, z float64) ([]PathNo
 		return nil, err
 	}
 	sx, sy, sz := m.self.Position()
-	path, err := findPath(ctx, m.world, m.collisions, m.entities,
-		int(math.Floor(sx)), int(math.Floor(sy)), int(math.Floor(sz)), gx, gy, gz, m.nodeLimit(), cfg)
+	path, err := newSearch(ctx, m.world, m.collisions, m.entities, gx, gy, gz, cfg).
+		run(int(math.Floor(sx)), int(math.Floor(sy)), int(math.Floor(sz)), m.nodeLimit(), false)
 	if err != nil {
 		return nil, err
 	}
 	for _, n := range path {
 		if !nodeLoaded(m.world, n.X, n.Y, n.Z, cfg) {
-			return nil, fmt.Errorf("pathfinding: route terrain unloaded")
+			return nil, errRouteUnloaded
 		}
 	}
 	for _, cb := range m.onPathFound {
@@ -149,13 +146,13 @@ func (m *Module) nodeLimit() int {
 func (m *Module) validateGoal(x, y, z float64, cfg simulationConfig) error {
 	gx, gy, gz := int(math.Floor(x)), int(math.Floor(y)), int(math.Floor(z))
 	if !nodeLoaded(m.world, gx, gy, gz, cfg) {
-		return fmt.Errorf("pathfinding: goal terrain is unloaded")
+		return errGoalUnloaded
 	}
 	fy, ok := standSurface(m.collisions, gx, gy, gz, cfg.sneakingHeight, cfg)
 	if !ok || !terrainLoaded(m.world, x, fy, z, cfg.height, cfg) ||
 		!m.collisions.CanFitAt(x, fy, z, cfg.width, cfg.sneakingHeight) ||
 		!m.collisions.IsOnGround(x, fy, z, cfg.width) {
-		return fmt.Errorf("pathfinding: goal has no support or headroom")
+		return errGoalBlocked
 	}
 	return nil
 }
@@ -172,7 +169,7 @@ func (m *Module) NavigateToContext(parent context.Context, x, y, z float64) erro
 		return err
 	}
 	if !validGoal(x, y, z) {
-		return fmt.Errorf("pathfinding: invalid goal")
+		return errInvalidGoal
 	}
 	cfg := m.simulationConfig()
 	if nodeLoaded(m.world, int(math.Floor(x)), int(math.Floor(y)), int(math.Floor(z)), cfg) {
@@ -196,14 +193,13 @@ func (m *Module) NavigateToContext(parent context.Context, x, y, z float64) erro
 	m.corrected.Store(false)
 	m.requestPlan()
 	m.mu.Unlock()
-	go func() {
-		<-ctx.Done()
+	context.AfterFunc(ctx, func() {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		if m.navigating && m.generation == generation {
 			m.completeNavigation(false)
 		}
-	}()
+	})
 	return nil
 }
 
@@ -250,20 +246,13 @@ func (m *Module) requestPlan() {
 	sx, sy, sz := m.self.Position()
 	gx, gy, gz := m.goalX, m.goalY, m.goalZ
 	cfg := m.simulationConfig()
-	cfg.blockedEdges = make(map[[6]int]struct{}, len(m.blockedEdges))
-	for k := range m.blockedEdges {
-		cfg.blockedEdges[k] = struct{}{}
-	}
-	cfg.frontiers = make(map[[3]int]int, len(m.frontiers))
-	for k, v := range m.frontiers {
-		cfg.frontiers[k] = v
-	}
+	cfg.blockedEdges, cfg.frontiers = maps.Clone(m.blockedEdges), maps.Clone(m.frontiers)
 	limit, revision := m.nodeLimit(), m.terrainRevision.Load()
 	go func() {
 		defer cancel()
-		path, err := searchPath(ctx, m.world, m.collisions, m.entities,
-			int(math.Floor(sx)), int(math.Floor(sy)), int(math.Floor(sz)),
-			int(math.Floor(gx)), int(math.Floor(gy)), int(math.Floor(gz)), limit, cfg, true)
+		path, err := newSearch(ctx, m.world, m.collisions, m.entities,
+			int(math.Floor(gx)), int(math.Floor(gy)), int(math.Floor(gz)), cfg).
+			run(int(math.Floor(sx)), int(math.Floor(sy)), int(math.Floor(sz)), limit, true)
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		if !m.navigating || generation != m.generation || id != m.planID || ctx.Err() != nil {
@@ -284,9 +273,9 @@ func (m *Module) requestPlan() {
 		m.path, m.pathIndex = path, 0
 		m.resetWaypoint()
 		// Notifications are not made by the physics loop, and may call Stop.
-		callbacks := append([]func([]PathNode){}, m.onPathFound...)
+		callbacks := slices.Clone(m.onPathFound)
 		if len(callbacks) > 0 {
-			notice := append([]PathNode(nil), path...)
+			notice := slices.Clone(path)
 			m.mu.Unlock()
 			for _, cb := range callbacks {
 				cb(notice)
@@ -306,14 +295,8 @@ func (m *Module) navigationTick() {
 		m.completeNavigation(false)
 		return
 	}
-	if m.corrected.Swap(false) {
-		// A server teleport invalidates the planner's start and in-flight jump.
-		m.invalidatePlan()
-		m.failures++
-		if m.failures > 8 {
-			m.completeNavigation(false)
-			return
-		}
+	if m.handleCorrection() {
+		return
 	}
 	x, y, z := m.self.Position()
 	cfg := m.simulationConfig()
@@ -338,10 +321,52 @@ func (m *Module) navigationTick() {
 
 	vx, _, vz := m.physics.Velocity()
 	onGround := m.physics.IsOnGround() || m.collisions.IsOnGround(x, y, z, cfg.width)
+	if !m.advanceReachedWaypoints(x, y, z, vx, vz, onGround, cfg) {
+		return
+	}
+	wp := m.path[m.pathIndex]
+	tx, ty, tz := m.waypointTarget(wp, m.pathIndex == len(m.path)-1, cfg)
+	if !wp.Jump && !wp.InteractDoor && math.Abs(ty-y) < 0.08 &&
+		!walkCorridor(m.world, m.collisions, x, y, z, tx, ty, tz, wp.Sneaking, cfg) {
+		m.rejectEdge(m.pathIndex)
+		return
+	}
+	if m.handleDoor(wp, x, z) {
+		return
+	}
+	if wp.Jump {
+		m.followJump(wp, x, y, z, onGround, cfg)
+		m.detectStuck(math.Hypot(tx-x, tz-z))
+		return
+	}
+	tx, ty, tz = m.extendLookahead(wp, x, y, z, tx, ty, tz, cfg)
+	m.steer(m.path[m.pathIndex], x, y, z, tx, ty, tz, vx, vz, onGround, cfg)
+	m.detectStuck(math.Hypot(tx-x, tz-z))
+}
+
+// handleCorrection reacts to a server teleport, which invalidates the planner's
+// start and any in-flight jump. It reports whether navigation ended.
+func (m *Module) handleCorrection() bool {
+	if !m.corrected.Swap(false) {
+		return false
+	}
+	m.invalidatePlan()
+	m.failures++
+	if m.failures > 8 {
+		m.completeNavigation(false)
+		return true
+	}
+	return false
+}
+
+// advanceReachedWaypoints passes every waypoint the player has settled on. It
+// reports false when the tick is over (an edge was rejected, the segment ended
+// or navigation completed) and true when m.path[m.pathIndex] should be steered to.
+func (m *Module) advanceReachedWaypoints(x, y, z, vx, vz float64, onGround bool, cfg simulationConfig) bool {
 	for {
 		wp := m.path[m.pathIndex]
 		if wp.InteractDoor && m.handleDoor(wp, x, z) {
-			return
+			return false
 		}
 		last := m.pathIndex == len(m.path)-1
 		tx, ty, tz := m.waypointTarget(wp, last, cfg)
@@ -357,9 +382,9 @@ func (m *Module) navigationTick() {
 			m.jumpStarted, m.jumpAirborne = false, false
 			arrival = waypointReached(wp, last, distance, ty-y)
 		}
-		needsStop := last || m.pathIndex+1 < len(m.path) && m.path[m.pathIndex+1].Jump
+		needsStop := last || m.path[m.pathIndex+1].Jump
 		if !arrival || !onGround || needsStop && math.Hypot(vx, vz) > 0.025 {
-			break
+			return true
 		}
 		if !last && !wp.Jump && !m.path[m.pathIndex+1].Jump && !m.path[m.pathIndex+1].InteractDoor {
 			next := m.path[m.pathIndex+1]
@@ -369,34 +394,20 @@ func (m *Module) navigationTick() {
 					// We already reached this waypoint. It is the outgoing
 					// edge that failed, not the edge that brought us here.
 					m.rejectEdge(m.pathIndex + 1)
-					return
+					return false
 				}
-				break
+				return true
 			}
 		}
 		if !m.advanceWaypoint() {
-			return
+			return false
 		}
 	}
-	wp := m.path[m.pathIndex]
-	last := m.pathIndex == len(m.path)-1
-	tx, ty, tz := m.waypointTarget(wp, last, cfg)
-	if !wp.Jump && !wp.InteractDoor && math.Abs(ty-y) < 0.08 &&
-		!walkCorridor(m.world, m.collisions, x, y, z, tx, ty, tz, wp.Sneaking, cfg) {
-		m.rejectEdge(m.pathIndex)
-		return
-	}
-	distance := math.Hypot(tx-x, tz-z)
-	if m.handleDoor(wp, x, z) {
-		return
-	}
+}
 
-	if wp.Jump {
-		m.followJump(wp, x, y, z, onGround, cfg)
-		m.detectStuck(distance)
-		return
-	}
-	// Look ahead only over ordinary, same-height supported swept corridors.
+// extendLookahead skips up to four waypoints ahead over ordinary, same-height
+// supported swept corridors, returning the furthest directly walkable target.
+func (m *Module) extendLookahead(wp Waypoint, x, y, z, tx, ty, tz float64, cfg simulationConfig) (float64, float64, float64) {
 	lookahead := m.pathIndex
 	for i := m.pathIndex + 1; i < len(m.path) && i <= m.pathIndex+4; i++ {
 		next, prev := m.path[i], m.path[i-1]
@@ -416,15 +427,18 @@ func (m *Module) navigationTick() {
 	if lookahead > m.pathIndex {
 		m.pathIndex = lookahead
 		m.resetWaypoint()
-		wp = m.path[m.pathIndex]
-		distance = math.Hypot(tx-x, tz-z)
 	}
+	return tx, ty, tz
+}
+
+// steer sets sneak/sprint and the movement input that carries the player
+// toward (tx, ty, tz) on waypoint wp.
+func (m *Module) steer(wp Waypoint, x, y, z, tx, ty, tz, vx, vz float64, onGround bool, cfg simulationConfig) {
 	sneaking := m.savedSneaking || wp.Sneaking
 	m.self.SetSneaking(sneaking)
-	steerDistance := math.Hypot(tx-x, tz-z)
-	sprinting := !sneaking && steerDistance > 2.5 && math.Abs(ty-y) < 0.08
+	sprinting := !sneaking && math.Hypot(tx-x, tz-z) > 2.5 && math.Abs(ty-y) < 0.08
 	m.self.SetSprinting(sprinting)
-	friction := physics.ModifiedFriction(physics.GetBlockFrictionAt(m.world, x, y, z, cfg.width), cfg.frictionModifier)
+	friction := physics.ModifiedFriction(physics.BlockFrictionAt(m.world, x, y, z, cfg.width), cfg.frictionModifier)
 	drag := friction * physics.ModifiedFriction(physics.AirFrictionMul, cfg.airDragModifier)
 	accel := physics.GroundAcceleration(m.self.MovementSpeed(sprinting), friction) * 0.98
 	if sneaking {
@@ -443,11 +457,10 @@ func (m *Module) navigationTick() {
 	// Invert LocalPlayer.modifyInput's square-to-circle length adjustment;
 	// the controller already requested a world-space acceleration magnitude.
 	if length := math.Hypot(forward, strafe); length > 0 {
-		factor := math.Max(math.Abs(forward), math.Abs(strafe)) / length
+		factor := max(math.Abs(forward), math.Abs(strafe)) / length
 		forward, strafe = forward*factor, strafe*factor
 	}
 	m.physics.SetInput(forward, strafe, false)
-	m.detectStuck(distance)
 }
 
 // steeringInput controls desired displacement, subtracting carried velocity.
@@ -458,9 +471,9 @@ func steeringInput(dx, dz, vx, vz, acceleration, drag float64) (float64, float64
 	if acceleration <= 0 {
 		return 0, 0
 	}
-	maxSpeed := math.Min(0.28, acceleration/math.Max(0.02, 1-drag))
+	maxSpeed := min(0.28, acceleration/max(0.02, 1-drag))
 	// A proportional approach is critically damped by the velocity subtraction;
-	speed := math.Min(maxSpeed, math.Min(distance*0.45, math.Sqrt(2*acceleration*distance)*0.65))
+	speed := min(maxSpeed, distance*0.45, math.Sqrt(2*acceleration*distance)*0.65)
 	wantX, wantZ := 0.0, 0.0
 	if distance > 1e-8 {
 		wantX, wantZ = dx/distance*speed, dz/distance*speed
@@ -547,20 +560,20 @@ func (m *Module) advanceWaypoint() bool {
 	m.resetWaypoint()
 	return true
 }
-func (m *Module) waypointTarget(wp PathNode, last bool, cfg simulationConfig) (float64, float64, float64) {
+func (m *Module) waypointTarget(wp Waypoint, last bool, cfg simulationConfig) (float64, float64, float64) {
 	if last && m.segmentFinal {
 		return m.goalX, waypointTargetY(m.collisions, wp, cfg), m.goalZ
 	}
 	return float64(wp.X) + 0.5, waypointTargetY(m.collisions, wp, cfg), float64(wp.Z) + 0.5
 }
-func waypointReached(wp PathNode, last bool, distance, dy float64) bool {
+func waypointReached(wp Waypoint, last bool, distance, dy float64) bool {
 	tolerance := 0.3
 	if last {
 		tolerance = 0.12
 	}
 	return distance < tolerance && math.Abs(dy) < 0.08
 }
-func waypointTargetY(col *collisions.Module, wp PathNode, cfg simulationConfig) float64 {
+func waypointTargetY(col *collisions.Module, wp Waypoint, cfg simulationConfig) float64 {
 	if col != nil {
 		return nodeSurfaceY(col, wp.X, wp.Y, wp.Z, cfg)
 	}
@@ -590,7 +603,7 @@ func (m *Module) handleObstructions(cfg simulationConfig) bool {
 					height = cfg.sneakingHeight
 				}
 				srcY := nodeSurfaceY(m.collisions, prev.X, prev.Y, prev.Z, cfg)
-				blocked = !canPassBetween(m.world, m.collisions, prev.X, prev.Z, n.X, n.Z, srcY, math.Max(srcY, destY), height, cfg)
+				blocked = !canPassBetween(m.world, m.collisions, prev.X, prev.Z, n.X, n.Z, srcY, max(srcY, destY), height, cfg)
 			}
 		}
 		if blocked {
@@ -600,7 +613,7 @@ func (m *Module) handleObstructions(cfg simulationConfig) bool {
 	}
 	return false
 }
-func (m *Module) handleDoor(wp PathNode, x, z float64) bool {
+func (m *Module) handleDoor(wp Waypoint, x, z float64) bool {
 	if !wp.InteractDoor {
 		return false
 	}
@@ -631,7 +644,7 @@ func (m *Module) handleDoor(wp PathNode, x, z float64) bool {
 	m.doorOpened = true
 	return true
 }
-func (m *Module) followJump(wp PathNode, x, y, z float64, onGround bool, cfg simulationConfig) {
+func (m *Module) followJump(wp Waypoint, x, y, z float64, onGround bool, cfg simulationConfig) {
 	if !m.jumpStarted {
 		// Re-simulate from the actual settled takeoff, not the nominal center.
 		vx, _, vz := m.physics.Velocity()
@@ -680,7 +693,7 @@ func (m *Module) rejectEdge(index int) {
 	if index < len(m.path) {
 		to := m.path[index]
 		x, y, z := m.self.Position()
-		from := PathNode{X: int(math.Floor(x)), Y: int(math.Floor(y)), Z: int(math.Floor(z))}
+		from := Waypoint{X: int(math.Floor(x)), Y: int(math.Floor(y)), Z: int(math.Floor(z))}
 		if index > 0 {
 			from = m.path[index-1]
 		}
@@ -712,7 +725,7 @@ func (m *Module) completeNavigation(reached bool) {
 	m.self.SetSprinting(m.savedSprinting)
 	m.self.SetSneaking(m.savedSneaking)
 	// Callbacks must be able to call IsNavigating/Stop without deadlocking.
-	callbacks := append([]func(bool){}, m.onNavigationComplete...)
+	callbacks := slices.Clone(m.onNavigationComplete)
 	m.mu.Unlock()
 	for _, cb := range callbacks {
 		cb(reached)

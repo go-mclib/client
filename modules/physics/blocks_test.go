@@ -11,14 +11,14 @@ import (
 	"github.com/go-mclib/data/blocks"
 	"github.com/go-mclib/data/chunks"
 	"github.com/go-mclib/data/packets"
-	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	jp "github.com/go-mclib/protocol/javaproto"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 func TestWebConsumesNextMoveAndClearsMomentum(t *testing.T) {
 	m := New()
 	s := self.New()
-	web := blocks.DefaultStateID(blocks.BlockID("minecraft:cobweb"))
+	web := blocks.DefaultStateID(blocks.ID("minecraft:cobweb"))
 	m.velX, m.velY, m.velZ = 1, -0.4, 0.5
 	m.applyInsideBlock(s, web, [3]int{}, [3]float64{}, true)
 	if m.velX != 1 || m.velY != -0.4 || m.velZ != 0.5 {
@@ -39,16 +39,16 @@ func TestWebConsumesNextMoveAndClearsMomentum(t *testing.T) {
 
 func TestWeavingChangesWebEscapeMovement(t *testing.T) {
 	c := client.New("", "weaving-test", false)
-	c.SetState(jp.StatePlay)
+	client.NewSimulator(c).SetState(jp.StatePlay)
 	s := self.New()
 	c.Register(s)
-	pkt, err := jp.ToWire(&packets.S2CUpdateMobEffect{EntityId: ns.VarInt(s.EntityID()), EffectId: ns.VarInt(effectWeaving), Amplifier: 0, Duration: 200})
+	pkt, err := jp.ToWire(&packets.S2CUpdateMobEffect{EntityID: ns.VarInt(s.EntityID()), EffectID: ns.VarInt(effectWeaving), Amplifier: 0, Duration: 200})
 	if err != nil {
 		t.Fatal(err)
 	}
 	s.HandlePacket(pkt)
 	m := New()
-	m.applyInsideBlock(s, blocks.DefaultStateID(blocks.BlockID("minecraft:cobweb")), [3]int{}, [3]float64{}, true)
+	m.applyInsideBlock(s, blocks.DefaultStateID(blocks.ID("minecraft:cobweb")), [3]int{}, [3]float64{}, true)
 	dx, dy, dz := m.consumeStuckMovement(1, -1, 1)
 	if dx != 0.5 || dy != -0.25 || dz != 0.5 {
 		t.Fatalf("weaving escape move = (%g,%g,%g)", dx, dy, dz)
@@ -57,7 +57,7 @@ func TestWeavingChangesWebEscapeMovement(t *testing.T) {
 
 func TestCreativeFlightIgnoresStuckBlocksAndBubbles(t *testing.T) {
 	c := client.New("", "flying-block-test", false)
-	c.SetState(jp.StatePlay)
+	client.NewSimulator(c).SetState(jp.StatePlay)
 	s := self.New()
 	c.Register(s)
 	abilities, err := jp.ToWire(&packets.S2CPlayerAbilities{Flags: 2, FlyingSpeed: 0.05})
@@ -70,7 +70,7 @@ func TestCreativeFlightIgnoresStuckBlocksAndBubbles(t *testing.T) {
 			m := New()
 			m.velX, m.velY, m.velZ, m.fallDistance = 0.2, -0.1, 0.3, 4
 			m.world = blockTestWorld(t, map[[3]int]string{{0, 0, 0}: name})
-			m.applyInsideBlock(s, blocks.DefaultStateID(blocks.BlockID(name)), [3]int{}, [3]float64{0.5, 0, 0.5}, true)
+			m.applyInsideBlock(s, blocks.DefaultStateID(blocks.ID(name)), [3]int{}, [3]float64{0.5, 0, 0.5}, true)
 			dx, dy, dz := m.consumeStuckMovement(m.velX, m.velY, m.velZ)
 			if dx != 0.2 || dy != -0.1 || dz != 0.3 || m.velX != 0.2 || m.velY != -0.1 || m.velZ != 0.3 || m.fallDistance != 4 {
 				t.Fatalf("flight movement changed: (%g,%g,%g), velocity (%g,%g,%g), fall %g", dx, dy, dz, m.velX, m.velY, m.velZ, m.fallDistance)
@@ -169,7 +169,7 @@ func TestBubbleColumnSurfaceChangesTerminalVelocity(t *testing.T) {
 	if got := bubbleColumnVelocity(1.75, false, true); got != 1.8 {
 		t.Fatalf("surface soul-sand upflow = %g", got)
 	}
-	if movementEffectBlock(blocks.DefaultStateID(blocks.BlockID("minecraft:magma_block"))) {
+	if movementEffectBlock(blocks.DefaultStateID(blocks.ID("minecraft:magma_block"))) {
 		t.Fatal("solid magma was treated as a client-side motion effect")
 	}
 }
@@ -178,7 +178,7 @@ func blockTestWorld(t *testing.T, cells map[[3]int]string) *world.Module {
 	t.Helper()
 	column := chunks.NewColumn(0, 0)
 	for pos, name := range cells {
-		column.SetBlockState(pos[0], pos[1], pos[2], blocks.DefaultStateID(blocks.BlockID(name)))
+		column.SetBlockState(pos[0], pos[1], pos[2], blocks.DefaultStateID(blocks.ID(name)))
 	}
 	data, err := column.EncodeSections()
 	if err != nil {
@@ -189,7 +189,7 @@ func blockTestWorld(t *testing.T, cells map[[3]int]string) *world.Module {
 		t.Fatal(err)
 	}
 	c := client.New("", "block-test", false)
-	c.SetState(jp.StatePlay)
+	client.NewSimulator(c).SetState(jp.StatePlay)
 	w := world.New()
 	c.Register(w)
 	w.HandlePacket(packet)

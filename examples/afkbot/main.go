@@ -3,16 +3,16 @@ package main
 import (
 	"flag"
 
-	"github.com/go-mclib/client/helpers"
+	"github.com/go-mclib/client/botcli"
 )
 
 func main() {
-	var f helpers.Flags
-	helpers.RegisterFlags(&f)
+	var f botcli.Flags
+	botcli.RegisterFlags(&f)
 	flag.Parse()
 
 	f.MaxReconnectAttempts = -1
 
-	c := helpers.NewClient(f)
-	helpers.Run(c)
+	c := botcli.NewClient(f)
+	botcli.Run(c, f)
 }

@@ -145,9 +145,9 @@ func visitDirectionalCells(low, high [3]float64, movingAxis int, delta float64, 
 			step[axis] = -1
 		}
 	}
-	for first := 0; first <= count[axes[0]]; first++ {
-		for second := 0; second <= count[axes[1]]; second++ {
-			for third := 0; third <= count[axes[2]]; third++ {
+	for first := range count[axes[0]] + 1 {
+		for second := range count[axes[1]] + 1 {
+			for third := range count[axes[2]] + 1 {
 				pos := start
 				pos[axes[0]] += first * step[axes[0]]
 				pos[axes[1]] += second * step[axes[1]]

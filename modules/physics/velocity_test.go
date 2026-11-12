@@ -6,15 +6,15 @@ import (
 
 	"github.com/go-mclib/client/modules/self"
 	"github.com/go-mclib/data/packets"
-	jp "github.com/go-mclib/protocol/java_protocol"
-	ns "github.com/go-mclib/protocol/java_protocol/net_structures"
+	jp "github.com/go-mclib/protocol/javaproto"
+	ns "github.com/go-mclib/protocol/javaproto/wire"
 )
 
 func TestServerVelocityLengthIsCapped(t *testing.T) {
 	m := New()
 	m.self = self.New()
 	// knockback 255 with a huge attack_knockback, near LpVec3's 1.7e10 limit
-	wire, err := jp.ToWire(&packets.S2CSetEntityMotion{EntityId: ns.VarInt(m.self.EntityID()), Velocity: ns.LpVec3{X: 1.7e10, Y: 4e9, Z: -9e9}})
+	wire, err := jp.ToWire(&packets.S2CSetEntityMotion{EntityID: ns.VarInt(m.self.EntityID()), Velocity: ns.LpVec3{X: 1.7e10, Y: 4e9, Z: -9e9}})
 	if err != nil {
 		t.Fatal(err)
 	}
